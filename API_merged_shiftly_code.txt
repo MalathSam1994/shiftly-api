@@ -1,0 +1,1254 @@
+===== createCrudRouter.js =====
+// createCrudRouter.js
+const express = require('express');
+const pool = require('./db');
+
+/**
+ * config = {
+ *   table: 'shiftly_schema.tree_menu',
+ *   idColumn: 'screen_id',
+ *   columns: ['parent_id','screen_type','screen_file_name','menu_label']
+ * }
+ */
+function createCrudRouter(config) {
+  const router = express.Router();
+
+  const allColumns = [config.idColumn, ...config.columns];
+
+  // GET / -> list all rows
+  router.get('/', async (req, res) => {
+    try {
+      const query = `
+        SELECT ${allColumns.join(', ')}
+        FROM ${config.table}
+        ORDER BY ${config.idColumn}
+      `;
+      const result = await pool.query(query);
+      res.json(result.rows);
+    } catch (err) {
+      console.error('Error querying DB (LIST):', err);
+      res.status(500).json({ error: 'Database error' });
+    }
+  });
+
+  // GET /:id -> single row
+  router.get('/:id', async (req, res) => {
+    try {
+      const query = `
+        SELECT ${allColumns.join(', ')}
+        FROM ${config.table}
+        WHERE ${config.idColumn} = $1
+      `;
+      const result = await pool.query(query, [req.params.id]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.error('Error querying DB (GET BY ID):', err);
+      res.status(500).json({ error: 'Database error' });
+    }
+  });
+
+  // POST / -> insert (any subset of allowed columns)
+  router.post('/', async (req, res) => {
+    try {
+      const cols = [];
+      const placeholders = [];
+      const values = [];
+      let i = 1;
+
+      for (const col of config.columns) {
+        if (Object.prototype.hasOwnProperty.call(req.body, col)) {
+          cols.push(col);
+          placeholders.push(`$${i}`);
+          values.push(req.body[col]);
+          i++;
+        }
+      }
+
+      if (cols.length === 0) {
+        return res
+          .status(400)
+          .json({ error: 'No valid columns provided for insert' });
+      }
+
+      const query = `
+        INSERT INTO ${config.table} (${cols.join(', ')})
+        VALUES (${placeholders.join(', ')})
+        RETURNING ${allColumns.join(', ')}
+      `;
+
+      const result = await pool.query(query, values);
+      res.status(201).json(result.rows[0]);
+    } catch (err) {
+      console.error('Error inserting into DB (CREATE):', err);
+      res.status(500).json({ error: 'Database error' });
+    }
+  });
+
+  // PUT /:id -> update (any subset of allowed columns)
+  router.put('/:id', async (req, res) => {
+    try {
+      const sets = [];
+      const values = [];
+      let i = 1;
+
+      for (const col of config.columns) {
+        if (Object.prototype.hasOwnProperty.call(req.body, col)) {
+          sets.push(`${col} = $${i}`);
+          values.push(req.body[col]);
+          i++;
+        }
+      }
+
+      if (sets.length === 0) {
+        return res
+          .status(400)
+          .json({ error: 'No valid columns provided for update' });
+      }
+
+      values.push(req.params.id);
+      const query = `
+        UPDATE ${config.table}
+        SET ${sets.join(', ')}
+        WHERE ${config.idColumn} = $${i}
+        RETURNING ${allColumns.join(', ')}
+      `;
+
+      const result = await pool.query(query, values);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      res.json(result.rows[0]);
+    } catch (err) {
+      console.error('Error updating DB (UPDATE):', err);
+      res.status(500).json({ error: 'Database error' });
+    }
+  });
+
+  // DELETE /:id
+  router.delete('/:id', async (req, res) => {
+    try {
+      const query = `
+        DELETE FROM ${config.table}
+        WHERE ${config.idColumn} = $1
+        RETURNING ${allColumns.join(', ')}
+      `;
+      const result = await pool.query(query, [req.params.id]);
+
+      if (result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      res.json({ deleted: result.rows[0] });
+    } catch (err) {
+      console.error('Error deleting from DB (DELETE):', err);
+      res.status(500).json({ error: 'Database error' });
+    }
+  });
+
+  return router;
+}
+
+module.exports = createCrudRouter;
+
+
+
+===== db.js =====
+// db.js
+const { Pool } = require('pg');
+require('dotenv').config(); // ensures env vars are loaded if used directly
+
+const pool = new Pool({
+  host: process.env.PGHOST,
+  port: process.env.PGPORT,
+  user: process.env.PGUSER,
+  password: process.env.PGPASSWORD,
+  database: process.env.PGDATABASE,
+});
+
+module.exports = pool;
+
+
+
+===== index.js =====
+// index.js
+const express = require('express');
+const cors = require('cors');
+require('dotenv').config();
+
+const treeMenuRouter = require('./routes/treeMenu');
+const itemsRouter = require('./routes/items');
+const departmentsRouter = require('./routes/departments');
+const usersRouter = require('./routes/users');
+const userDepartmentsRouter = require('./routes/userDepartments');
+const authRouter = require('./routes/auth');
+
+// new routes
+const staffTypesRouter = require('./routes/staffTypes');
+const shiftTypesRouter = require('./routes/shiftTypes');
+const staffShiftRulesRouter = require('./routes/staffShiftRules');
+const userManagersRouter = require('./routes/userManagers');
+const shiftTemplatesRouter = require('./routes/shiftTemplates');
+const shiftTemplateEntriesRouter = require('./routes/shiftTemplateEntries');
+const shiftPeriodsRouter = require('./routes/shiftPeriods');
+const shiftAssignmentsRouter = require('./routes/shiftAssignments');
+const shiftRequestsRouter = require('./routes/shiftRequests');
+
+const app = express();
+const port = process.env.API_PORT || 3000;
+
+app.use(cors());
+app.use(express.json());
+
+app.get('/', (req, res) => {
+  res.json({ message: 'API is working ✅' });
+});
+
+app.use('/auth', authRouter);
+
+app.use('/tree-menu', treeMenuRouter);
+app.use('/items', itemsRouter);
+app.use('/departments', departmentsRouter);
+app.use('/users', usersRouter);
+app.use('/user-departments', userDepartmentsRouter);
+
+// new mounts
+app.use('/staff-types', staffTypesRouter);
+app.use('/shift-types', shiftTypesRouter);
+app.use('/staff-shift-rules', staffShiftRulesRouter);
+app.use('/user-managers', userManagersRouter);
+app.use('/shift-templates', shiftTemplatesRouter);
+app.use('/shift-template-entries', shiftTemplateEntriesRouter);
+app.use('/shift-periods', shiftPeriodsRouter);
+app.use('/shift-assignments', shiftAssignmentsRouter);
+app.use('/shift-requests', shiftRequestsRouter);
+
+app.listen(port, () => {
+  console.log(`API listening on port ${port}`);
+});
+
+module.exports = app;
+
+
+
+===== ROUTES FOLDER FILES =====
+===== routes/auth.js =====
+// routes/auth.js
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const pool = require('../db');
+
+const router = express.Router();
+
+// Login endpoint: username = empno
+router.post('/login', async (req, res) => {
+  const { username, password } = req.body;
+
+  if (!username || !password) {
+    return res
+      .status(400)
+      .json({ error: 'Username and password are required.' });
+  }
+
+  try {
+    const query = `
+      SELECT id,
+             empno,
+             user_name,
+             user_desc,
+             user_type,
+             role_id,
+             password_hash
+      FROM shiftly_schema.users
+      WHERE empno = $1
+    `;
+    const result = await pool.query(query, [username]);
+
+    if (result.rows.length === 0) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
+
+    const user = result.rows[0];
+
+    const passwordMatches = await bcrypt.compare(
+      password,
+      user.password_hash
+    );
+
+    if (!passwordMatches) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
+
+    // Do not send password_hash back to the client
+    const { password_hash, ...safeUser } = user;
+
+    return res.json(safeUser);
+  } catch (err) {
+    console.error('Error during login:', err);
+    return res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// Change password endpoint
+router.post('/change-password', async (req, res) => {
+  const { userId, currentPassword, newPassword } = req.body;
+
+  if (!userId || !currentPassword || !newPassword) {
+    return res
+      .status(400)
+      .json({ error: 'userId, currentPassword and newPassword are required.' });
+  }
+
+  if (newPassword.length < 8) {
+    return res.status(400).json({
+      error: 'New password must be at least 8 characters long.',
+    });
+  }
+
+  try {
+    const selectQuery = `
+      SELECT id, password_hash
+      FROM shiftly_schema.users
+      WHERE id = $1
+    `;
+    const selectResult = await pool.query(selectQuery, [userId]);
+
+    if (selectResult.rows.length === 0) {
+      return res.status(404).json({ error: 'User not found.' });
+    }
+
+    const user = selectResult.rows[0];
+
+    const matches = await bcrypt.compare(
+      currentPassword,
+      user.password_hash
+    );
+
+    if (!matches) {
+      return res
+        .status(401)
+        .json({ error: 'Current password is incorrect.' });
+    }
+
+    const newHash = await bcrypt.hash(newPassword, 10);
+
+    const updateQuery = `
+      UPDATE shiftly_schema.users
+      SET password_hash = $1
+      WHERE id = $2
+    `;
+    await pool.query(updateQuery, [newHash, userId]);
+
+    return res.json({ message: 'Password updated successfully.' });
+  } catch (err) {
+    console.error('Error changing password:', err);
+    return res.status(500).json({ error: 'Database error' });
+  }
+});
+
+module.exports = router;
+
+
+
+===== routes/departments.js =====
+const createCrudRouter = require('../createCrudRouter');
+
+const departmentsConfig = {
+  table: 'shiftly_schema.departments',
+  idColumn: 'id',
+  columns: ['department_desc'],
+};
+
+module.exports = createCrudRouter(departmentsConfig);
+
+
+
+===== routes/items.js =====
+// routes/items.js
+const express = require('express');
+const pool = require('../db');
+
+const router = express.Router();
+
+// Existing items route (simple example)
+router.get('/', async (req, res) => {
+  try {
+    const result = await pool.query(
+      'SELECT id, name FROM items ORDER BY id'
+    );
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error querying DB (ITEMS LIST):', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+module.exports = router;
+
+
+
+===== routes/shiftAssignments.js =====
+// routes/shiftAssignments.js
+const createCrudRouter = require('../createCrudRouter');
+
+const shiftAssignmentsConfig = {
+  table: 'shiftly_schema.shift_assignments',
+  idColumn: 'id',
+  columns: [
+    'shift_period_id',
+    'shift_date',
+    'department_id',
+    'user_id',
+    'staff_type_id',
+    'shift_type_id',
+    'source_type',
+    'status',
+    'status_comment',
+    'created_at',
+    'updated_at',
+  ],
+};
+
+module.exports = createCrudRouter(shiftAssignmentsConfig);
+
+
+
+===== routes/shiftPeriods.js =====
+// routes/shiftPeriods.js
+const createCrudRouter = require('../createCrudRouter');
+
+const shiftPeriodsConfig = {
+  table: 'shiftly_schema.shift_periods',
+  idColumn: 'id',
+  columns: [
+    'period_type',
+    'start_date',
+    'end_date',
+    'template_id',
+    'generated_at',
+    'generated_by_user_id',
+    'status',
+    'description',
+  ],
+};
+
+module.exports = createCrudRouter(shiftPeriodsConfig);
+
+
+
+===== routes/shiftRequests.js =====
+// routes/shiftRequests.js
+const express = require('express');
+const pool = require('../db');
+
+const router = express.Router();
+
+/**
+ * GET /shift-requests
+ * Optional query parameters:
+ *   - managerUserId
+ *   - requestedByUserId
+ *   - requestStatus
+ */
+router.get('/', async (req, res) => {
+  try {
+    const { managerUserId, requestedByUserId, requestStatus } = req.query;
+    const conditions = [];
+    const values = [];
+    let index = 1;
+
+    if (managerUserId) {
+      conditions.push(`manager_user_id = $${index}`);
+      values.push(managerUserId);
+      index += 1;
+    }
+
+    if (requestedByUserId) {
+      conditions.push(`requested_by_user_id = $${index}`);
+      values.push(requestedByUserId);
+      index += 1;
+    }
+
+    if (requestStatus) {
+      conditions.push(`request_status = $${index}`);
+      values.push(requestStatus);
+      index += 1;
+    }
+
+    let query = `
+      SELECT
+        id,
+        request_type,
+        request_status,
+        requested_by_user_id,
+        target_user_id,
+        manager_user_id,
+        shift_assignment_id,
+        requested_shift_date,
+        requested_shift_type_id,
+        requested_department_id,
+        created_at,
+        decided_at,
+        decision_by_user_id,
+        decision_comment
+      FROM shiftly_schema.shift_requests
+    `;
+
+    if (conditions.length > 0) {
+      query += ` WHERE ${conditions.join(' AND ')}`;
+    }
+
+    query += ' ORDER BY created_at DESC';
+
+    const result = await pool.query(query, values);
+    res.json(result.rows);
+  } catch (error) {
+    console.error('Error querying shift_requests:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+/**
+ * POST /shift-requests
+ * Body: {
+ *   request_type,
+ *   requested_by_user_id,
+ *   target_user_id,
+ *   manager_user_id,
+ *   shift_assignment_id,
+ *   requested_shift_date,
+ *   requested_shift_type_id,
+ *   requested_department_id,
+ *   decision_comment (optional)
+ * }
+ */
+router.post('/', async (req, res) => {
+  try {
+    const {
+      request_type,
+      requested_by_user_id,
+      target_user_id,
+      manager_user_id,
+      shift_assignment_id,
+      requested_shift_date,
+      requested_shift_type_id,
+      requested_department_id,
+      decision_comment,
+    } = req.body;
+
+    if (
+      !request_type ||
+      !requested_by_user_id ||
+      !requested_shift_date ||
+      !requested_shift_type_id ||
+      !requested_department_id
+    ) {
+      return res.status(400).json({
+        error:
+          'request_type, requested_by_user_id, requested_shift_date, requested_shift_type_id and requested_department_id are required.',
+      });
+    }
+
+    const query = `
+      INSERT INTO shiftly_schema.shift_requests
+      (
+        request_type,
+        request_status,
+        requested_by_user_id,
+        target_user_id,
+        manager_user_id,
+        shift_assignment_id,
+        requested_shift_date,
+        requested_shift_type_id,
+        requested_department_id,
+        created_at,
+        decision_comment
+      )
+      VALUES
+      (
+        $1,
+        'PENDING',
+        $2,
+        $3,
+        $4,
+        $5,
+        $6,
+        $7,
+        $8,
+        NOW(),
+        $9
+      )
+      RETURNING
+        id,
+        request_type,
+        request_status,
+        requested_by_user_id,
+        target_user_id,
+        manager_user_id,
+        shift_assignment_id,
+        requested_shift_date,
+        requested_shift_type_id,
+        requested_department_id,
+        created_at,
+        decided_at,
+        decision_by_user_id,
+        decision_comment
+    `;
+
+    const values = [
+      request_type,
+      requested_by_user_id,
+      target_user_id ?? null,
+      manager_user_id ?? null,
+      shift_assignment_id ?? null,
+      requested_shift_date,
+      requested_shift_type_id,
+      requested_department_id,
+      decision_comment ?? null,
+    ];
+
+    const result = await pool.query(query, values);
+    res.status(201).json(result.rows[0]);
+  } catch (error) {
+    console.error('Error inserting into shift_requests:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+/**
+ * Helper to find a shift_period that covers the given date.
+ */
+async function findShiftPeriodIdForDate(client, shiftDate) {
+  const query = `
+    SELECT id
+    FROM shiftly_schema.shift_periods
+    WHERE $1 BETWEEN start_date AND end_date
+    ORDER BY start_date
+    LIMIT 1
+  `;
+  const result = await client.query(query, [shiftDate]);
+  if (result.rows.length === 0) {
+    return null;
+  }
+
+  return result.rows[0].id;
+}
+
+/**
+ * POST /shift-requests/:id/approve
+ * Body:
+ *   decision_by_user_id
+ *   decision_comment (optional)
+ *
+ * Effects:
+ *   NEW_SHIFT -> create shift_assignments row
+ *   OFFER     -> move assignment to target_user_id
+ *   SWITCH    -> swap assignments between users
+ */
+router.post('/:id/approve', async (req, res) => {
+  const { id } = req.params;
+  const { decision_by_user_id, decision_comment } = req.body;
+
+  if (!decision_by_user_id) {
+    return res.status(400).json({
+      error: 'decision_by_user_id is required to approve.',
+    });
+  }
+
+  const client = await pool.connect();
+
+  try {
+    await client.query('BEGIN');
+
+    const selectRequestQuery = `
+      SELECT *
+      FROM shiftly_schema.shift_requests
+      WHERE id = $1
+      FOR UPDATE
+    `;
+    const requestResult = await client.query(selectRequestQuery, [id]);
+
+    if (requestResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Request not found.' });
+    }
+
+    const request = requestResult.rows[0];
+
+    if (request.request_status !== 'PENDING') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `Request is already ${request.request_status}.`,
+      });
+    }
+
+    const requestType = request.request_type;
+    const requestedByUserId = request.requested_by_user_id;
+    const targetUserId = request.target_user_id;
+    const shiftAssignmentId = request.shift_assignment_id;
+    const shiftDate = request.requested_shift_date;
+    const shiftTypeId = request.requested_shift_type_id;
+    const departmentId = request.requested_department_id;
+
+    if (requestType === 'NEW_SHIFT') {
+      const periodId = await findShiftPeriodIdForDate(client, shiftDate);
+
+      if (!periodId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: `No shift_period found that covers date ${shiftDate}.`,
+        });
+      }
+
+      const insertAssignmentQuery = `
+        INSERT INTO shiftly_schema.shift_assignments
+        (
+          shift_period_id,
+          shift_date,
+          department_id,
+          user_id,
+          staff_type_id,
+          shift_type_id,
+          source_type,
+          status,
+          status_comment,
+          created_at,
+          updated_at
+        )
+        VALUES
+        (
+          $1,
+          $2,
+          $3,
+          $4,
+          NULL,
+          $5,
+          'REQUEST',
+          'APPROVED',
+          'Approved NEW_SHIFT request',
+          NOW(),
+          NOW()
+        )
+        RETURNING *
+      `;
+      await client.query(insertAssignmentQuery, [
+        periodId,
+        shiftDate,
+        departmentId,
+        requestedByUserId,
+        shiftTypeId,
+      ]);
+    } else if (requestType === 'OFFER') {
+      if (!shiftAssignmentId || !targetUserId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error:
+            'OFFER request requires shift_assignment_id and target_user_id.',
+        });
+      }
+
+      const updateOfferQuery = `
+        UPDATE shiftly_schema.shift_assignments
+        SET user_id = $1,
+            status = 'APPROVED',
+            status_comment = 'Approved OFFER request',
+            updated_at = NOW()
+        WHERE id = $2
+      `;
+      await client.query(updateOfferQuery, [targetUserId, shiftAssignmentId]);
+    } else if (requestType === 'SWITCH') {
+      if (!shiftAssignmentId || !targetUserId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error:
+            'SWITCH request requires shift_assignment_id and target_user_id.',
+        });
+      }
+
+      const selectCurrentAssignmentQuery = `
+        SELECT *
+        FROM shiftly_schema.shift_assignments
+        WHERE id = $1
+        FOR UPDATE
+      `;
+      const currentResult = await client.query(
+        selectCurrentAssignmentQuery,
+        [shiftAssignmentId],
+      );
+
+      if (currentResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({
+          error: 'Shift assignment for request not found.',
+        });
+      }
+
+      const currentAssignment = currentResult.rows[0];
+
+      const selectTargetAssignmentQuery = `
+        SELECT *
+        FROM shiftly_schema.shift_assignments
+        WHERE shift_date = $1
+          AND department_id = $2
+          AND shift_type_id = $3
+          AND user_id = $4
+        FOR UPDATE
+      `;
+      const targetResult = await client.query(
+        selectTargetAssignmentQuery,
+        [
+          currentAssignment.shift_date,
+          currentAssignment.department_id,
+          currentAssignment.shift_type_id,
+          targetUserId,
+        ],
+      );
+
+      if (targetResult.rows.length === 0) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error:
+            'Target user does not have a matching assignment to switch with.',
+        });
+      }
+
+      const targetAssignment = targetResult.rows[0];
+
+      const updateCurrentUserQuery = `
+        UPDATE shiftly_schema.shift_assignments
+        SET user_id = $1,
+            status = 'APPROVED',
+            status_comment = 'Approved SWITCH request',
+            updated_at = NOW()
+        WHERE id = $2
+      `;
+      await client.query(updateCurrentUserQuery, [
+        targetUserId,
+        currentAssignment.id,
+      ]);
+
+      const updateTargetUserQuery = `
+        UPDATE shiftly_schema.shift_assignments
+        SET user_id = $1,
+            status = 'APPROVED',
+            status_comment = 'Approved SWITCH request',
+            updated_at = NOW()
+        WHERE id = $2
+      `;
+      await client.query(updateTargetUserQuery, [
+        requestedByUserId,
+        targetAssignment.id,
+      ]);
+    }
+
+    const updateRequestQuery = `
+      UPDATE shiftly_schema.shift_requests
+      SET request_status = 'APPROVED',
+          decided_at = NOW(),
+          decision_by_user_id = $1,
+          decision_comment = COALESCE($2, decision_comment)
+      WHERE id = $3
+      RETURNING *
+    `;
+    const updateResult = await client.query(updateRequestQuery, [
+      decision_by_user_id,
+      decision_comment ?? null,
+      id,
+    ]);
+
+    await client.query('COMMIT');
+
+    res.json(updateResult.rows[0]);
+  } catch (error) {
+    await pool.query('ROLLBACK'); // fallback
+    console.error('Error approving shift request:', error);
+    res.status(500).json({ error: 'Database error' });
+  } finally {
+    client.release();
+  }
+});
+
+/**
+ * POST /shift-requests/:id/reject
+ * Body:
+ *   decision_by_user_id
+ *   decision_comment (optional)
+ */
+router.post('/:id/reject', async (req, res) => {
+  const { id } = req.params;
+  const { decision_by_user_id, decision_comment } = req.body;
+
+  if (!decision_by_user_id) {
+    return res.status(400).json({
+      error: 'decision_by_user_id is required to reject.',
+    });
+  }
+
+  try {
+    const query = `
+      UPDATE shiftly_schema.shift_requests
+      SET request_status = 'REJECTED',
+          decided_at = NOW(),
+          decision_by_user_id = $1,
+          decision_comment = COALESCE($2, decision_comment)
+      WHERE id = $3
+      RETURNING *
+    `;
+    const values = [decision_by_user_id, decision_comment ?? null, id];
+
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Request not found.' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (error) {
+    console.error('Error rejecting shift request:', error);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+module.exports = router;
+
+
+
+===== routes/shiftTemplateEntries.js =====
+// routes/shiftTemplateEntries.js
+const createCrudRouter = require('../createCrudRouter');
+
+const shiftTemplateEntriesConfig = {
+  table: 'shiftly_schema.shift_template_entries',
+  idColumn: 'id',
+  columns: [
+    'template_id',
+    'department_id',
+    'staff_type_id',
+    'user_id',
+    'shift_type_id',
+    'day_of_month',
+  ],
+};
+
+module.exports = createCrudRouter(shiftTemplateEntriesConfig);
+
+
+
+===== routes/shiftTemplates.js =====
+// routes/shiftTemplates.js
+const createCrudRouter = require('../createCrudRouter');
+
+const shiftTemplatesConfig = {
+  table: 'shiftly_schema.shift_templates',
+  idColumn: 'id',
+  columns: ['template_name', 'is_active', 'description'],
+};
+
+module.exports = createCrudRouter(shiftTemplatesConfig);
+
+
+
+===== routes/shiftTypes.js =====
+// routes/shiftTypes.js
+const createCrudRouter = require('../createCrudRouter');
+
+const shiftTypesConfig = {
+  table: 'shiftly_schema.shift_types',
+  idColumn: 'id',
+  columns: [
+    'shift_code',
+    'shift_label',
+    'start_time',
+    'end_time',
+    'duration_hours',
+    'day_type',
+    'notes',
+  ],
+};
+
+module.exports = createCrudRouter(shiftTypesConfig);
+
+
+
+===== routes/staffShiftRules.js =====
+// routes/staffShiftRules.js
+const createCrudRouter = require('../createCrudRouter');
+
+const staffShiftRulesConfig = {
+  table: 'shiftly_schema.staff_shift_rules',
+  idColumn: 'id',
+  columns: ['department_id', 'staff_type_id', 'shift_type_id', 'required_staff_count'],
+};
+
+module.exports = createCrudRouter(staffShiftRulesConfig);
+
+
+
+===== routes/staffTypes.js =====
+// routes/staffTypes.js
+const createCrudRouter = require('../createCrudRouter');
+
+const staffTypesConfig = {
+  table: 'shiftly_schema.staff_types',
+  idColumn: 'id',
+  columns: ['staff_type_name'],
+};
+
+module.exports = createCrudRouter(staffTypesConfig);
+
+
+
+===== routes/treeMenu.js =====
+// routes/treeMenu.js
+const createCrudRouter = require('../createCrudRouter');
+
+const treeMenuConfig = {
+  table: 'shiftly_schema.tree_menu',
+  idColumn: 'screen_id',
+  columns: ['parent_id', 'screen_type', 'screen_file_name', 'menu_label'],
+};
+
+module.exports = createCrudRouter(treeMenuConfig);
+
+
+
+===== routes/userDepartments.js =====
+const createCrudRouter = require('../createCrudRouter');
+
+const userDepartmentsConfig = {
+  table: 'shiftly_schema.user_department',
+  idColumn: 'id',
+  columns: ['user_id', 'department_id', 'department_desc'],
+};
+
+module.exports = createCrudRouter(userDepartmentsConfig);
+
+
+
+===== routes/userManagers.js =====
+// routes/userManagers.js
+const createCrudRouter = require('../createCrudRouter');
+
+const userManagersConfig = {
+  table: 'shiftly_schema.user_managers',
+  idColumn: 'id',
+  columns: ['user_id', 'manager_user_id', 'is_primary'],
+};
+
+module.exports = createCrudRouter(userManagersConfig);
+
+
+
+===== routes/users.js =====
+// routes/users.js
+const express = require('express');
+const bcrypt = require('bcryptjs');
+const pool = require('../db');
+
+const router = express.Router();
+
+// GET /users -> list all users (without password_hash)
+router.get('/', async (req, res) => {
+  try {
+    const query = `
+      SELECT id,
+             empno,
+             user_name,
+             user_desc,
+             user_type,
+             role_id,
+			 staff_type_id
+      FROM shiftly_schema.users
+      ORDER BY id
+    `;
+    const result = await pool.query(query);
+    res.json(result.rows);
+  } catch (err) {
+    console.error('Error querying DB (USERS LIST):', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// GET /users/:id -> single user (without password_hash)
+router.get('/:id', async (req, res) => {
+  try {
+    const query = `
+      SELECT id,
+             empno,
+             user_name,
+             user_desc,
+             user_type,
+             role_id,
+			 staff_type_id
+      FROM shiftly_schema.users
+      WHERE id = $1
+    `;
+    const result = await pool.query(query, [req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error querying DB (USERS GET BY ID):', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// POST /users -> create a new user with hashed password
+router.post('/', async (req, res) => {
+  try {
+    const {
+      empno,
+      user_name,
+      user_desc,
+      user_type,
+      role_id,
+	  staff_type_id,
+      password,
+    } = req.body;
+
+    if (!empno || !user_name || !user_type || !password) {
+      return res.status(400).json({
+        error:
+          'empno, user_name, user_type and password are required to create a user.',
+      });
+    }
+
+    if (password.length < 8) {
+      return res.status(400).json({
+        error: 'Password must be at least 8 characters long.',
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const query = `
+      INSERT INTO shiftly_schema.users
+        (empno, user_name, user_desc, user_type, role_id, staff_type_id, password_hash)
+      VALUES
+        ($1,    $2,        $3,        $4,        $5,      $6,      $7)
+      RETURNING id,
+                empno,
+                user_name,
+                user_desc,
+                user_type,
+                role_id,
+				staff_type_id
+    `;
+
+    const values = [
+      empno,
+      user_name,
+      user_desc ?? null,
+      user_type,
+      role_id ?? null,
+	  staff_type_id ?? null,
+      hashedPassword,
+    ];
+
+    const result = await pool.query(query, values);
+    res.status(201).json(result.rows[0]);
+  } catch (err) {
+    console.error('Error inserting into DB (USERS CREATE):', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// PUT /users/:id -> update user data (without changing password)
+router.put('/:id', async (req, res) => {
+  try {
+    const {
+      empno,
+      user_name,
+      user_desc,
+      user_type,
+      role_id,
+	  staff_type_id,
+    } = req.body;
+
+    if (!empno || !user_name || !user_type) {
+      return res.status(400).json({
+        error: 'empno, user_name and user_type are required for update.',
+      });
+    }
+
+    const query = `
+      UPDATE shiftly_schema.users
+      SET empno = $1,
+          user_name = $2,
+          user_desc = $3,
+          user_type = $4,
+          role_id = $5,
+		  staff_type_id = $6
+      WHERE id = $7
+      RETURNING id,
+                empno,
+                user_name,
+                user_desc,
+                user_type,
+                role_id,
+				staff_type_id
+    `;
+
+    const values = [
+      empno,
+      user_name,
+      user_desc ?? null,
+      user_type,
+      role_id ?? null,
+	  staff_type_id ?? null,
+      req.params.id,
+    ];
+
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error updating DB (USERS UPDATE):', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+// DELETE /users/:id -> delete user
+router.delete('/:id', async (req, res) => {
+  try {
+    const query = `
+      DELETE FROM shiftly_schema.users
+      WHERE id = $1
+      RETURNING id,
+                empno,
+                user_name,
+                user_desc,
+                user_type,
+                role_id,
+				staff_type_id
+    `;
+    const result = await pool.query(query, [req.params.id]);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    res.json({ deleted: result.rows[0] });
+  } catch (err) {
+    console.error('Error deleting from DB (USERS DELETE):', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+module.exports = router;
+
+
+
