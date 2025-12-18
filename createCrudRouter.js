@@ -17,6 +17,13 @@ function createCrudRouter(config) {
   // GET / -> list all rows
   router.get('/', async (req, res) => {
     try {
+		
+		      // Allow per-route custom list handler (filtering/pagination/etc.)
+     if (typeof config.listHandler === 'function') {
+       await config.listHandler(req, res, { pool, config, allColumns });
+       return;
+     }
+
       const query = `
         SELECT ${allColumns.join(', ')}
         FROM ${config.table}
