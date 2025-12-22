@@ -57,6 +57,34 @@ function weekOfCycleForDate(date, cycleLengthWeeks) {
 }
 
 /**
+ * Pick the best StaffShiftRule:
+ *  - exact division match first
+ *  - else global rule (division_id null)
+ *  - else null
+ */
+function findBestStaffShiftRule(rules, { divisionId, departmentId, staffTypeId, shiftTypeId }) {
+  let exact = null;
+  let global = null;
+
+  for (const r of rules) {
+    const baseMatch =
+      r.department_id === departmentId &&
+      r.staff_type_id === staffTypeId &&
+      r.shift_type_id === shiftTypeId;
+    if (!baseMatch) continue;
+
+    if (divisionId != null && r.division_id === divisionId) {
+      exact = exact ?? r;
+    } else if (r.division_id == null) {
+      global = global ?? r;
+    }
+  }
+
+  return exact ?? global;
+}
+
+
+/**
  * POST /shift-periods/:id/generate-from-template
  *
  * This endpoint:
@@ -140,6 +168,7 @@ router.post('/:id/generate-from-template', async (req, res) => {
       SELECT
         id,
         template_id,
+		division_id,
         department_id,
         staff_type_id,
         user_id,
@@ -151,6 +180,21 @@ router.post('/:id/generate-from-template', async (req, res) => {
     `;
     const entriesResult = await client.query(entriesQuery, [template.id]);
     const entries = entriesResult.rows;
+	
+	// 3b) Load staff shift rules once so we can snapshot staff_shift_rule_id + required_staff_snapshot
+    const rulesResult = await client.query(`
+      SELECT
+        id,
+        division_id,
+        department_id,
+        staff_type_id,
+        shift_type_id,
+        required_staff_count
+      FROM shiftly_schema.staff_shift_rules
+    `);
+    const staffShiftRules = rulesResult.rows;
+
+
 
     // Remove existing TEMPLATE-based assignments for this period
     const deleteAssignmentsQuery = `
@@ -188,12 +232,21 @@ router.post('/:id/generate-from-template', async (req, res) => {
 
       for (const e of matchingEntries) {
         const shiftDateStr = formatYmd(current);
+		
+		       const matchedRule = findBestStaffShiftRule(staffShiftRules, {
+          divisionId: e.division_id ?? null,
+          departmentId: e.department_id,
+          staffTypeId: e.staff_type_id,
+          shiftTypeId: e.shift_type_id,
+        });
+
 
         const insertAssignmentQuery = `
           INSERT INTO shiftly_schema.shift_assignments
           (
             shift_period_id,
             shift_date,
+			division_id,
             department_id,
             user_id,
             staff_type_id,
@@ -201,6 +254,8 @@ router.post('/:id/generate-from-template', async (req, res) => {
             source_type,
             status,
             status_comment,
+			 staff_shift_rule_id,
+            required_staff_snapshot,
             created_at,
             updated_at
           )
@@ -212,9 +267,12 @@ router.post('/:id/generate-from-template', async (req, res) => {
             $4,
             $5,
             $6,
+			$7,
             'TEMPLATE',
             'GENERATED',
             NULL,
+			$8,
+			$9,
             NOW(),
             NOW()
           )
@@ -223,10 +281,13 @@ router.post('/:id/generate-from-template', async (req, res) => {
         const insertValues = [
           periodId,
           shiftDateStr,
+		  e.division_id ?? null,
           e.department_id,
           e.user_id,
           e.staff_type_id,
           e.shift_type_id,
+		  matchedRule ? matchedRule.id : null,
+          matchedRule ? matchedRule.required_staff_count : null,
         ];
 
         await client.query(insertAssignmentQuery, insertValues);

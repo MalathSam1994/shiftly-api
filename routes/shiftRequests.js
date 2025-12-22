@@ -291,6 +291,70 @@ router.post('/:id/approve', async (req, res) => {
   }
 });
 
+
+
+
+
+
+/**
+ * POST /shift-requests/:id/attach-assignment
+ *
+ * Body:
+ *  - shift_assignment_id (required)
+ *
+ * Used after a NEW_SHIFT request is approved and the client creates the concrete
+ * shift_assignment. This endpoint links the request to the created assignment.
+ */
+router.post('/:id/attach-assignment', async (req, res) => {
+  try {
+    const { id } = req.params;
+    const { shift_assignment_id } = req.body;
+
+    if (shift_assignment_id == null) {
+      return res.status(400).json({
+        error: 'shift_assignment_id is required',
+      });
+    }
+
+    const query = `
+      UPDATE shiftly_schema.shift_requests
+      SET shift_assignment_id = $1
+      WHERE id = $2
+      RETURNING
+        id,
+        request_type,
+        request_status,
+        requested_by_user_id,
+        target_user_id,
+        manager_user_id,
+        shift_assignment_id,
+        division_id,
+        requested_shift_date,
+        requested_shift_type_id,
+        requested_department_id,
+        created_at,
+        decided_at,
+        decision_by_user_id,
+        decision_comment
+    `;
+
+    const values = [shift_assignment_id, id];
+    const result = await pool.query(query, values);
+
+    if (result.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    res.json(result.rows[0]);
+  } catch (err) {
+    console.error('Error attaching assignment to shift request:', err);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+
+
+
+
 /**
  * POST /shift-requests/:id/reject
  *

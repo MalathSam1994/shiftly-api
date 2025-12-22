@@ -23,6 +23,8 @@ const shiftAssignmentsConfig = {
     'required_staff_snapshot',
   ],
   
+  
+  
     // GET /shift-assignments?shift_period_id=123&start_date=YYYY-MM-DD&end_date=YYYY-MM-DD&limit=...&offset=...
   listHandler: async (req, res, { pool, config, allColumns }) => {
     const qp = req.query || {};

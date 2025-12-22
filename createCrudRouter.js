@@ -61,6 +61,8 @@ function createCrudRouter(config) {
   // POST / -> insert (any subset of allowed columns)
   router.post('/', async (req, res) => {
     try {
+		
+		
       const cols = [];
       const placeholders = [];
       const values = [];
