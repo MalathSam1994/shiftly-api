@@ -15,7 +15,8 @@ const router = express.Router();
  */
 router.get('/', async (req, res) => {
   try {
-    const { managerUserId, requestedByUserId, requestStatus } = req.query;
+    const { managerUserId, requestedByUserId, requestStatus, divisionId } =
+      req.query;
 
     const whereClauses = [];
     const values = [];
@@ -29,6 +30,16 @@ router.get('/', async (req, res) => {
       values.push(requestStatus);
       whereClauses.push(`sr.request_status = $${values.length}`);
     }
+
+    if (divisionId) {
+      const divId = parseInt(divisionId, 10);
+      values.push(divId);
+      const index = values.length;
+      // Prefer sr.division_id; fallback to assignment.division_id for older rows
+      whereClauses.push(`COALESCE(sr.division_id, sa.division_id) = $${index}`);
+    }
+
+
 
     if (managerUserId) {
       const managerId = parseInt(managerUserId, 10);
@@ -60,6 +71,7 @@ router.get('/', async (req, res) => {
         sr.target_user_id,
         sr.manager_user_id,
         sr.shift_assignment_id,
+		COALESCE(sr.division_id, sa.division_id) AS division_id,
         sr.requested_shift_date,
         sr.requested_shift_type_id,
         sr.requested_department_id,
@@ -68,6 +80,8 @@ router.get('/', async (req, res) => {
         sr.decision_by_user_id,
         sr.decision_comment
       FROM shiftly_schema.shift_requests sr
+	        LEFT JOIN shiftly_schema.shift_assignments sa
+        ON sa.id = sr.shift_assignment_id
       ${whereSql}
       ORDER BY sr.created_at DESC
     `;
@@ -92,6 +106,7 @@ router.get('/', async (req, res) => {
  *  - requested_shift_date (required, YYYY-MM-DD)
  *  - requested_shift_type_id (required)
  *  - requested_department_id (required)
+ *  - division_id (optional but recommended; used for filtering & assignment creation)
  *  - decision_comment (optional, used here as "request comment" from employee)
  */
 router.post('/', async (req, res) => {
@@ -102,6 +117,8 @@ router.post('/', async (req, res) => {
       target_user_id,
       manager_user_id,
       shift_assignment_id,
+	  division_id,
+	  divisionId,
       requested_shift_date,
       requested_shift_type_id,
       requested_department_id,
@@ -142,6 +159,8 @@ router.post('/', async (req, res) => {
         effectiveManagerId = managerResult.rows[0].manager_user_id;
       }
     }
+	
+	const effectiveDivisionId = division_id ?? divisionId ?? null;
 
     const insertQuery = `
       INSERT INTO shiftly_schema.shift_requests (
@@ -151,6 +170,7 @@ router.post('/', async (req, res) => {
         target_user_id,
         manager_user_id,
         shift_assignment_id,
+		division_id,
         requested_shift_date,
         requested_shift_type_id,
         requested_department_id,
@@ -166,13 +186,14 @@ router.post('/', async (req, res) => {
         $3,         -- target_user_id
         $4,         -- manager_user_id (can be null if no mapping exists)
         $5,         -- shift_assignment_id
-        $6,         -- requested_shift_date
-        $7,         -- requested_shift_type_id
-        $8,         -- requested_department_id
+        $6,         -- division_id
+        $7,         -- requested_shift_date
+        $8,         -- requested_shift_type_id
+        $9,         -- requested_department_id
         NOW(),      -- created_at
         NULL,       -- decided_at
         NULL,       -- decision_by_user_id
-        $9          -- decision_comment (request comment)
+        $10         -- decision_comment (request comment)
       )
       RETURNING
         id,
@@ -182,6 +203,7 @@ router.post('/', async (req, res) => {
         target_user_id,
         manager_user_id,
         shift_assignment_id,
+		division_id,
         requested_shift_date,
         requested_shift_type_id,
         requested_department_id,
@@ -197,6 +219,7 @@ router.post('/', async (req, res) => {
       target_user_id ?? null,
       effectiveManagerId,
       shift_assignment_id ?? null,
+	  effectiveDivisionId,
       requested_shift_date,
       requested_shift_type_id,
       requested_department_id,
@@ -244,6 +267,7 @@ router.post('/:id/approve', async (req, res) => {
          target_user_id,
          manager_user_id,
          shift_assignment_id,
+		  division_id,
          requested_shift_date,
          requested_shift_type_id,
          requested_department_id,
@@ -300,6 +324,7 @@ router.post('/:id/reject', async (req, res) => {
          target_user_id,
          manager_user_id,
          shift_assignment_id,
+		 division_id,
          requested_shift_date,
          requested_shift_type_id,
          requested_department_id,

@@ -7,6 +7,7 @@ const shiftAssignmentsConfig = {
   columns: [
     'shift_period_id',
     'shift_date',
+	'division_id',
     'department_id',
     'user_id',
     'staff_type_id',

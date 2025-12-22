@@ -7,8 +7,10 @@ require('dotenv').config();
 const treeMenuRouter = require('./routes/treeMenu');
 const itemsRouter = require('./routes/items');
 const departmentsRouter = require('./routes/departments');
+const divisionsRouter = require('./routes/divisions');
 const usersRouter = require('./routes/users');
 const userDepartmentsRouter = require('./routes/userDepartments');
+const userDivisionsRouter = require('./routes/userDivisions');
 const authRouter = require('./routes/auth');
 
 // new routes
@@ -41,8 +43,10 @@ app.use('/auth', authRouter);
 app.use('/tree-menu', treeMenuRouter);
 app.use('/items', itemsRouter);
 app.use('/departments', departmentsRouter);
+app.use('/divisions', divisionsRouter);
 app.use('/users', usersRouter);
 app.use('/user-departments', userDepartmentsRouter);
+app.use('/user-divisions', userDivisionsRouter);
 
 // new mounts
 app.use('/staff-types', staffTypesRouter);
