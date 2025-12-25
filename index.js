@@ -27,6 +27,7 @@ const userAbsencesRouter = require('./routes/userAbsences');
 const notifications = require('./routes/notifications');
 const fcm = require('./routes/fcm');
 const { startNotificationDispatcher } = require('./services/notificationDispatcher');
+const shiftOffersRouter = require('./routes/shiftOffers');
 
 const app = express();
 const port = process.env.API_PORT || 3000;
@@ -60,6 +61,8 @@ app.use('/shift-assignments', shiftAssignmentsRouter);
 app.use('/shift-requests', shiftRequestsRouter);
 app.use('/user-absences', userAbsencesRouter);
 app.use('/notifications', notifications);
+app.use('/shift-offers', shiftOffersRouter);
+
 app.use('/fcm', fcm);
 
 app.listen(port, () => {
