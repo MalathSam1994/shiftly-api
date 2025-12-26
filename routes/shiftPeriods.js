@@ -329,4 +329,104 @@ router.post('/:id/generate-from-template', async (req, res) => {
   }
 });
 
+/**
+ * POST /shift-periods/:id/approve
+ *
+ * ✅ One backend call, one DB transaction, TWO SQL UPDATE statements:
+ *  1) Update all non-cancelled assignments to APPROVED
+ *  2) Update the period itself to APPROVED
+ *
+ * This fixes "nothing happens" UX (no multi-request loops from Flutter).
+ */
+router.post('/:id/approve', async (req, res) => {
+  const periodId = parseInt(req.params.id, 10);
+
+  if (Number.isNaN(periodId)) {
+    return res.status(400).json({ error: 'Invalid period id.' });
+  }
+
+  let client;
+
+  try {
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    // Lock the period row to avoid concurrent approve/generate races.
+    const periodResult = await client.query(
+      `
+      SELECT id, status
+      FROM shiftly_schema.shift_periods
+      WHERE id = $1
+      FOR UPDATE
+      `,
+      [periodId],
+    );
+
+    if (periodResult.rows.length === 0) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Shift period not found.' });
+    }
+
+    const period = periodResult.rows[0];
+
+    if (period.status === 'CANCELLED') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: 'Cannot approve a CANCELLED period.',
+      });
+    }
+
+    // 1) Approve all non-cancelled assignments for this period.
+    const updatedAssignmentsResult = await client.query(
+      `
+      UPDATE shiftly_schema.shift_assignments
+      SET status = 'APPROVED',
+          updated_at = NOW()
+      WHERE shift_period_id = $1
+        AND status <> 'CANCELLED'
+        AND status <> 'APPROVED'
+      `,
+      [periodId],
+    );
+
+    // 2) Approve the period itself.
+    const updatedPeriodResult = await client.query(
+      `
+      UPDATE shiftly_schema.shift_periods
+      SET status = 'APPROVED'
+      WHERE id = $1
+      RETURNING *
+      `,
+      [periodId],
+    );
+
+    await client.query('COMMIT');
+
+    return res.json({
+      message: 'Period approved (and assignments approved).',
+      period_id: periodId,
+      updated_assignments_count: updatedAssignmentsResult.rowCount,
+      period: updatedPeriodResult.rows[0],
+    });
+  } catch (err) {
+    if (client) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (rollbackErr) {
+        console.error('Error during ROLLBACK:', rollbackErr);
+      }
+    }
+    console.error('Error approving period:', err);
+    return res.status(500).json({
+      error: 'Database error',
+      details: err.message,
+      code: err.code,
+      routine: err.routine,
+    });
+  } finally {
+    if (client) client.release();
+  }
+});
+
+
 module.exports = router;

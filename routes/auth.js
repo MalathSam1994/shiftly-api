@@ -7,9 +7,12 @@ const router = express.Router();
 
 // Login endpoint: username = empno
 router.post('/login', async (req, res) => {
-  const { username, password } = req.body;
+ const usernameRaw = (req.body.username ?? '').toString();
+ const passwordRaw = (req.body.password ?? '').toString();
+ const usernameNorm = usernameRaw.replace(/\s+/g, '').toUpperCase(); // remove ALL spaces
+ const password = passwordRaw;
 
-  if (!username || !password) {
+if (!usernameNorm || !password) {
     return res
       .status(400)
       .json({ error: 'Username and password are required.' });
@@ -25,9 +28,9 @@ router.post('/login', async (req, res) => {
              role_id,
              password_hash
       FROM shiftly_schema.users
-      WHERE empno = $1
+      WHERE regexp_replace(upper(empno), '\\s+', '', 'g') = $1
     `;
-    const result = await pool.query(query, [username]);
+   const result = await pool.query(query, [usernameNorm]);
 
     if (result.rows.length === 0) {
       return res.status(401).json({ error: 'Invalid credentials.' });
