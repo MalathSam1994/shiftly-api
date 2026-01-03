@@ -70,6 +70,40 @@ function isAbsenceValue(v) {
   return v === true || v === 1 || v === '1' || v === 't' || v === 'true';
 }
 
+// Normalize any PG date/timestamp value to a stable "YYYY-MM" key.
+// pg can return DATE as string (YYYY-MM-DD) but TIMESTAMP/TZ often as JS Date.
+// Using slice(0,7) on a Date's .toString() yields "Fri Jan" etc -> wrong.
+function yearMonthKey(v) {
+  if (v == null) return null;
+
+  // JS Date (common for timestamptz depending on pg type parser)
+  if (v instanceof Date) {
+    const y = v.getUTCFullYear().toString().padStart(4, '0');
+    const m = (v.getUTCMonth() + 1).toString().padStart(2, '0');
+    return `${y}-${m}`;
+  }
+
+  const s = String(v);
+  if (!s) return null;
+
+  // 'YYYY-MM-DD' or full ISO 'YYYY-MM-DDTHH:mm:ss...'
+  const datePart = s.split('T')[0];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) {
+    return datePart.slice(0, 7);
+  }
+
+  // Fallback: try to parse as a date string and compute UTC year-month
+  const dt = new Date(s);
+  if (!Number.isNaN(dt.getTime())) {
+    const y = dt.getUTCFullYear().toString().padStart(4, '0');
+    const m = (dt.getUTCMonth() + 1).toString().padStart(2, '0');
+    return `${y}-${m}`;
+  }
+
+  return null;
+}
+
+
 
 
 /**
@@ -384,9 +418,9 @@ router.post('/', async (req, res) => {
       }
 
       // Must be same month
-      const monthSrc = String(src.shift_date).slice(0, 7);
-      const monthTgt = String(tgt.shift_date).slice(0, 7);
-      if (monthSrc !== monthTgt) {
+     const monthSrc = yearMonthKey(src.shift_date);
+     const monthTgt = yearMonthKey(tgt.shift_date);
+     if (!monthSrc || !monthTgt || monthSrc !== monthTgt) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Switch is only allowed within the same month.' });
       }
