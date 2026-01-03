@@ -4,8 +4,30 @@ const pool = require('../db');
 
 const router = express.Router();
 
+function sendDbError(res, err, context) {
+  // Return rich PG error details so the Flutter client shows the REAL reason
+  // (your ShiftRequestRepository already parses: message/detail/code/constraint/table/column).
+  const payload = {
+    error: 'Database error',
+    context: context || undefined,
+    message: err?.message,
+    code: err?.code,
+    detail: err?.detail,
+    constraint: err?.constraint,
+    table: err?.table,
+    column: err?.column,
+    schema: err?.schema,
+    routine: err?.routine,
+    where: err?.where,
+  };
+  Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
+  return res.status(500).json(payload);
+}
+
+
 
 async function getPrimaryManagerId(client, userId) {
+	if (userId == null) return null;
   const r = await client.query(
     `
     SELECT manager_user_id
@@ -29,7 +51,7 @@ async function userHasOverlappingAssignment(client, { userId, shiftDate, shiftTy
       JOIN shiftly_schema.shift_types st_new      ON st_new.id = $3
      WHERE sa.user_id = $1
        AND sa.shift_date = $2
-       AND COALESCE(sa.is_absence, FALSE) = FALSE
+       AND NOT (COALESCE(sa.is_absence::text, 'false') IN ('t','true','1'))
        AND sa.status NOT IN ('CANCELLED')
        AND ($4::int IS NULL OR sa.id <> $4)
        AND NOT (st_existing.end_time <= st_new.start_time OR st_new.end_time <= st_existing.start_time)
@@ -44,6 +66,9 @@ function isPendingStatus(status) {
   return typeof status === 'string' && status.toUpperCase().startsWith('PENDING');
 }
 
+function isAbsenceValue(v) {
+  return v === true || v === 1 || v === '1' || v === 't' || v === 'true';
+}
 
 
 
@@ -59,6 +84,18 @@ function isPendingStatus(status) {
 router.get('/', async (req, res) => {
   try {
  const { managerUserId, inboxUserId, requestedByUserId, requestStatus, divisionId } = req.query;
+ 
+     // ✅ Safety: never allow "list everything" by mistake
+    const hasAnyFilter =
+      (inboxUserId != null && String(inboxUserId).trim() !== '') ||
+      (managerUserId != null && String(managerUserId).trim() !== '') ||
+      (requestedByUserId != null && String(requestedByUserId).trim() !== '');
+
+    if (!hasAnyFilter) {
+      return res.status(400).json({
+        error: 'At least one of inboxUserId, managerUserId, requestedByUserId is required.',
+      });
+    }
 
     const whereClauses = [];
     const values = [];
@@ -83,27 +120,61 @@ router.get('/', async (req, res) => {
 
 
 
-    const effectiveInboxUserId = inboxUserId ?? managerUserId;
-    if (effectiveInboxUserId) {
-      const actorId = parseInt(effectiveInboxUserId, 10);
-      values.push(managerId);
+     const hasInboxParam =
+       inboxUserId != null && String(inboxUserId).trim() !== '';
+
+    if (hasInboxParam) {
+      // ✅ STRICT INBOX MODE:
+      // Only show items where THIS user is the current approver.
+      const actorId = parseInt(String(inboxUserId), 10);
+	      if (Number.isNaN(actorId)) {
+        return res.status(400).json({ error: 'Invalid inboxUserId' });
+      }
+      values.push(actorId);
+      const index = values.length;
+      whereClauses.push(`sr.inbox_user_id = $${index}`);
+    } else if (managerUserId) {
+      // ✅ Legacy support only (for old NEW_SHIFT rows that may have inbox_user_id NULL)
+      // IMPORTANT: Do NOT leak SWITCH/OFFER/etc to manager unless inbox_user_id == manager.
+      const actorId = parseInt(String(managerUserId), 10);
+	      if (Number.isNaN(actorId)) {
+       return res.status(400).json({ error: 'Invalid managerUserId' });
+     }
+      values.push(actorId);
       const index = values.length;
 
-    
-       // NEW: Match by inbox_user_id (this is the "who should act next" inbox)
-      // Fallback: legacy manager_user_id OR via user_managers mapping (older rows).
+      whereClauses.push(`
+        (
+          -- normal: manager sees only items currently in their inbox
+          sr.inbox_user_id = $${index}
 
-      whereClauses.push(
-     `(sr.inbox_user_id = $${index}
-           OR sr.manager_user_id = $${index}
-           OR EXISTS (
-             SELECT 1
-               FROM shiftly_schema.user_managers um
-              WHERE um.user_id = sr.requested_by_user_id
-                AND um.manager_user_id = $${index}
-                AND um.is_primary = TRUE
-           ))`
-      );
+          OR
+
+          -- legacy: old NEW_SHIFT rows without inbox_user_id (backward compatibility only)
+          (
+            sr.inbox_user_id IS NULL
+            AND sr.request_type = 'NEW_SHIFT'
+            AND (
+              sr.manager_user_id = $${index}
+              OR EXISTS (
+                SELECT 1
+                  FROM shiftly_schema.user_managers um
+                 WHERE um.user_id = sr.requested_by_user_id
+                   AND um.manager_user_id = $${index}
+                   AND um.is_primary = TRUE
+              )
+            )
+          )
+        )
+      `);
+    }
+	
+	
+    // ✅ extra hard safety: never allow returning everything
+    if (whereClauses.length === 0) {
+      return res.status(400).json({
+        error: 'No valid filters applied (would return everything).',
+      });
     }
 
     const whereSql =
@@ -143,7 +214,7 @@ router.get('/', async (req, res) => {
     res.json(result.rows);
   } catch (err) {
     console.error('Error querying DB (SHIFT REQUESTS LIST):', err);
-    res.status(500).json({ error: 'Database error' });
+   return sendDbError(res, err, 'SHIFT REQUESTS LIST');
   }
 });
 
@@ -223,6 +294,8 @@ router.post('/', async (req, res) => {
           requested_shift_type_id,
           requested_department_id,
           created_at,
+          last_action_at,
+          last_action_by_user_id,
           decided_at,
           decision_by_user_id,
           decision_comment
@@ -239,6 +312,8 @@ router.post('/', async (req, res) => {
           $8,
           $9,
           NOW(),
+          NOW(),
+          $2,
           NULL,
           NULL,
           $10
@@ -303,7 +378,7 @@ router.post('/', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(403).json({ error: 'target_shift_assignment_id must belong to target_user_id.' });
       }
-      if (src.is_absence === true || tgt.is_absence === true) {
+      if (isAbsenceValue(src.is_absence) || isAbsenceValue(tgt.is_absence)) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Absence assignments cannot be switched.' });
       }
@@ -320,8 +395,8 @@ router.post('/', async (req, res) => {
       const sameCombo =
         Number(src.division_id ?? 0) === Number(tgt.division_id ?? 0) &&
         Number(src.department_id) === Number(tgt.department_id) &&
-        Number(src.staff_type_id) === Number(tgt.staff_type_id) &&
-        Number(src.shift_type_id) === Number(tgt.shift_type_id);
+		  Number(src.staff_type_id) === Number(tgt.staff_type_id) &&
+       Number(src.shift_type_id) === Number(tgt.shift_type_id);
       if (!sameCombo) {
         await client.query('ROLLBACK');
         return res.status(400).json({
@@ -373,6 +448,8 @@ router.post('/', async (req, res) => {
           requested_shift_type_id,
           requested_department_id,
           created_at,
+         last_action_at,
+         last_action_by_user_id,
           decided_at,
           decision_by_user_id,
           decision_comment
@@ -392,6 +469,8 @@ router.post('/', async (req, res) => {
           $7,
           $8,
           NOW(),
+        NOW(),
+        $1,
           NULL,
           NULL,
           $9
@@ -461,7 +540,7 @@ router.post('/', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: `Offer is not ACTIVE (current=${row.status}).` });
       }
-      if (row.is_absence === true) {
+      if (isAbsenceValue(row.is_absence)) {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'Absence assignments cannot be taken.' });
       }
@@ -500,6 +579,8 @@ router.post('/', async (req, res) => {
           requested_shift_type_id,
           requested_department_id,
           created_at,
+       last_action_at,
+       last_action_by_user_id,
           decided_at,
           decision_by_user_id,
           decision_comment
@@ -519,6 +600,8 @@ router.post('/', async (req, res) => {
           $8,
           $9,
           NOW(),
+       NOW(),
+        $1,
           NULL,
           NULL,
           $10
@@ -557,7 +640,18 @@ router.post('/', async (req, res) => {
   try { await client.query('ROLLBACK'); } catch (_) {}
 }
     console.error('Error inserting into DB (SHIFT REQUESTS CREATE):', err);
-    res.status(500).json({ error: 'Database error' });
+      res.status(500).json({
+      error: 'Database error',
+      message: err.message,
+      code: err.code,
+      detail: err.detail,
+      constraint: err.constraint,
+      table: err.table,
+      column: err.column,
+      schema: err.schema,
+      routine: err.routine,
+      where: err.where,
+    });
   } finally {
 if (client) client.release();
   }
@@ -630,6 +724,11 @@ router.post('/:id/approve', async (req, res) => {
       if (status === 'PENDING_TARGET_USER') {
         // next: target manager
         const targetManagerId = await getPrimaryManagerId(client, r.target_user_id);
+		
+	       if (!targetManagerId) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Target user has no primary manager.' });
+        }
         const upd = await client.query(
           `
           UPDATE shiftly_schema.shift_requests
@@ -650,6 +749,12 @@ router.post('/:id/approve', async (req, res) => {
       if (status === 'PENDING_TARGET_MANAGER') {
         // next: source manager
         const sourceManagerId = await getPrimaryManagerId(client, r.requested_by_user_id);
+		
+	       if (!sourceManagerId) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Source user has no primary manager.' });
+        }
+
         const upd = await client.query(
           `
           UPDATE shiftly_schema.shift_requests
@@ -923,7 +1028,7 @@ router.post('/:id/approve', async (req, res) => {
      try { await client.query('ROLLBACK'); } catch (_) {}
    }
     console.error('Error approving shift request:', err);
-    res.status(500).json({ error: 'Database error' });
+   return sendDbError(res, err, 'APPROVE SHIFT REQUEST');
   } finally {
 if (client) client.release();
   }
@@ -994,7 +1099,7 @@ router.post('/:id/attach-assignment', async (req, res) => {
     res.json(result.rows[0]);
   } catch (err) {
     console.error('Error attaching assignment to shift request:', err);
-    res.status(500).json({ error: 'Database error' });
+      return sendDbError(res, err, 'ATTACH ASSIGNMENT');
   }
 });
 
@@ -1062,7 +1167,7 @@ router.post('/:id/reject', async (req, res) => {
      try { await client.query('ROLLBACK'); } catch (_) {}
    }
     console.error('Error rejecting shift request:', err);
-    res.status(500).json({ error: 'Database error' });
+     return sendDbError(res, err, 'REJECT SHIFT REQUEST');
   } finally {
 if (client) client.release();
   }
