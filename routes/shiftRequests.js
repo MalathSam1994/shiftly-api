@@ -731,6 +731,91 @@ router.post('/:id/approve', async (req, res) => {
 
     const type = String(r.request_type).toUpperCase();
     const status = String(r.request_status).toUpperCase();
+	
+    // Helper: finalize SWITCH swap + history with proper HTTP errors
+    const finalizeSwitchSwap = async () => {
+      const fail = (httpStatus, message) => {
+        const e = new Error(message);
+        e.httpStatus = httpStatus;
+        throw e;
+      };
+
+      const srcId = r.source_shift_assignment_id ?? r.shift_assignment_id;
+      const tgtId = r.target_shift_assignment_id;
+      if (!srcId || !tgtId) {
+        fail(400, 'Missing source/target assignment references for SWITCH.');
+      }
+
+      const srcRes = await client.query(
+        `SELECT * FROM shiftly_schema.shift_assignments WHERE id = $1 FOR UPDATE`,
+        [srcId]
+      );
+      const tgtRes = await client.query(
+        `SELECT * FROM shiftly_schema.shift_assignments WHERE id = $1 FOR UPDATE`,
+        [tgtId]
+      );
+      if (!srcRes.rows.length || !tgtRes.rows.length) {
+        fail(404, 'Source or target assignment not found.');
+      }
+
+      const src = srcRes.rows[0];
+      const tgt = tgtRes.rows[0];
+
+      // Re-validate overlap at approval time
+      const excludeForTarget =
+        (String(tgt.shift_date) === String(src.shift_date)) ? tgt.id : null;
+      const excludeForSource =
+        (String(src.shift_date) === String(tgt.shift_date)) ? src.id : null;
+
+      const targetHasOverlap = await userHasOverlappingAssignment(client, {
+        userId: Number(r.target_user_id),
+        shiftDate: src.shift_date,
+        shiftTypeId: src.shift_type_id,
+        excludeAssignmentId: excludeForTarget,
+      });
+      if (targetHasOverlap) {
+        fail(400, 'Target user has an overlapping shift at the source shift date/time.');
+      }
+
+      const sourceHasOverlap = await userHasOverlappingAssignment(client, {
+        userId: Number(r.requested_by_user_id),
+        shiftDate: tgt.shift_date,
+        shiftTypeId: tgt.shift_type_id,
+        excludeAssignmentId: excludeForSource,
+      });
+      if (sourceHasOverlap) {
+        fail(400, 'Source user has an overlapping shift at the target shift date/time.');
+      }
+
+      const srcUser = src.user_id;
+      const tgtUser = tgt.user_id;
+
+      // Swap users
+      await client.query(
+        `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
+        [tgtUser, src.id]
+      );
+      await client.query(
+        `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
+        [srcUser, tgt.id]
+      );
+
+      // History
+      await client.query(
+        `
+        INSERT INTO shiftly_schema.shift_assignment_user_history
+          (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
+        VALUES
+          ($1, $2, $3, 'SWITCH', $4, $5),
+          ($6, $7, $8, 'SWITCH', $4, $5)
+        `,
+        [
+          src.id, srcUser, tgtUser, r.id, decision_comment ?? null,
+          tgt.id, tgtUser, srcUser,
+        ]
+      );
+    };
+
 
     // NEW_SHIFT: single-step approve (legacy)
     if (type === 'NEW_SHIFT') {
@@ -756,25 +841,46 @@ router.post('/:id/approve', async (req, res) => {
     // SWITCH: multi-step
     if (type === 'SWITCH') {
       if (status === 'PENDING_TARGET_USER') {
-        // next: target manager
+         // next: target manager (or skip if common manager)
         const targetManagerId = await getPrimaryManagerId(client, r.target_user_id);
 		
 	       if (!targetManagerId) {
           await client.query('ROLLBACK');
           return res.status(400).json({ error: 'Target user has no primary manager.' });
         }
+		
+		
+
+       const sourceManagerId = await getPrimaryManagerId(client, r.requested_by_user_id);
+        if (!sourceManagerId) {
+          await client.query('ROLLBACK');
+          return res.status(400).json({ error: 'Source user has no primary manager.' });
+        }
+
+        const sameManager = Number(targetManagerId) === Number(sourceManagerId);
+        const nextInboxUserId = sameManager ? sourceManagerId : targetManagerId;
+        const nextStatus = sameManager ? 'PENDING_SOURCE_MANAGER' : 'PENDING_TARGET_MANAGER';
+
+		
+		
         const upd = await client.query(
           `
           UPDATE shiftly_schema.shift_requests
-             SET request_status = 'PENDING_TARGET_MANAGER',
-                 inbox_user_id  = $1,
+         SET request_status = $1,
+                 inbox_user_id  = $2,
                  last_action_at = NOW(),
-                 last_action_by_user_id = $2,
-                 decision_comment = COALESCE($3, decision_comment)
-           WHERE id = $4
+                 last_action_by_user_id = $3,
+                decision_comment = COALESCE($4, decision_comment)
+          WHERE id = $5
            RETURNING *
           `,
-          [targetManagerId, decision_by_user_id, decision_comment ?? null, id]
+               [
+            nextStatus,
+            nextInboxUserId,
+            decision_by_user_id,
+            decision_comment ?? null,
+            id,
+          ]
         );
         await client.query('COMMIT');
         return res.json(upd.rows[0]);
@@ -788,6 +894,41 @@ router.post('/:id/approve', async (req, res) => {
           await client.query('ROLLBACK');
           return res.status(400).json({ error: 'Source user has no primary manager.' });
         }
+		
+	      // ✅ If both users share the SAME manager, don't require a second approval.
+        // This handles:
+        //  - old rows that already reached PENDING_TARGET_MANAGER
+        //  - common-manager setups (manager approves ONCE only)
+        if (Number(sourceManagerId) === Number(decision_by_user_id)) {
+          try {
+            await finalizeSwitchSwap();
+          } catch (e) {
+            await client.query('ROLLBACK');
+            return res.status(e.httpStatus ?? 400).json({
+              error: String(e.message || e),
+            });
+          }
+
+          const upd = await client.query(
+            `
+            UPDATE shiftly_schema.shift_requests
+               SET request_status      = 'APPROVED',
+                   inbox_user_id       = NULL,
+                   decided_at          = NOW(),
+                   decision_by_user_id = $1,
+                   decision_comment    = $2,
+                   last_action_at      = NOW(),
+                   last_action_by_user_id = $1
+             WHERE id = $3
+             RETURNING *
+            `,
+            [decision_by_user_id, decision_comment ?? null, id]
+          );
+
+          await client.query('COMMIT');
+          return res.json(upd.rows[0]);
+        }
+
 
         const upd = await client.query(
           `
@@ -807,83 +948,15 @@ router.post('/:id/approve', async (req, res) => {
       }
 
       if (status === 'PENDING_SOURCE_MANAGER') {
-        // final: execute swap
-        const srcId = r.source_shift_assignment_id ?? r.shift_assignment_id;
-        const tgtId = r.target_shift_assignment_id;
-        if (!srcId || !tgtId) {
+            // final: execute swap
+        try {
+          await finalizeSwitchSwap();
+        } catch (e) {
           await client.query('ROLLBACK');
-          return res.status(400).json({ error: 'Missing source/target assignment references for SWITCH.' });
+          return res.status(e.httpStatus ?? 400).json({
+            error: String(e.message || e),
+          });
         }
-
-        const srcRes = await client.query(
-          `SELECT * FROM shiftly_schema.shift_assignments WHERE id = $1 FOR UPDATE`,
-          [srcId]
-        );
-        const tgtRes = await client.query(
-          `SELECT * FROM shiftly_schema.shift_assignments WHERE id = $1 FOR UPDATE`,
-          [tgtId]
-        );
-        if (!srcRes.rows.length || !tgtRes.rows.length) {
-          await client.query('ROLLBACK');
-          return res.status(404).json({ error: 'Source or target assignment not found.' });
-        }
-        const src = srcRes.rows[0];
-        const tgt = tgtRes.rows[0];
-
-        // Re-validate overlap at approval time
-        const excludeForTarget = (String(tgt.shift_date) === String(src.shift_date)) ? tgt.id : null;
-        const excludeForSource = (String(src.shift_date) === String(tgt.shift_date)) ? src.id : null;
-
-        const targetHasOverlap = await userHasOverlappingAssignment(client, {
-          userId: Number(r.target_user_id),
-          shiftDate: src.shift_date,
-          shiftTypeId: src.shift_type_id,
-          excludeAssignmentId: excludeForTarget,
-        });
-        if (targetHasOverlap) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ error: 'Target user has an overlapping shift at the source shift date/time.' });
-        }
-
-        const sourceHasOverlap = await userHasOverlappingAssignment(client, {
-          userId: Number(r.requested_by_user_id),
-          shiftDate: tgt.shift_date,
-          shiftTypeId: tgt.shift_type_id,
-          excludeAssignmentId: excludeForSource,
-        });
-        if (sourceHasOverlap) {
-          await client.query('ROLLBACK');
-          return res.status(400).json({ error: 'Source user has an overlapping shift at the target shift date/time.' });
-        }
-
-        const srcUser = src.user_id;
-        const tgtUser = tgt.user_id;
-
-        // Swap users
-        await client.query(
-          `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
-          [tgtUser, src.id]
-        );
-        await client.query(
-          `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
-          [srcUser, tgt.id]
-        );
-
-        // History
-        await client.query(
-          `
-          INSERT INTO shiftly_schema.shift_assignment_user_history
-            (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
-          VALUES
-            ($1, $2, $3, 'SWITCH', $4, $5),
-            ($6, $7, $8, 'SWITCH', $4, $5)
-          `,
-          [
-            src.id, srcUser, tgtUser, r.id, decision_comment ?? null,
-            tgt.id, tgtUser, srcUser,
-          ]
-        );
-
         const upd = await client.query(
           `
           UPDATE shiftly_schema.shift_requests
