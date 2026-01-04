@@ -1157,57 +1157,133 @@ if (client) client.release();
  * shift_assignment. This endpoint links the request to the created assignment.
  */
 router.post('/:id/attach-assignment', async (req, res) => {
+  let client;
   try {
     const { id } = req.params;
     const { shift_assignment_id } = req.body;
 
     if (shift_assignment_id == null) {
-      return res.status(400).json({
-        error: 'shift_assignment_id is required',
-      });
+      return res.status(400).json({ error: 'shift_assignment_id is required' });
     }
 
- // Only makes sense for NEW_SHIFT requests
-    const query = `
-      UPDATE shiftly_schema.shift_requests
-      SET shift_assignment_id = $1
-      WHERE id = $2
-       AND request_type = 'NEW_SHIFT'
-      RETURNING
-        id,
-        request_type,
-        request_status,
-        requested_by_user_id,
-        target_user_id,
-        manager_user_id,
-        inbox_user_id,
-        shift_assignment_id,
-        division_id,
-        requested_shift_date,
-        requested_shift_type_id,
-        requested_department_id,
-        created_at,
-        decided_at,
-        decision_by_user_id,
-        decision_comment,
-        source_shift_assignment_id,
-        target_shift_assignment_id,
-        shift_offer_id,
-        last_action_at,
-        last_action_by_user_id
-    `;
+    client = await pool.connect();
+    await client.query('BEGIN');
 
-    const values = [shift_assignment_id, id];
-    const result = await pool.query(query, values);
-
-    if (result.rows.length === 0) {
+    // Lock request row (must be NEW_SHIFT)
+    const reqRes = await client.query(
+      `SELECT *
+         FROM shiftly_schema.shift_requests
+        WHERE id = $1
+          AND request_type = 'NEW_SHIFT'
+        FOR UPDATE`,
+      [id]
+    );
+    if (!reqRes.rows.length) {
+      await client.query('ROLLBACK');
       return res.status(404).json({ error: 'Not found' });
     }
+    const r = reqRes.rows[0];
 
-    res.json(result.rows[0]);
+    // Optional safety: attach only after approval (prevents history for unapproved requests)
+    if (String(r.request_status).toUpperCase() !== 'APPROVED') {
+      await client.query('ROLLBACK');
+      return res.status(400).json({ error: 'Cannot attach assignment unless request is APPROVED.' });
+    }
+
+    // Lock assignment row
+    const asgRes = await client.query(
+      `SELECT *
+         FROM shiftly_schema.shift_assignments
+        WHERE id = $1
+        FOR UPDATE`,
+      [shift_assignment_id]
+    );
+    if (!asgRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'shift_assignment_id not found' });
+    }
+    const a = asgRes.rows[0];
+
+    // Link request -> assignment
+    const updRes = await client.query(
+      `
+      UPDATE shiftly_schema.shift_requests
+         SET shift_assignment_id = $1,
+             last_action_at = NOW(),
+             last_action_by_user_id = COALESCE(decision_by_user_id, last_action_by_user_id)
+       WHERE id = $2
+         AND request_type = 'NEW_SHIFT'
+       RETURNING
+         id,
+         request_type,
+         request_status,
+         requested_by_user_id,
+         target_user_id,
+         manager_user_id,
+         inbox_user_id,
+         shift_assignment_id,
+         division_id,
+         requested_shift_date,
+         requested_shift_type_id,
+         requested_department_id,
+         created_at,
+         decided_at,
+         decision_by_user_id,
+         decision_comment,
+         source_shift_assignment_id,
+         target_shift_assignment_id,
+         shift_offer_id,
+         last_action_at,
+         last_action_by_user_id
+      `,
+      [shift_assignment_id, id]
+    );
+
+    // Insert history record for this NEW_SHIFT assignment (idempotent)
+    // from_user_id is NULL (new assignment), to_user_id is assignment.user_id (fallback requested_by_user_id)
+    const toUserId = a.user_id ?? r.requested_by_user_id ?? null;
+
+    if (toUserId != null) {
+      const exists = await client.query(
+        `
+        SELECT 1
+          FROM shiftly_schema.shift_assignment_user_history h
+         WHERE h.shift_assignment_id = $1
+           AND h.shift_request_id = $2
+           AND h.change_reason = 'NEW_SHIFT'
+         LIMIT 1
+        `,
+        [shift_assignment_id, id]
+      );
+
+      if (!exists.rows.length) {
+        await client.query(
+          `
+          INSERT INTO shiftly_schema.shift_assignment_user_history
+            (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
+          VALUES
+            ($1, NULL, $2, 'NEW_SHIFT', $3, $4)
+          `,
+          [
+            shift_assignment_id,
+            toUserId,
+            id,
+            r.decision_comment ?? null,
+          ]
+        );
+      }
+    }
+
+    await client.query('COMMIT');
+    return res.json(updRes.rows[0]);
   } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+    }
     console.error('Error attaching assignment to shift request:', err);
-      return sendDbError(res, err, 'ATTACH ASSIGNMENT');
+    return sendDbError(res, err, 'ATTACH ASSIGNMENT');
+  } finally {
+    if (client) client.release();
   }
 });
 
