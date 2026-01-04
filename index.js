@@ -39,6 +39,9 @@ app.get('/', (req, res) => {
   res.json({ message: 'API is working ✅' });
 });
 
+console.log('strict routing =', app.get('strict routing'));
+
+
 app.use('/auth', authRouter);
 
 app.use('/tree-menu', treeMenuRouter);
@@ -62,6 +65,7 @@ app.use('/shift-requests', shiftRequestsRouter);
 app.use('/user-absences', userAbsencesRouter);
 app.use('/notifications', notifications);
 app.use('/shift-offers', shiftOffersRouter);
+
 
 app.use('/fcm', fcm);
 

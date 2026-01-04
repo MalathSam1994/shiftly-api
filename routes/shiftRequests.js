@@ -1,4 +1,4 @@
-
+// shiftRequests.js
 const express = require('express');
 const pool = require('../db');
 
@@ -554,10 +554,30 @@ router.post('/', async (req, res) => {
         }
         offerId = o.rows[0].id;
       }
+	  
+	  
 
       const offerRes = await client.query(
         `
-        SELECT so.*, sa.*
+        SELECT
+          so.id                 AS offer_id,
+          so.status             AS offer_status,
+          so.shift_assignment_id,
+          so.offered_by_user_id,
+          so.visibility_scope,
+          so.target_user_id,
+          so.note,
+          so.offered_at,
+          so.original_assignment_status,
+
+          sa.status             AS assignment_status,
+          sa.shift_date,
+          sa.division_id,
+          sa.department_id,
+          sa.shift_type_id,
+          sa.staff_type_id,
+          sa.user_id            AS assignment_owner_user_id,
+          sa.is_absence
           FROM shiftly_schema.shift_offers so
           JOIN shiftly_schema.shift_assignments sa ON sa.id = so.shift_assignment_id
          WHERE so.id = $1
@@ -571,9 +591,9 @@ router.post('/', async (req, res) => {
       }
       const row = offerRes.rows[0];
 
-      if (row.status !== 'ACTIVE') {
+       if (String(row.offer_status).toUpperCase() !== 'ACTIVE') {
         await client.query('ROLLBACK');
-        return res.status(400).json({ error: `Offer is not ACTIVE (current=${row.status}).` });
+         return res.status(400).json({ error: `Offer is not ACTIVE (current=${row.offer_status}).` });
       }
       if (isAbsenceValue(row.is_absence)) {
         await client.query('ROLLBACK');
@@ -995,7 +1015,29 @@ router.post('/:id/approve', async (req, res) => {
         // lock offer + assignment
         const o = await client.query(
           `
-          SELECT so.*, sa.*
+               SELECT
+            so.id                 AS offer_id,
+            so.status             AS offer_status,
+            so.shift_assignment_id,
+            so.offered_by_user_id,
+            so.taken_by_user_id,
+            so.taken_at,
+            so.cancelled_by_user_id,
+            so.cancelled_at,
+            so.visibility_scope,
+            so.target_user_id,
+            so.note,
+            so.offered_at,
+            so.original_assignment_status,
+
+            sa.status             AS assignment_status,
+            sa.shift_date,
+            sa.division_id,
+            sa.department_id,
+            sa.shift_type_id,
+            sa.staff_type_id,
+            sa.user_id            AS assignment_owner_user_id,
+            sa.is_absence
             FROM shiftly_schema.shift_offers so
             JOIN shiftly_schema.shift_assignments sa ON sa.id = so.shift_assignment_id
            WHERE so.id = $1
@@ -1007,8 +1049,8 @@ router.post('/:id/approve', async (req, res) => {
           throw new Error('Offer not found.');
         }
         const row = o.rows[0];
-        if (row.status !== 'ACTIVE') {
-          throw new Error(`Offer is not ACTIVE (current=${row.status}).`);
+             if (String(row.offer_status).toUpperCase() !== 'ACTIVE') {
+         throw new Error(`Offer is not ACTIVE (current=${row.offer_status}).`);
         }
 
         // overlap re-check
