@@ -345,12 +345,13 @@ router.post('/', async (req, res) => {
           $7,
           $8,
           $9,
+		  $10,
           NOW(),
           NOW(),
           $2,
           NULL,
           NULL,
-          $10
+          $11
         )
         RETURNING
           id, request_type, request_status, requested_by_user_id, target_user_id,
