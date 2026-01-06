@@ -70,6 +70,92 @@ function isAbsenceValue(v) {
   return v === true || v === 1 || v === '1' || v === 't' || v === 'true';
 }
 
+// Normalize any PG date/timestamp value to a stable "YYYY-MM-DD" key.
+function ymdKey(v) {
+  if (v == null) return null;
+
+  if (v instanceof Date) {
+    const y = v.getUTCFullYear().toString().padStart(4, '0');
+    const m = (v.getUTCMonth() + 1).toString().padStart(2, '0');
+    const d = v.getUTCDate().toString().padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+
+  const s = String(v);
+  if (!s) return null;
+
+  const datePart = s.split('T')[0];
+  if (/^\d{4}-\d{2}-\d{2}$/.test(datePart)) return datePart;
+
+  const dt = new Date(s);
+  if (!Number.isNaN(dt.getTime())) {
+    const y = dt.getUTCFullYear().toString().padStart(4, '0');
+    const m = (dt.getUTCMonth() + 1).toString().padStart(2, '0');
+    const d = dt.getUTCDate().toString().padStart(2, '0');
+    return `${y}-${m}-${d}`;
+  }
+  return null;
+}
+
+function isSameAssignmentSlot(a, b) {
+  // slot = the uq_assignment key WITHOUT user_id
+  return (
+    Number(a?.shift_period_id) === Number(b?.shift_period_id) &&
+    ymdKey(a?.shift_date) === ymdKey(b?.shift_date) &&
+    Number(a?.shift_type_id) === Number(b?.shift_type_id) &&
+    Number(a?.department_id) === Number(b?.department_id) &&
+    Number(a?.division_id ?? 0) === Number(b?.division_id ?? 0)
+  );
+}
+
+async function resolveUqAssignmentConflict(client, {
+  shiftPeriodId,
+  shiftDate,
+  userId,
+  shiftTypeId,
+  departmentId,
+  divisionId,
+  excludeAssignmentId = null,
+}) {
+  // If the target user already has an assignment with the exact uq_assignment key,
+  // we will:
+  //  - HARD FAIL if it's active / absence
+  //  - AUTO-DELETE if it's CANCELLED (because uq_assignment currently blocks reuse)
+  const r = await client.query(
+    `
+    SELECT id, status, is_absence
+      FROM shiftly_schema.shift_assignments
+     WHERE shift_period_id = $1
+       AND shift_date      = $2
+       AND user_id         = $3
+       AND shift_type_id   = $4
+       AND department_id   = $5
+       AND division_id     = $6
+       AND ($7::int IS NULL OR id <> $7)
+     LIMIT 1
+    `,
+    [shiftPeriodId, shiftDate, userId, shiftTypeId, departmentId, divisionId, excludeAssignmentId]
+  );
+  if (!r.rows.length) return;
+
+  const row = r.rows[0];
+  if (isAbsenceValue(row.is_absence)) {
+    const e = new Error(`User already has an ABSENCE entry for this shift slot (assignmentId=${row.id}).`);
+    e.httpStatus = 400;
+    throw e;
+  }
+
+  if (String(row.status).toUpperCase() === 'CANCELLED') {
+    await client.query(`DELETE FROM shiftly_schema.shift_assignments WHERE id = $1`, [row.id]);
+    return;
+  }
+
+  const e = new Error(`User already has an assignment for this shift slot (assignmentId=${row.id}, status=${row.status}).`);
+  e.httpStatus = 400;
+  throw e;
+}
+
+
 // Normalize any PG date/timestamp value to a stable "YYYY-MM" key.
 // pg can return DATE as string (YYYY-MM-DD) but TIMESTAMP/TZ often as JS Date.
 // Using slice(0,7) on a Date's .toString() yields "Fri Jan" etc -> wrong.
@@ -438,6 +524,18 @@ router.post('/', async (req, res) => {
           error: 'Switch is only allowed for same division/department/staff_type/shift_type.',
         });
       }
+	  
+	  
+      // ✅ IMPORTANT:
+      // If both assignments are the exact SAME slot (same period/date/div/dept/shiftType),
+      // swapping user_id will either be a no-op (semantically) or can transiently violate uq_assignment.
+      // Reject at creation time.
+      if (isSameAssignmentSlot(src, tgt)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'Invalid SWITCH: source and target assignments are the same shift slot (same date/shift). Pick a different shift/date.',
+        });
+      }
 
       // Overlap checks:
       // - target user taking src shift (on src date)
@@ -781,6 +879,14 @@ router.post('/:id/approve', async (req, res) => {
 
       const src = srcRes.rows[0];
       const tgt = tgtRes.rows[0];
+	  
+	  
+      // ✅ Prevent the known uq_assignment transient collision:
+      // If both assignments represent the exact same slot (same period/date/div/dept/shiftType),
+      // swapping user_id is either meaningless or will violate uq_assignment during the first UPDATE.
+      if (isSameAssignmentSlot(src, tgt)) {
+        fail(400, 'Cannot approve SWITCH: source and target assignments are the same shift slot (same date/shift). Create a new request selecting a different shift/date.');
+      }
 
       // Re-validate overlap at approval time
       const excludeForTarget =
@@ -811,15 +917,47 @@ router.post('/:id/approve', async (req, res) => {
       const srcUser = src.user_id;
       const tgtUser = tgt.user_id;
 
+      // ✅ Guard uq_assignment before we touch user_id.
+      // This also cleans up CANCELLED duplicates that still block the UNIQUE constraint.
+      await resolveUqAssignmentConflict(client, {
+        shiftPeriodId: src.shift_period_id,
+        shiftDate: src.shift_date,
+        userId: tgtUser,
+        shiftTypeId: src.shift_type_id,
+        departmentId: src.department_id,
+        divisionId: src.division_id,
+        excludeAssignmentId: src.id,
+      });
+
+      await resolveUqAssignmentConflict(client, {
+        shiftPeriodId: tgt.shift_period_id,
+        shiftDate: tgt.shift_date,
+        userId: srcUser,
+        shiftTypeId: tgt.shift_type_id,
+        departmentId: tgt.department_id,
+        divisionId: tgt.division_id,
+        excludeAssignmentId: tgt.id,
+      });
+
+
+
       // Swap users
-      await client.query(
-        `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
-        [tgtUser, src.id]
-      );
-      await client.query(
-        `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
-        [srcUser, tgt.id]
-      );
+         try {
+        await client.query(
+          `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
+          [tgtUser, src.id]
+        );
+        await client.query(
+          `UPDATE shiftly_schema.shift_assignments SET user_id = $1, updated_at = NOW() WHERE id = $2`,
+          [srcUser, tgt.id]
+        );
+      } catch (e) {
+        // Convert uq_assignment violation to a clean 400 message (instead of leaking PG error to UI)
+        if (e?.code === '23505' && String(e?.constraint || '').toLowerCase() === 'uq_assignment') {
+          fail(400, 'Cannot approve SWITCH: the resulting assignment would duplicate an existing assignment slot for one of the users (uq_assignment).');
+        }
+        throw e;
+      }
 
       // History
       await client.query(
@@ -1029,7 +1167,7 @@ router.post('/:id/approve', async (req, res) => {
             so.note,
             so.offered_at,
             so.original_assignment_status,
-
+			sa.shift_period_id,
             sa.status             AS assignment_status,
             sa.shift_date,
             sa.division_id,
@@ -1065,11 +1203,33 @@ router.post('/:id/approve', async (req, res) => {
 
         const fromUser = row.offered_by_user_id;
         const toUser = r.requested_by_user_id;
+		
+		       // ✅ Guard uq_assignment before transferring ownership.
+        // Also auto-deletes CANCELLED duplicates that still block uq_assignment.
+        await resolveUqAssignmentConflict(client, {
+          shiftPeriodId: row.shift_period_id,
+          shiftDate: row.shift_date,
+          userId: toUser,
+          shiftTypeId: row.shift_type_id,
+          departmentId: row.department_id,
+          divisionId: row.division_id,
+          excludeAssignmentId: row.shift_assignment_id,
+        });
 
-        await client.query(
-          `UPDATE shiftly_schema.shift_assignments SET user_id = $1, status = 'APPROVED', updated_at = NOW() WHERE id = $2`,
-          [toUser, row.shift_assignment_id]
-        );
+
+           try {
+          await client.query(
+            `UPDATE shiftly_schema.shift_assignments SET user_id = $1, status = 'APPROVED', updated_at = NOW() WHERE id = $2`,
+            [toUser, row.shift_assignment_id]
+          );
+        } catch (e) {
+          if (e?.code === '23505' && String(e?.constraint || '').toLowerCase() === 'uq_assignment') {
+            const err = new Error('Cannot approve OFFER: the requesting user already has the same assignment slot (uq_assignment).');
+            err.httpStatus = 400;
+            throw err;
+          }
+          throw e;
+        }
         await client.query(
           `
           UPDATE shiftly_schema.shift_offers
@@ -1117,7 +1277,7 @@ router.post('/:id/approve', async (req, res) => {
           await finalizeTransfer();
         } catch (e) {
           await client.query('ROLLBACK');
-          return res.status(400).json({ error: String(e.message || e) });
+          return res.status(e.httpStatus ?? 400).json({ error: String(e.message || e) });
         }
 
         const upd = await client.query(
@@ -1144,7 +1304,7 @@ router.post('/:id/approve', async (req, res) => {
           await finalizeTransfer();
         } catch (e) {
           await client.query('ROLLBACK');
-          return res.status(400).json({ error: String(e.message || e) });
+         return res.status(e.httpStatus ?? 400).json({ error: String(e.message || e) });
         }
 
         const upd = await client.query(
