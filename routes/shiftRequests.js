@@ -1153,6 +1153,29 @@ router.post('/:id/approve', async (req, res) => {
         await client.query('ROLLBACK');
         return res.status(400).json({ error: 'OFF_REQUEST is missing requested_shift_date.' });
       }
+	  
+        if (!r.shift_assignment_id) {
+       await client.query('ROLLBACK');
+       return res.status(400).json({ error: 'OFF_REQUEST is missing shift_assignment_id.' });
+     }
+
+     // Lock assignment row (and ensure it still belongs to the requester)
+     const asgRes = await client.query(
+       `SELECT id, user_id
+          FROM shiftly_schema.shift_assignments
+         WHERE id = $1
+         FOR UPDATE`,
+       [r.shift_assignment_id]
+     );
+     if (!asgRes.rows.length) {
+       await client.query('ROLLBACK');
+       return res.status(404).json({ error: 'shift_assignment_id not found.' });
+     }
+     if (Number(asgRes.rows[0].user_id) !== Number(r.requested_by_user_id)) {
+       await client.query('ROLLBACK');
+       return res.status(400).json({ error: 'OFF_REQUEST assignment no longer belongs to the requesting user.' });
+     }
+
 
       // Idempotent insert (avoid duplicate same-day absence)
       await client.query(
@@ -1177,6 +1200,40 @@ router.post('/:id/approve', async (req, res) => {
           r.decision_comment ?? null,
         ]
       );
+	  
+	  // ✅ History: record OFF_REQUEST approval (idempotent)
+      const histComment = (() => {
+        const parts = [];
+        if (decision_comment != null && String(decision_comment).trim() !== '') {
+          parts.push(String(decision_comment).trim());
+        }
+        parts.push(`ABSENCE_TYPE=${String(r.requested_absence_type).toUpperCase()}`);
+        return parts.length ? parts.join(' | ') : null;
+      })();
+
+      const histExists = await client.query(
+        `
+        SELECT 1
+          FROM shiftly_schema.shift_assignment_user_history h
+         WHERE h.shift_assignment_id = $1
+           AND h.shift_request_id = $2
+           AND h.change_reason = 'OFF_REQUEST'
+         LIMIT 1
+        `,
+        [r.shift_assignment_id, id]
+      );
+      if (!histExists.rows.length) {
+        await client.query(
+          `
+          INSERT INTO shiftly_schema.shift_assignment_user_history
+            (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
+          VALUES
+            ($1, $2, $2, 'OFF_REQUEST', $3, $4)
+          `,
+          [r.shift_assignment_id, r.requested_by_user_id, id, histComment]
+        );
+      }
+
 
       const upd = await client.query(
         `
