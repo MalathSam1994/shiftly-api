@@ -31,6 +31,7 @@ const shiftOffersRouter = require('./routes/shiftOffers');
 
 const colleagueShiftsQuery = require('./query/colleagueShifts');
 const switchCandidatesQuery = require('./query/switchCandidates');
+const availableShiftsQuery = require('./query/availableShifts');
 
 const app = express();
 const port = process.env.API_PORT || 3000;
@@ -71,6 +72,7 @@ app.use('/shift-offers', shiftOffersRouter);
 
 app.use('/colleague-shifts', colleagueShiftsQuery);
 app.use('/switch-candidates', switchCandidatesQuery);
+app.use('/available-shifts', availableShiftsQuery);
 
 app.use('/fcm', fcm);
 
