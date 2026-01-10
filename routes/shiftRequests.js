@@ -70,6 +70,21 @@ function isAbsenceValue(v) {
   return v === true || v === 1 || v === '1' || v === 't' || v === 'true';
 }
 
+async function userHasAbsenceOnDate(client, { userId, shiftDate }) {
+  const r = await client.query(
+    `
+    SELECT 1
+      FROM shiftly_schema.user_absences ua
+     WHERE ua.user_id = $1
+       AND $2::date BETWEEN ua.start_date AND ua.end_date
+     LIMIT 1
+    `,
+    [userId, shiftDate]
+  );
+  return r.rows.length > 0;
+}
+
+
 // Normalize any PG date/timestamp value to a stable "YYYY-MM-DD" key.
 function ymdKey(v) {
   if (v == null) return null;
@@ -317,6 +332,7 @@ router.get('/', async (req, res) => {
         sr.requested_shift_date,
         sr.requested_shift_type_id,
         sr.requested_department_id,
+		 sr.requested_absence_type,
         sr.created_at,
         sr.decided_at,
         sr.decision_by_user_id,
@@ -373,6 +389,8 @@ router.post('/', async (req, res) => {
       requested_shift_date,
       requested_shift_type_id,
       requested_department_id,
+	  requested_absence_type,
+      absence_type, // allow client alias
       decision_comment,
     } = req.body;
 
@@ -385,6 +403,129 @@ router.post('/', async (req, res) => {
 
     const effectiveDivisionId = division_id ?? divisionId ?? null;
     const typeUpper = String(request_type).toUpperCase();
+	
+	    // ---- OFF_REQUEST (absence request; goes through workflow like NEW_SHIFT) ----
+    if (typeUpper === 'OFF_REQUEST') {
+      if (!shift_assignment_id) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'OFF_REQUEST requires shift_assignment_id.' });
+      }
+
+      const effectiveAbsenceType = requested_absence_type ?? absence_type ?? null;
+      if (!effectiveAbsenceType) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'OFF_REQUEST requires requested_absence_type (absence_type).' });
+      }
+
+      // Load the assignment (source of shift_date/division/department/shift_type)
+      const aRes = await client.query(
+        `SELECT * FROM shiftly_schema.shift_assignments WHERE id = $1 FOR UPDATE`,
+        [shift_assignment_id]
+      );
+      if (!aRes.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(404).json({ error: 'shift_assignment_id not found.' });
+      }
+      const a = aRes.rows[0];
+
+      // Only the assignment owner can request off (day detail button is per-user anyway)
+      if (Number(a.user_id) !== Number(requested_by_user_id)) {
+        await client.query('ROLLBACK');
+        return res.status(403).json({ error: 'You can only request off for your own assignment.' });
+      }
+
+      // If already absence, no need to request
+      if (isAbsenceValue(a.is_absence)) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'This assignment is already marked as absence.' });
+      }
+
+      // If an absence already covers that day, reject to avoid duplicates
+      const hasAbs = await userHasAbsenceOnDate(client, {
+        userId: Number(requested_by_user_id),
+        shiftDate: a.shift_date,
+      });
+      if (hasAbs) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'You already have an absence covering this date.' });
+      }
+
+      let effectiveManagerId = manager_user_id ?? null;
+      if (!effectiveManagerId) {
+        effectiveManagerId = await getPrimaryManagerId(client, requested_by_user_id);
+      }
+      if (!effectiveManagerId) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'User has no primary manager.' });
+      }
+
+      const insertQuery = `
+        INSERT INTO shiftly_schema.shift_requests (
+          request_type,
+          request_status,
+          requested_by_user_id,
+          target_user_id,
+          manager_user_id,
+          inbox_user_id,
+          shift_assignment_id,
+          division_id,
+          requested_shift_date,
+          requested_shift_type_id,
+          requested_department_id,
+          requested_absence_type,
+          created_at,
+          last_action_at,
+          last_action_by_user_id,
+          decided_at,
+          decision_by_user_id,
+          decision_comment
+        )
+        VALUES (
+          'OFF_REQUEST',
+          'PENDING',
+          $1,
+          NULL,
+          $2,
+          $2,
+          $3,
+          $4,
+          $5,
+          $6,
+          $7,
+          $8,
+          NOW(),
+          NOW(),
+          $1,
+          NULL,
+          NULL,
+          $9
+        )
+        RETURNING
+          id, request_type, request_status, requested_by_user_id, target_user_id,
+          manager_user_id, inbox_user_id, shift_assignment_id, division_id,
+          requested_shift_date, requested_shift_type_id, requested_department_id,
+          requested_absence_type,
+          created_at, decided_at, decision_by_user_id, decision_comment,
+          source_shift_assignment_id, target_shift_assignment_id, shift_offer_id,
+          last_action_at, last_action_by_user_id
+      `;
+
+      const result = await client.query(insertQuery, [
+        requested_by_user_id,
+        effectiveManagerId,
+        shift_assignment_id,
+        (a.division_id ?? effectiveDivisionId ?? null),
+        a.shift_date,
+        a.shift_type_id,
+        a.department_id,
+        String(effectiveAbsenceType).toUpperCase(),
+        decision_comment ?? null, // request comment (employee)
+      ]);
+
+      await client.query('COMMIT');
+      return res.status(201).json(result.rows[0]);
+    }
+
 
     // ---- NEW_SHIFT (legacy) ----
     if (typeUpper === 'NEW_SHIFT') {
@@ -996,6 +1137,68 @@ router.post('/:id/approve', async (req, res) => {
       await client.query('COMMIT');
       return res.json(upd.rows[0]);
     }
+	
+   // OFF_REQUEST: single-step approve (insert user_absences row; triggers do the rest)
+    if (type === 'OFF_REQUEST') {
+      if (status !== 'PENDING') {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: `OFF_REQUEST cannot be approved from status ${r.request_status}.` });
+      }
+
+      if (!r.requested_absence_type) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'OFF_REQUEST is missing requested_absence_type.' });
+      }
+      if (!r.requested_shift_date) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({ error: 'OFF_REQUEST is missing requested_shift_date.' });
+      }
+
+      // Idempotent insert (avoid duplicate same-day absence)
+      await client.query(
+        `
+        INSERT INTO shiftly_schema.user_absences
+          (user_id, absence_type, start_date, end_date, created_by, comment)
+        SELECT
+          $1, $2, $3::date, $3::date, $4, $5
+        WHERE NOT EXISTS (
+          SELECT 1
+            FROM shiftly_schema.user_absences ua
+           WHERE ua.user_id = $1
+             AND $3::date BETWEEN ua.start_date AND ua.end_date
+        )
+        `,
+        [
+          r.requested_by_user_id,
+          String(r.requested_absence_type).toUpperCase(),
+          r.requested_shift_date,
+          decision_by_user_id,
+          // store the employee request comment (decision_comment at creation)
+          r.decision_comment ?? null,
+        ]
+      );
+
+      const upd = await client.query(
+        `
+        UPDATE shiftly_schema.shift_requests
+           SET request_status      = 'APPROVED',
+               inbox_user_id       = NULL,
+               decided_at          = NOW(),
+               decision_by_user_id = $1,
+               -- do NOT overwrite the employee request comment unless manager provides one
+               decision_comment    = COALESCE($2, decision_comment),
+               last_action_at      = NOW(),
+               last_action_by_user_id = $1
+         WHERE id = $3
+         RETURNING *
+        `,
+        [decision_by_user_id, decision_comment ?? null, id]
+      );
+
+      await client.query('COMMIT');
+      return res.json(upd.rows[0]);
+    }
+
 
     // SWITCH: multi-step
     if (type === 'SWITCH') {
@@ -1537,7 +1740,7 @@ router.post('/:id/reject', async (req, res) => {
              inbox_user_id       = NULL,
              decided_at          = NOW(),
              decision_by_user_id = $1,
-             decision_comment    = $2,
+              decision_comment    = COALESCE($2, decision_comment),
              last_action_at      = NOW(),
              last_action_by_user_id = $1
        WHERE id = $3
