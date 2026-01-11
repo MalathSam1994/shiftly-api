@@ -84,6 +84,154 @@ async function userHasAbsenceOnDate(client, { userId, shiftDate }) {
   return r.rows.length > 0;
 }
 
+/**
+ * Remove ONE specific date from user_absences for a user.
+ * - If absence is exactly that day -> DELETE row
+ * - If range starts that day -> start_date = day+1
+ * - If range ends that day   -> end_date   = day-1
+ * - If range spans over day  -> SPLIT into two rows (left + right)
+ *
+ * This is used when an approved NEW_SHIFT / SWITCH / OFFER means:
+ * "User is scheduled to work on that date, so absence must not cover it."
+ */
+async function removeAbsenceCoverageForDate(client, {
+  userId,
+  shiftDate, // date or string
+  actorUserId = null, // (optional) who triggered this change (manager)
+  reason = null,      // (optional) for comment enrichment
+}) {
+  if (userId == null || shiftDate == null) return;
+
+  // Lock all absences that cover this date (we will modify/delete/split).
+  const abs = await client.query(
+    `
+    SELECT id, user_id, absence_type, start_date, end_date, created_by, comment
+      FROM shiftly_schema.user_absences
+     WHERE user_id = $1
+       AND $2::date BETWEEN start_date AND end_date
+     ORDER BY updated_at DESC, id DESC
+     FOR UPDATE
+    `,
+    [Number(userId), shiftDate]
+  );
+  if (!abs.rows.length) return;
+
+  for (const ua of abs.rows) {
+    // 1) Exact single-day absence -> delete
+    const exact = await client.query(
+      `
+      SELECT 1
+        FROM shiftly_schema.user_absences
+       WHERE id = $1
+         AND start_date = $2::date
+         AND end_date   = $2::date
+       LIMIT 1
+      `,
+      [ua.id, shiftDate]
+    );
+    if (exact.rows.length) {
+      await client.query(`DELETE FROM shiftly_schema.user_absences WHERE id = $1`, [ua.id]);
+      continue;
+    }
+
+    // 2) Range starts at this day -> move start_date forward by 1 day
+    const starts = await client.query(
+      `
+      SELECT 1
+        FROM shiftly_schema.user_absences
+       WHERE id = $1
+         AND start_date = $2::date
+         AND end_date   > $2::date
+       LIMIT 1
+      `,
+      [ua.id, shiftDate]
+    );
+    if (starts.rows.length) {
+      await client.query(
+        `
+        UPDATE shiftly_schema.user_absences
+           SET start_date = ($1::date + INTERVAL '1 day')::date,
+               updated_at = NOW(),
+               comment    = COALESCE(comment, '') ||
+                            CASE WHEN $2::text IS NULL THEN '' ELSE
+                              CASE WHEN COALESCE(comment,'') = '' THEN '' ELSE E'\n' END ||
+                              '[AUTO] removed date ' || $1::text || ' (' || $2::text || ')'
+                            END
+         WHERE id = $3
+        `,
+        [shiftDate, reason, ua.id]
+      );
+      continue;
+    }
+
+    // 3) Range ends at this day -> move end_date backward by 1 day
+    const ends = await client.query(
+      `
+      SELECT 1
+        FROM shiftly_schema.user_absences
+       WHERE id = $1
+         AND end_date   = $2::date
+         AND start_date < $2::date
+       LIMIT 1
+      `,
+      [ua.id, shiftDate]
+    );
+    if (ends.rows.length) {
+      await client.query(
+        `
+        UPDATE shiftly_schema.user_absences
+           SET end_date   = ($1::date - INTERVAL '1 day')::date,
+               updated_at = NOW(),
+               comment    = COALESCE(comment, '') ||
+                            CASE WHEN $2::text IS NULL THEN '' ELSE
+                              CASE WHEN COALESCE(comment,'') = '' THEN '' ELSE E'\n' END ||
+                              '[AUTO] removed date ' || $1::text || ' (' || $2::text || ')'
+                            END
+         WHERE id = $3
+        `,
+        [shiftDate, reason, ua.id]
+      );
+      continue;
+    }
+
+    // 4) Date is strictly inside the range -> split into two ranges
+    // Left part: keep current row, set end_date = day-1
+    // Right part: insert new row, start_date = day+1, end_date = old_end_date
+    await client.query(
+      `
+      UPDATE shiftly_schema.user_absences
+         SET end_date   = ($1::date - INTERVAL '1 day')::date,
+             updated_at = NOW(),
+             comment    = COALESCE(comment, '') ||
+                          CASE WHEN $2::text IS NULL THEN '' ELSE
+                            CASE WHEN COALESCE(comment,'') = '' THEN '' ELSE E'\n' END ||
+                            '[AUTO] split to remove date ' || $1::text || ' (' || $2::text || ')'
+                          END
+       WHERE id = $3
+      `,
+      [shiftDate, reason, ua.id]
+    );
+
+    await client.query(
+      `
+      INSERT INTO shiftly_schema.user_absences
+        (user_id, absence_type, start_date, end_date, created_by, comment)
+      VALUES
+        ($1, $2, ($3::date + INTERVAL '1 day')::date, $4::date, $5, $6)
+      `,
+      [
+        ua.user_id,
+        ua.absence_type,
+        shiftDate,
+        ua.end_date,
+        ua.created_by ?? actorUserId ?? null,
+        ua.comment,
+      ]
+    );
+  }
+}
+
+
 
 // Normalize any PG date/timestamp value to a stable "YYYY-MM-DD" key.
 function ymdKey(v) {
@@ -1021,6 +1169,23 @@ router.post('/:id/approve', async (req, res) => {
       const src = srcRes.rows[0];
       const tgt = tgtRes.rows[0];
 	  
+	 
+      // ✅ If approving a SWITCH means both users will work on the new dates,
+      // remove those dates from any existing absences to avoid cancellations/conflicts.
+      // - target user will receive src.shift_date
+      // - source user will receive tgt.shift_date
+      await removeAbsenceCoverageForDate(client, {
+        userId: Number(r.target_user_id),
+        shiftDate: src.shift_date,
+        actorUserId: decision_by_user_id,
+        reason: 'SWITCH_APPROVED_TARGET_DATE',
+      });
+      await removeAbsenceCoverageForDate(client, {
+        userId: Number(r.requested_by_user_id),
+        shiftDate: tgt.shift_date,
+        actorUserId: decision_by_user_id,
+        reason: 'SWITCH_APPROVED_SOURCE_DATE',
+      });
 	  
       // ✅ Prevent the known uq_assignment transient collision:
       // If both assignments represent the exact same slot (same period/date/div/dept/shiftType),
@@ -1104,14 +1269,39 @@ router.post('/:id/approve', async (req, res) => {
       await client.query(
         `
         INSERT INTO shiftly_schema.shift_assignment_user_history
-          (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
+          (
+            shift_assignment_id,
+            from_user_id,
+            to_user_id,
+            change_reason,
+            shift_request_id,
+            shift_date,
+            shift_type_id,
+            department_id,
+            division_id,
+            comment
+          )
         VALUES
-          ($1, $2, $3, 'SWITCH', $4, $5),
-          ($6, $7, $8, 'SWITCH', $4, $5)
+             ($1, $2, $3, 'SWITCH', $4, $5, $6, $7, $8, $9),
+          ($10, $11, $12, 'SWITCH', $4, $13, $14, $15, $16, $9)
         `,
         [
-          src.id, srcUser, tgtUser, r.id, decision_comment ?? null,
-          tgt.id, tgtUser, srcUser,
+          src.id,
+          srcUser,
+          tgtUser,
+          r.id,
+          src.shift_date,
+          src.shift_type_id,
+          src.department_id,
+          src.division_id ?? null,
+          decision_comment ?? null,
+          tgt.id,
+          tgtUser,
+          srcUser,
+          tgt.shift_date,
+          tgt.shift_type_id,
+          tgt.department_id,
+          tgt.division_id ?? null,
         ]
       );
     };
@@ -1119,6 +1309,17 @@ router.post('/:id/approve', async (req, res) => {
 
     // NEW_SHIFT: single-step approve (legacy)
     if (type === 'NEW_SHIFT') {
+		
+		// ✅ If user previously had OFF_REQUEST approved for that date,
+      // remove that date from user_absences so a new assignment can exist.
+      await removeAbsenceCoverageForDate(client, {
+        userId: r.requested_by_user_id,
+        shiftDate: r.requested_shift_date,
+        actorUserId: decision_by_user_id,
+        reason: 'NEW_SHIFT_APPROVED',
+      });
+
+		
       const upd = await client.query(
         `
         UPDATE shiftly_schema.shift_requests
@@ -1159,9 +1360,9 @@ router.post('/:id/approve', async (req, res) => {
        return res.status(400).json({ error: 'OFF_REQUEST is missing shift_assignment_id.' });
      }
 
-     // Lock assignment row (and ensure it still belongs to the requester)
+    // Lock assignment row (and ensure it still belongs to the requester)
      const asgRes = await client.query(
-       `SELECT id, user_id
+       `SELECT id, user_id, shift_date, shift_type_id, department_id, division_id
           FROM shiftly_schema.shift_assignments
          WHERE id = $1
          FOR UPDATE`,
@@ -1223,14 +1424,35 @@ router.post('/:id/approve', async (req, res) => {
         [r.shift_assignment_id, id]
       );
       if (!histExists.rows.length) {
+		  const a = asgRes.rows[0];
         await client.query(
           `
           INSERT INTO shiftly_schema.shift_assignment_user_history
-            (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
+             (
+              shift_assignment_id,
+              from_user_id,
+              to_user_id,
+              change_reason,
+              shift_request_id,
+              shift_date,
+              shift_type_id,
+              department_id,
+              division_id,
+              comment
+            )
           VALUES
-            ($1, $2, $2, 'OFF_REQUEST', $3, $4)
+                 ($1, $2, $2, 'OFF_REQUEST', $3, $4, $5, $6, $7, $8)
           `,
-          [r.shift_assignment_id, r.requested_by_user_id, id, histComment]
+           [
+             r.shift_assignment_id,
+             r.requested_by_user_id,
+             id,
+             a.shift_date,
+             a.shift_type_id,
+             a.department_id,
+             a.division_id ?? null,
+             histComment,
+           ]
         );
       }
 
@@ -1450,6 +1672,15 @@ router.post('/:id/approve', async (req, res) => {
              if (String(row.offer_status).toUpperCase() !== 'ACTIVE') {
          throw new Error(`Offer is not ACTIVE (current=${row.offer_status}).`);
         }
+		
+		        // ✅ Requesting user is going to take this shift date -> remove that date
+        // from any existing absences so the assignment won't be considered "absent".
+        await removeAbsenceCoverageForDate(client, {
+          userId: Number(r.requested_by_user_id),
+          shiftDate: row.shift_date,
+          actorUserId: decision_by_user_id,
+          reason: 'OFFER_APPROVED',
+        });
 
         // overlap re-check
         const overlap = await userHasOverlappingAssignment(client, {
@@ -1503,11 +1734,34 @@ router.post('/:id/approve', async (req, res) => {
         await client.query(
           `
           INSERT INTO shiftly_schema.shift_assignment_user_history
-            (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, shift_offer_id, comment)
+            (
+              shift_assignment_id,
+              from_user_id,
+              to_user_id,
+              change_reason,
+              shift_request_id,
+              shift_offer_id,
+              shift_date,
+              shift_type_id,
+              department_id,
+              division_id,
+              comment
+            )
           VALUES
-            ($1, $2, $3, 'OFFER', $4, $5, $6)
+            ($1, $2, $3, 'OFFER', $4, $5, $6, $7, $8, $9, $10)
           `,
-          [row.shift_assignment_id, fromUser, toUser, r.id, offerId, decision_comment ?? null]
+         [
+           row.shift_assignment_id,
+           fromUser,
+           toUser,
+           r.id,
+           offerId,
+           row.shift_date,
+           row.shift_type_id,
+           row.department_id,
+           row.division_id ?? null,
+           decision_comment ?? null,
+         ]
         );
       };
 
@@ -1722,14 +1976,29 @@ router.post('/:id/attach-assignment', async (req, res) => {
         await client.query(
           `
           INSERT INTO shiftly_schema.shift_assignment_user_history
-            (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id, comment)
+           (
+              shift_assignment_id,
+              from_user_id,
+              to_user_id,
+              change_reason,
+              shift_request_id,
+              shift_date,
+              shift_type_id,
+              department_id,
+              division_id,
+              comment
+            )
           VALUES
-            ($1, NULL, $2, 'NEW_SHIFT', $3, $4)
+         ($1, NULL, $2, 'NEW_SHIFT', $3, $4, $5, $6, $7, $8)
           `,
           [
             shift_assignment_id,
             toUserId,
             id,
+            a.shift_date,
+            a.shift_type_id,
+            a.department_id,
+            a.division_id ?? null,
             r.decision_comment ?? null,
           ]
         );
