@@ -503,6 +503,91 @@ router.get('/', async (req, res) => {
 });
 
 /**
+ * DELETE /shift-requests/:id
+ *
+ * Retract (delete) a request while it's still pending, regardless of type:
+ *   NEW_SHIFT | OFF_REQUEST | SWITCH | OFFER
+ *
+ * Permission:
+ *  - only the request creator (requested_by_user_id) may retract
+ *
+ * Allowed statuses:
+ *  - any status that starts with "PENDING" (PENDING, PENDING_TARGET_USER, PENDING_TARGET_MANAGER, ...)
+ *
+ * Accepts actor user id via:
+ *  - query:  actorUserId / actor_user_id
+ *  - body:   actor_user_id / actorUserId
+ */
+router.delete('/:id', async (req, res) => {
+  let client;
+  try {
+    const { id } = req.params;
+    const requestId = parseInt(String(id), 10);
+    if (Number.isNaN(requestId)) {
+      return res.status(400).json({ error: 'Invalid request id' });
+    }
+
+    const actorRaw =
+      req.query?.actorUserId ??
+      req.query?.actor_user_id ??
+      req.body?.actor_user_id ??
+      req.body?.actorUserId ??
+      null;
+
+    const actorUserId = parseInt(String(actorRaw ?? ''), 10);
+    if (Number.isNaN(actorUserId)) {
+      return res.status(400).json({ error: 'actorUserId is required.' });
+    }
+
+    client = await pool.connect();
+    await client.query('BEGIN');
+
+    const rRes = await client.query(
+      `SELECT *
+         FROM shiftly_schema.shift_requests
+        WHERE id = $1
+        FOR UPDATE`,
+      [requestId]
+    );
+    if (!rRes.rows.length) {
+      await client.query('ROLLBACK');
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const r = rRes.rows[0];
+
+    if (Number(r.requested_by_user_id) !== Number(actorUserId)) {
+      await client.query('ROLLBACK');
+      return res.status(403).json({ error: 'You can only retract your own requests.' });
+    }
+
+    const status = String(r.request_status ?? '').toUpperCase();
+    if (!isPendingStatus(status)) {
+      await client.query('ROLLBACK');
+      return res.status(400).json({
+        error: `Cannot retract request from status ${r.request_status}. Only pending requests can be retracted.`,
+      });
+    }
+
+    await client.query(
+      `DELETE FROM shiftly_schema.shift_requests WHERE id = $1`,
+      [requestId]
+    );
+
+    await client.query('COMMIT');
+    return res.json({ id: requestId, deleted: true });
+  } catch (err) {
+    if (client) {
+      try { await client.query('ROLLBACK'); } catch (_) {}
+    }
+    console.error('Error retracting shift request:', err);
+    return sendDbError(res, err, 'RETRACT SHIFT REQUEST');
+  } finally {
+    if (client) client.release();
+  }
+});
+
+
+/**
  * POST /shift-requests
  *
  * Body:
