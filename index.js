@@ -33,6 +33,14 @@ const colleagueShiftsQuery = require('./query/colleagueShifts');
 const switchCandidatesQuery = require('./query/switchCandidates');
 const availableShiftsQuery = require('./query/availableShifts');
 
+// =========================================================
+// SEARCH (read-only) query endpoints (backed by DB views)
+// =========================================================
+const searchAvailableShiftsQuery = require('./query/searchAvailableShifts');
+const searchAssignedShiftsQuery = require('./query/searchAssignedShifts');
+const searchPendingShiftRequestsQuery = require('./query/searchPendingShiftRequests');
+const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
+
 const app = express();
 const port = process.env.API_PORT || 3000;
 
@@ -73,6 +81,15 @@ app.use('/shift-offers', shiftOffersRouter);
 app.use('/colleague-shifts', colleagueShiftsQuery);
 app.use('/switch-candidates', switchCandidatesQuery);
 app.use('/available-shifts', availableShiftsQuery);
+
+
+// =========================================================
+// SEARCH (read-only)
+// =========================================================
+app.use('/search/available-shifts', searchAvailableShiftsQuery);
+app.use('/search/assigned-shifts', searchAssignedShiftsQuery);
+app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
+app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
 
 app.use('/fcm', fcm);
 
