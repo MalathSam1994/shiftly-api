@@ -1,104 +1,160 @@
-// index.js
-const express = require('express');
-const cors = require('cors');
-require('dotenv').config();
+	// index.js
+	const express = require('express');
+	const crypto = require('crypto');
+	const cors = require('cors');
+	require('dotenv').config();
 
 
-const treeMenuRouter = require('./routes/treeMenu');
-const itemsRouter = require('./routes/items');
-const departmentsRouter = require('./routes/departments');
-const divisionsRouter = require('./routes/divisions');
-const usersRouter = require('./routes/users');
-const userDepartmentsRouter = require('./routes/userDepartments');
-const userDivisionsRouter = require('./routes/userDivisions');
-const authRouter = require('./routes/auth');
+	const treeMenuRouter = require('./routes/treeMenu');
+	const itemsRouter = require('./routes/items');
+	const departmentsRouter = require('./routes/departments');
+	const divisionsRouter = require('./routes/divisions');
+	const usersRouter = require('./routes/users');
+	const userDepartmentsRouter = require('./routes/userDepartments');
+	const userDivisionsRouter = require('./routes/userDivisions');
+	const authRouter = require('./routes/auth');
 
-// new routes
-const staffTypesRouter = require('./routes/staffTypes');
-const shiftTypesRouter = require('./routes/shiftTypes');
-const staffShiftRulesRouter = require('./routes/staffShiftRules');
-const userManagersRouter = require('./routes/userManagers');
-const shiftTemplatesRouter = require('./routes/shiftTemplates');
-const shiftTemplateEntriesRouter = require('./routes/shiftTemplateEntries');
-const shiftPeriodsRouter = require('./routes/shiftPeriods');
-const shiftAssignmentsRouter = require('./routes/shiftAssignments');
-const shiftRequestsRouter = require('./routes/shiftRequests');
-const userAbsencesRouter = require('./routes/userAbsences');
-const notifications = require('./routes/notifications');
-const fcm = require('./routes/fcm');
-const { startNotificationDispatcher } = require('./services/notificationDispatcher');
-const shiftOffersRouter = require('./routes/shiftOffers');
+	// new routes
+	const staffTypesRouter = require('./routes/staffTypes');
+	const shiftTypesRouter = require('./routes/shiftTypes');
+	const staffShiftRulesRouter = require('./routes/staffShiftRules');
+	const userManagersRouter = require('./routes/userManagers');
+	const shiftTemplatesRouter = require('./routes/shiftTemplates');
+	const shiftTemplateEntriesRouter = require('./routes/shiftTemplateEntries');
+	const shiftPeriodsRouter = require('./routes/shiftPeriods');
+	const shiftAssignmentsRouter = require('./routes/shiftAssignments');
+	const shiftRequestsRouter = require('./routes/shiftRequests');
+	const userAbsencesRouter = require('./routes/userAbsences');
+	const notifications = require('./routes/notifications');
+	const fcm = require('./routes/fcm');
+	const { startNotificationDispatcher } = require('./services/notificationDispatcher');
+	const shiftOffersRouter = require('./routes/shiftOffers');
 
-const colleagueShiftsQuery = require('./query/colleagueShifts');
-const switchCandidatesQuery = require('./query/switchCandidates');
-const availableShiftsQuery = require('./query/availableShifts');
+	const colleagueShiftsQuery = require('./query/colleagueShifts');
+	const switchCandidatesQuery = require('./query/switchCandidates');
+	const availableShiftsQuery = require('./query/availableShifts');
 
+	// =========================================================
+	// SEARCH (read-only) query endpoints (backed by DB views)
+	// =========================================================
+	const searchAvailableShiftsQuery = require('./query/searchAvailableShifts');
+	const searchAssignedShiftsQuery = require('./query/searchAssignedShifts');
+	const searchPendingShiftRequestsQuery = require('./query/searchPendingShiftRequests');
+	const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
+
+	const app = express();
+	const port = process.env.API_PORT || 3000;
+
+	app.use(cors());
+	app.use(express.json());
+	
 // =========================================================
-// SEARCH (read-only) query endpoints (backed by DB views)
+// 🔍 REQUEST ID + LIFECYCLE LOGGER
+// Must be registered BEFORE all route mounts
 // =========================================================
-const searchAvailableShiftsQuery = require('./query/searchAvailableShifts');
-const searchAssignedShiftsQuery = require('./query/searchAssignedShifts');
-const searchPendingShiftRequestsQuery = require('./query/searchPendingShiftRequests');
-const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
+app.use((req, res, next) => {
+  const rid = crypto.randomBytes(4).toString('hex');
+  req.rid = rid;
 
-const app = express();
-const port = process.env.API_PORT || 3000;
+  const start = Date.now();
+ const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
+ console.log(`[${rid}] --> ${req.method} ${req.originalUrl} ip=${ip}`);
+  
 
-app.use(cors());
-app.use(express.json());
-
-app.get('/', (req, res) => {
-  res.json({ message: 'API is working ✅' });
-});
-
-console.log('strict routing =', app.get('strict routing'));
-
-
-app.use('/auth', authRouter);
-
-app.use('/tree-menu', treeMenuRouter);
-app.use('/items', itemsRouter);
-app.use('/departments', departmentsRouter);
-app.use('/divisions', divisionsRouter);
-app.use('/users', usersRouter);
-app.use('/user-departments', userDepartmentsRouter);
-app.use('/user-divisions', userDivisionsRouter);
-
-// new mounts
-app.use('/staff-types', staffTypesRouter);
-app.use('/shift-types', shiftTypesRouter);
-app.use('/staff-shift-rules', staffShiftRulesRouter);
-app.use('/user-managers', userManagersRouter);
-app.use('/shift-templates', shiftTemplatesRouter);
-app.use('/shift-template-entries', shiftTemplateEntriesRouter);
-app.use('/shift-periods', shiftPeriodsRouter);
-app.use('/shift-assignments', shiftAssignmentsRouter);
-app.use('/shift-requests', shiftRequestsRouter);
-app.use('/user-absences', userAbsencesRouter);
-app.use('/notifications', notifications);
-app.use('/shift-offers', shiftOffersRouter);
-
-app.use('/colleague-shifts', colleagueShiftsQuery);
-app.use('/switch-candidates', switchCandidatesQuery);
-app.use('/available-shifts', availableShiftsQuery);
-
-
-// =========================================================
-// SEARCH (read-only)
-// =========================================================
-app.use('/search/available-shifts', searchAvailableShiftsQuery);
-app.use('/search/assigned-shifts', searchAssignedShiftsQuery);
-app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
-app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
-
-app.use('/fcm', fcm);
-
-app.listen(port, () => {
-  console.log(`API listening on port ${port}`);
-    // ✅ Start push dispatcher once API is up.
-  startNotificationDispatcher().catch((e) => {
-    console.error('Failed to start notification dispatcher:', e);
+  res.on('finish', () => {
+    console.log(
+      `[${rid}] <-- ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`
+    );
   });
+
+  res.on('close', () => {
+    if (!res.writableEnded) {
+      console.log(
+        `[${rid}] xx  ${req.method} ${req.originalUrl} CLOSED ${Date.now() - start}ms`
+      );
+    }
+  });
+
+  next();
+});
+ 
+	
+
+// =========================================================
+// 🔎 STUCK REQUEST WATCHDOG (temporary diagnostics)
+// Logs any request that takes >5s without finishing
+// =========================================================
+app.use((req, res, next) => {
+  const started = Date.now();
+
+  const timer = setTimeout(() => {
+    console.error('⚠️ STUCK REQUEST', {
+      method: req.method,
+      url: req.originalUrl,
+      elapsedMs: Date.now() - started,
+    });
+  }, 5000);
+
+  res.on('finish', () => clearTimeout(timer));
+  res.on('close', () => clearTimeout(timer));
+
+  next();
 });
 
-module.exports = app;
+
+	app.get('/', (req, res) => {
+	  res.json({ message: 'API is working ✅' });
+	});
+
+	console.log('strict routing =', app.get('strict routing'));
+
+
+	app.use('/auth', authRouter);
+
+	app.use('/tree-menu', treeMenuRouter);
+	app.use('/items', itemsRouter);
+	app.use('/departments', departmentsRouter);
+	app.use('/divisions', divisionsRouter);
+	app.use('/users', usersRouter);
+	app.use('/user-departments', userDepartmentsRouter);
+	app.use('/user-divisions', userDivisionsRouter);
+
+	// new mounts
+	app.use('/staff-types', staffTypesRouter);
+	app.use('/shift-types', shiftTypesRouter);
+	app.use('/staff-shift-rules', staffShiftRulesRouter);
+	app.use('/user-managers', userManagersRouter);
+	app.use('/shift-templates', shiftTemplatesRouter);
+	app.use('/shift-template-entries', shiftTemplateEntriesRouter);
+	app.use('/shift-periods', shiftPeriodsRouter);
+	app.use('/shift-assignments', shiftAssignmentsRouter);
+	app.use('/shift-requests', shiftRequestsRouter);
+	app.use('/user-absences', userAbsencesRouter);
+	
+	app.use('/shift-offers', shiftOffersRouter);
+
+	app.use('/colleague-shifts', colleagueShiftsQuery);
+	app.use('/switch-candidates', switchCandidatesQuery);
+	app.use('/available-shifts', availableShiftsQuery);
+
+
+	// =========================================================
+	// SEARCH (read-only)
+	// =========================================================
+	app.use('/search/available-shifts', searchAvailableShiftsQuery);
+	app.use('/search/assigned-shifts', searchAssignedShiftsQuery);
+	app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
+	app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
+
+	app.use('/fcm', fcm);
+	app.use('/notifications', notifications);
+
+	app.listen(port, () => {
+	  console.log(`API listening on port ${port}`);
+		// ✅ Start push dispatcher once API is up.
+	  startNotificationDispatcher().catch((e) => {
+		console.error('Failed to start notification dispatcher:', e);
+	  });
+	});
+
+	module.exports = app;

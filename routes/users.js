@@ -5,9 +5,29 @@ const pool = require('../db');
 
 const router = express.Router();
 
+// Run a single query with a per-request statement_timeout that does NOT leak to pooled sessions.
+async function queryWithTimeout(sql, params, timeoutMs = 20000) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // SET LOCAL only applies within the current transaction.
+    await client.query(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
+    const result = await client.query(sql, params);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 // GET /users -> list all users (without password_hash)
 router.get('/', async (req, res) => {
+	console.log(`[${req.rid}] USERS LIST entered`);
   try {
+	  console.log(`[${req.rid}] USERS LIST before DB query`);
     const query = `
       SELECT id,
              empno,
@@ -19,7 +39,12 @@ router.get('/', async (req, res) => {
       FROM shiftly_schema.users
       ORDER BY id
     `;
-    const result = await pool.query(query);
+	
+    // NOTE: do NOT send "SET ...; SELECT ..." as one string.
+   // node-postgres returns an array of results for multi-statements -> result.rows becomes undefined.
+   const result = await queryWithTimeout(query, [], 20000);
+
+    console.log(`[${req.rid}] USERS LIST after DB query rows=${result.rows.length}`);
     res.json(result.rows);
   } catch (err) {
     console.error('Error querying DB (USERS LIST):', err);
@@ -29,6 +54,7 @@ router.get('/', async (req, res) => {
 
 // GET /users/:id -> single user (without password_hash)
 router.get('/:id', async (req, res) => {
+	console.log(`[${req.rid}] USERS GET id=${req.params.id} entered`);
   try {
     const query = `
       SELECT id,
@@ -41,7 +67,9 @@ router.get('/:id', async (req, res) => {
       FROM shiftly_schema.users
       WHERE id = $1
     `;
-    const result = await pool.query(query, [req.params.id]);
+      console.log(`[${req.rid}] USERS GET before DB query`);
+   const result = await queryWithTimeout(query, [req.params.id], 20000);
+   console.log(`[${req.rid}] USERS GET after DB query rows=${result.rows.length}`);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Not found' });

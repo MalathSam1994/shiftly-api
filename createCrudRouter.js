@@ -2,6 +2,24 @@
 const express = require('express');
 const pool = require('./db');
 
+// Run a single query with a per-request statement_timeout that does NOT leak to pooled sessions.
+async function queryWithTimeout(sql, params = [], timeoutMs = 20000) {
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+    // SET LOCAL only applies within the current transaction.
+    await client.query(`SET LOCAL statement_timeout = '${timeoutMs}ms'`);
+    const result = await client.query(sql, params);
+    await client.query('COMMIT');
+    return result;
+  } catch (e) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    throw e;
+  } finally {
+    client.release();
+  }
+}
+
 /**
  * config = {
  *   table: 'shiftly_schema.tree_menu',
@@ -13,6 +31,7 @@ function createCrudRouter(config) {
   const router = express.Router();
 
   const allColumns = [config.idColumn, ...config.columns];
+  const timeoutMs = config.timeoutMs ?? 20000;
 
   // GET / -> list all rows
   router.get('/', async (req, res) => {
@@ -29,7 +48,7 @@ function createCrudRouter(config) {
         FROM ${config.table}
         ORDER BY ${config.idColumn}
       `;
-      const result = await pool.query(query);
+      const result = await queryWithTimeout(query, [], timeoutMs);
       res.json(result.rows);
     } catch (err) {
       console.error('Error querying DB (LIST):', err);
@@ -45,7 +64,7 @@ function createCrudRouter(config) {
         FROM ${config.table}
         WHERE ${config.idColumn} = $1
       `;
-      const result = await pool.query(query, [req.params.id]);
+        const result = await queryWithTimeout(query, [req.params.id], timeoutMs);
 
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Not found' });
@@ -89,7 +108,7 @@ function createCrudRouter(config) {
         RETURNING ${allColumns.join(', ')}
       `;
 
-      const result = await pool.query(query, values);
+       const result = await queryWithTimeout(query, values, timeoutMs);
       res.status(201).json(result.rows[0]);
     } catch (err) {
       console.error('Error inserting into DB (CREATE):', err);
@@ -126,7 +145,7 @@ function createCrudRouter(config) {
         RETURNING ${allColumns.join(', ')}
       `;
 
-      const result = await pool.query(query, values);
+       const result = await queryWithTimeout(query, values, timeoutMs);
 
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Not found' });
@@ -147,7 +166,7 @@ function createCrudRouter(config) {
         WHERE ${config.idColumn} = $1
         RETURNING ${allColumns.join(', ')}
       `;
-      const result = await pool.query(query, [req.params.id]);
+       const result = await queryWithTimeout(query, [req.params.id], timeoutMs);
 
       if (result.rows.length === 0) {
         return res.status(404).json({ error: 'Not found' });
