@@ -44,6 +44,7 @@
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
+	const host = process.env.API_HOST || '10.66.66.1';
 
 	app.use(cors());
 	app.use(express.json());
@@ -149,8 +150,8 @@ app.use((req, res, next) => {
 	app.use('/fcm', fcm);
 	app.use('/notifications', notifications);
 
-	app.listen(port, () => {
-	  console.log(`API listening on port ${port}`);
+	app.listen(port, host, () => {
+	   console.log(`API listening on ${host}:${port}`);
 		// ✅ Start push dispatcher once API is up.
 	  startNotificationDispatcher().catch((e) => {
 		console.error('Failed to start notification dispatcher:', e);
