@@ -44,7 +44,7 @@
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
-	const host = process.env.API_HOST || '10.66.66.1';
+	const host = process.env.API_HOST || '0.0.0.0';
 
 	app.use(cors());
 	app.use(express.json());
