@@ -2,6 +2,8 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
+const jwt = require('jsonwebtoken');
+const requireAuth = require('../middleware/requireAuth');
 
 const router = express.Router();
 
@@ -50,7 +52,23 @@ if (!usernameNorm || !password) {
     // Do not send password_hash back to the client
     const { password_hash, ...safeUser } = user;
 
-    return res.json(safeUser);
+    // Issue JWT
+    if (!process.env.JWT_SECRET) {
+      console.error('JWT_SECRET is missing in env');
+      return res.status(500).json({ error: 'Server misconfiguration' });
+    }
+
+    const token = jwt.sign(
+      {
+        sub: safeUser.id,
+        role_id: safeUser.role_id ?? null,
+        user_type: safeUser.user_type ?? null,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '12h' },
+    );
+
+    return res.json({ ...safeUser, token });
   } catch (err) {
     console.error('Error during login:', err);
     return res.status(500).json({ error: 'Database error' });
@@ -58,7 +76,8 @@ if (!usernameNorm || !password) {
 });
 
 // Change password endpoint
-router.post('/change-password', async (req, res) => {
+// Requires JWT so users can only change their own password.
+router.post('/change-password', requireAuth, async (req, res) => {
   const { userId, currentPassword, newPassword } = req.body;
 
   if (!userId || !currentPassword || !newPassword) {
@@ -72,6 +91,12 @@ router.post('/change-password', async (req, res) => {
       error: 'New password must be at least 8 characters long.',
     });
   }
+
+  // Ensure the token owner matches the requested userId
+  if (Number(req.user?.sub) !== Number(userId)) {
+    return res.status(403).json({ error: 'Forbidden' });
+  }
+
 
   try {
     const selectQuery = `

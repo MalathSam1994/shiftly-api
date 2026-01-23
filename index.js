@@ -3,6 +3,7 @@
 	const crypto = require('crypto');
 	const cors = require('cors');
 	require('dotenv').config();
+	const requireAuth = require('./middleware/requireAuth');
 
 
 	const treeMenuRouter = require('./routes/treeMenu');
@@ -44,10 +45,24 @@
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
-	const host = process.env.API_HOST || '0.0.0.0';
+	const host = process.env.API_HOST || '127.0.0.1';
 
-	app.use(cors());
+	+// Behind Nginx (reverse proxy)
+app.set('trust proxy', 1);
+
+// CORS (tighten later when you have domain(s))
+app.use(cors({
+  origin: process.env.CORS_ORIGINS
+    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
+    : true,
+}));
 	app.use(express.json());
+	
+	function ts() {
+  // ISO 8601, sortable, timezone-safe
+  return new Date().toISOString();
+}
+
 	
 // =========================================================
 // 🔍 REQUEST ID + LIFECYCLE LOGGER
@@ -59,19 +74,19 @@ app.use((req, res, next) => {
 
   const start = Date.now();
  const ip = req.headers['x-forwarded-for'] || req.socket.remoteAddress;
- console.log(`[${rid}] --> ${req.method} ${req.originalUrl} ip=${ip}`);
+  console.log(`${ts()} [${rid}] --> ${req.method} ${req.originalUrl} ip=${ip}`);
   
 
   res.on('finish', () => {
     console.log(
-      `[${rid}] <-- ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`
+      `${ts()} [${rid}] <-- ${req.method} ${req.originalUrl} ${res.statusCode} ${Date.now() - start}ms`
     );
   });
 
   res.on('close', () => {
     if (!res.writableEnded) {
       console.log(
-        `[${rid}] xx  ${req.method} ${req.originalUrl} CLOSED ${Date.now() - start}ms`
+          `${ts()} [${rid}] xx  ${req.method} ${req.originalUrl} CLOSED ${Date.now() - start}ms`
       );
     }
   });
@@ -111,6 +126,9 @@ app.use((req, res, next) => {
 
 
 	app.use('/auth', authRouter);
+	
+	// Protect EVERYTHING below (all business endpoints)
+app.use(requireAuth);
 
 	app.use('/tree-menu', treeMenuRouter);
 	app.use('/items', itemsRouter);

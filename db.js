@@ -18,11 +18,11 @@ const pool = new Pool({
 
 // 🔎 PG pool health monitoring (global)
 setInterval(() => {
-  console.log('PG POOL', {
+  /*console.log('PG POOL', {
     total: pool.totalCount,
     idle: pool.idleCount,
     waiting: pool.waitingCount,
-  });
+  });*/
 }, 5000);
 
 
