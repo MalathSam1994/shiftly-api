@@ -50,11 +50,26 @@
 	+// Behind Nginx (reverse proxy)
 app.set('trust proxy', 1);
 
-// CORS (tighten later when you have domain(s))
+// CORS (supports production allow-list + always allow localhost dev ports)
+const allowedOrigins = (process.env.CORS_ORIGINS || '')
+ .split(',')
+ .map(s => s.trim())
+ .filter(Boolean);
+
+function isAllowedOrigin(origin) {
+ if (!origin) return true; // same-origin / curl / server-to-server
+ if (allowedOrigins.length === 0) return true; // no allow-list => allow all (testing)
+ if (allowedOrigins.includes(origin)) return true;
+ // allow Flutter web dev server / local testing
+ if (/^http:\/\/localhost:\d+$/.test(origin)) return true;
+ if (/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) return true;
+ return false;
+}
+
 app.use(cors({
-  origin: process.env.CORS_ORIGINS
-    ? process.env.CORS_ORIGINS.split(',').map(s => s.trim()).filter(Boolean)
-    : true,
+ origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
+ methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
+ allowedHeaders: ['Content-Type', 'Authorization'],
 }));
 	app.use(express.json());
 	
