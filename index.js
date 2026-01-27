@@ -34,6 +34,14 @@
 	const colleagueShiftsQuery = require('./query/colleagueShifts');
 	const switchCandidatesQuery = require('./query/switchCandidates');
 	const availableShiftsQuery = require('./query/availableShifts');
+	
+	
+ // =========================================================
+ // DROPDOWNS (read-only) backed by DB views
+ // =========================================================
+ const dropdownUsersQuery = require('./query/dropdownUsers');
+ const dropdownDepartmentsQuery = require('./query/dropdownDepartments');
+ const dropdownShiftTypesQuery = require('./query/dropdownShiftTypes');
 
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
@@ -170,6 +178,14 @@ app.use(requireAuth);
 	app.use('/colleague-shifts', colleagueShiftsQuery);
 	app.use('/switch-candidates', switchCandidatesQuery);
 	app.use('/available-shifts', availableShiftsQuery);
+	
+	
+ // =========================================================
+ // DROPDOWNS (read-only)
+ // =========================================================
+ app.use('/dropdown/users', dropdownUsersQuery);
+ app.use('/dropdown/departments', dropdownDepartmentsQuery);
+ app.use('/dropdown/shift-types', dropdownShiftTypesQuery);
 
 
 	// =========================================================
