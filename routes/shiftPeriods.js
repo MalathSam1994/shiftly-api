@@ -53,7 +53,7 @@ router.post('/:id/generate-from-template', async (req, res) => {
 
  try {
  const result = await pool.query(
- `SELECT shiftly_schema.generate_assignments_from_template($1) AS result`,
+ `SELECT shiftly_api.generate_assignments_from_template($1) AS result`,
  [periodId],
  );
  return res.json(result.rows[0].result);
@@ -88,7 +88,7 @@ router.post('/:id/approve', async (req, res) => {
 
    try {
  const result = await pool.query(
- `SELECT shiftly_schema.approve_period_with_assignments($1) AS result`,
+ `SELECT shiftly_api.approve_period_with_assignments($1) AS result`,
  [periodId],
  );
  return res.json(result.rows[0].result);

@@ -122,7 +122,7 @@ router.post('/create-smart', async (req, res) => {
     const result = await pool.query(
       `
       SELECT *
-      FROM shiftly_schema.create_shift_assignment(
+      FROM shiftly_api.create_shift_assignment(
         $1,              -- shift_period_id
         $2::int,         -- division_id
         $3,              -- department_id
