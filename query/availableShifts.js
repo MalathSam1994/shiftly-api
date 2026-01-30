@@ -28,13 +28,10 @@ router.get('/', async (req, res) => {
         .json({ error: 'shift_date is required (YYYY-MM-DD)' });
     }
 
-    const sql = `
-      SELECT *
-      FROM shiftly_schema.v_available_shifts
-      WHERE user_id = $1
-        AND shift_date::date = $2::date
-      ORDER BY division_id ASC, department_id ASC, shift_type_id ASC
-    `;
+   const sql = `
+              SELECT *
+                FROM shiftly_api.fn_available_shift_options($1::int, $2::date)
+               `;
 
     const result = await pool.query(sql, [userId, shiftDate]);
     return res.json(result.rows);
