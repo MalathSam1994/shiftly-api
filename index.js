@@ -13,7 +13,9 @@
 	const usersRouter = require('./routes/users');
 	const userDepartmentsRouter = require('./routes/userDepartments');
 	const userDivisionsRouter = require('./routes/userDivisions');
+	const divisionDepartmentsRouter = require('./routes/division_departments');
 	const authRouter = require('./routes/auth');
+	
 
 	// new routes
 	const staffTypesRouter = require('./routes/staffTypes');
@@ -160,6 +162,7 @@ app.use(requireAuth);
 	app.use('/users', usersRouter);
 	app.use('/user-departments', userDepartmentsRouter);
 	app.use('/user-divisions', userDivisionsRouter);
+	app.use('/division-departments', divisionDepartmentsRouter);
 
 	// new mounts
 	app.use('/staff-types', staffTypesRouter);
