@@ -34,13 +34,10 @@ router.get('/', async (req, res) => {
       });
     }
 
-    const sql = `
-      SELECT *
-      FROM shiftly_schema.v_switch_candidates_month
-      WHERE source_assignment_id = $1
-        AND logged_user_id = $2
-      ORDER BY shift_date ASC, candidate_assignment_id ASC
-    `;
+      const sql = `
+     SELECT *
+     FROM shiftly_api.fn_switch_candidates_month($1, $2)
+   `;
 
     const result = await pool.query(sql, [sourceAssignmentId, loggedUserId]);
     return res.json(result.rows);
