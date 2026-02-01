@@ -1,0 +1,1 @@
+﻿.\print-tree.ps1 | Out-File shiftly-tree.txt -Encoding utf8

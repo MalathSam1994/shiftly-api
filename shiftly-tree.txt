@@ -1,0 +1,52 @@
+﻿shiftly-api
+├── middleware
+│   └── requireAuth.js
+├── query
+│   ├── availableShifts.js
+│   ├── colleagueShifts.js
+│   ├── dropdownDepartments.js
+│   ├── dropdownShiftTypes.js
+│   ├── dropdownUsers.js
+│   ├── searchAssignedShifts.js
+│   ├── searchAvailableShifts.js
+│   ├── searchColleagueShifts.js
+│   ├── searchPendingShiftRequests.js
+│   └── switchCandidates.js
+├── routes
+│   ├── auth.js
+│   ├── departments.js
+│   ├── division_departments.js
+│   ├── divisions.js
+│   ├── fcm.js
+│   ├── items.js
+│   ├── notifications.js
+│   ├── shiftAssignments.js
+│   ├── shiftOffers.js
+│   ├── shiftPeriods.js
+│   ├── shiftRequests.js
+│   ├── shiftTemplateEntries.js
+│   ├── shiftTemplates.js
+│   ├── shiftTypes.js
+│   ├── staffShiftRules.js
+│   ├── staffTypes.js
+│   ├── treeMenu.js
+│   ├── userAbsences.js
+│   ├── userDepartments.js
+│   ├── userDivisions.js
+│   ├── userManagers.js
+│   └── users.js
+├── services
+│   ├── firebaseAdmin.js
+│   └── notificationDispatcher.js
+├── .gitignore
+├── API_merged_shiftly_code.txt
+├── createCrudRouter.js
+├── db.js
+├── hash_password.js
+├── index.js
+├── make-merge.ps1
+├── package.json
+├── package-lock.json
+├── print-tree.ps1
+├── run-print_tree.ps1
+└── shiftly-tree.txt

@@ -32,6 +32,9 @@
 	const fcm = require('./routes/fcm');
 	const { startNotificationDispatcher } = require('./services/notificationDispatcher');
 	const shiftOffersRouter = require('./routes/shiftOffers');
+	const holidayYearsRouter = require('./routes/holidayYears');
+	const yearlyHolidaysRouter = require('./routes/yearlyHolidays');
+
 
 	const colleagueShiftsQuery = require('./query/colleagueShifts');
 	const switchCandidatesQuery = require('./query/switchCandidates');
@@ -175,8 +178,9 @@ app.use(requireAuth);
 	app.use('/shift-assignments', shiftAssignmentsRouter);
 	app.use('/shift-requests', shiftRequestsRouter);
 	app.use('/user-absences', userAbsencesRouter);
-	
 	app.use('/shift-offers', shiftOffersRouter);
+	app.use('/holiday-years', holidayYearsRouter);
+	app.use('/yearly-holidays', yearlyHolidaysRouter);
 
 	app.use('/colleague-shifts', colleagueShiftsQuery);
 	app.use('/switch-candidates', switchCandidatesQuery);
