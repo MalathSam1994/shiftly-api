@@ -28,6 +28,7 @@ if (!usernameNorm || !password) {
              user_desc,
              user_type,
              role_id,
+             session_version,
              password_hash
       FROM shiftly_schema.users
       WHERE regexp_replace(upper(empno), '\\s+', '', 'g') = $1
@@ -49,6 +50,20 @@ if (!usernameNorm || !password) {
       return res.status(401).json({ error: 'Invalid credentials.' });
     }
 
+         // ✅ Enforce "single active session" per user:
+    // Every login bumps session_version, invalidating tokens issued before.
+    const bump = await pool.query(
+      `
+        UPDATE shiftly_schema.users
+        SET session_version = session_version + 1
+        WHERE id = $1
+        RETURNING session_version
+      `,
+      [user.id],
+    );
+    const sessionVersion = bump.rows[0]?.session_version ?? 0;
+
+
     // Do not send password_hash back to the client
     const { password_hash, ...safeUser } = user;
 
@@ -63,6 +78,7 @@ if (!usernameNorm || !password) {
         sub: safeUser.id,
         role_id: safeUser.role_id ?? null,
         user_type: safeUser.user_type ?? null,
+         sv: sessionVersion, // session version claim
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '12h' },
@@ -100,7 +116,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
   try {
     const selectQuery = `
-      SELECT id, password_hash
+      SELECT id, password_hash, session_version, role_id, user_type, empno, user_name, user_desc
       FROM shiftly_schema.users
       WHERE id = $1
     `;
@@ -125,14 +141,30 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
     const newHash = await bcrypt.hash(newPassword, 10);
 
+      // Update password AND rotate session_version (sign out other devices)
     const updateQuery = `
       UPDATE shiftly_schema.users
-      SET password_hash = $1
+      SET password_hash = $1,
+          session_version = session_version + 1
       WHERE id = $2
+      RETURNING session_version
     `;
-    await pool.query(updateQuery, [newHash, userId]);
+    const upd = await pool.query(updateQuery, [newHash, userId]);
+    const sessionVersion = upd.rows[0]?.session_version ?? (user.session_version ?? 0) + 1;
 
-    return res.json({ message: 'Password updated successfully.' });
+    // Issue a fresh token for THIS session so user doesn't get kicked out immediately.
+    const token = jwt.sign(
+      {
+        sub: Number(userId),
+        role_id: user.role_id ?? null,
+        user_type: user.user_type ?? null,
+        sv: sessionVersion,
+      },
+      process.env.JWT_SECRET,
+      { expiresIn: process.env.JWT_EXPIRES_IN || '12h' },
+    );
+
+    return res.json({ message: 'Password updated successfully.', token });
   } catch (err) {
     console.error('Error changing password:', err);
     return res.status(500).json({ error: 'Database error' });
