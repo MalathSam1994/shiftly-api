@@ -15,7 +15,7 @@
 	const userDivisionsRouter = require('./routes/userDivisions');
 	const divisionDepartmentsRouter = require('./routes/division_departments');
 	const authRouter = require('./routes/auth');
-	
+	const profileRouter = require('./routes/profile');
 
 	// new routes
 	const staffTypesRouter = require('./routes/staffTypes');
@@ -157,7 +157,7 @@ app.use((req, res, next) => {
 	
 	// Protect EVERYTHING below (all business endpoints)
 app.use(requireAuth);
-
+	app.use('/profile', profileRouter);
 	app.use('/tree-menu', treeMenuRouter);
 	app.use('/items', itemsRouter);
 	app.use('/departments', departmentsRouter);

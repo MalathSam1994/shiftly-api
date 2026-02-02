@@ -35,7 +35,8 @@ router.get('/', async (req, res) => {
              user_desc,
              user_type,
              role_id,
-			 staff_type_id
+			 staff_type_id,
+       email
       FROM shiftly_schema.users
       ORDER BY id
     `;
@@ -63,7 +64,8 @@ router.get('/:id', async (req, res) => {
              user_desc,
              user_type,
              role_id,
-			 staff_type_id
+			 staff_type_id,
+       email
       FROM shiftly_schema.users
       WHERE id = $1
     `;
@@ -92,6 +94,7 @@ router.post('/', async (req, res) => {
       user_type,
       role_id,
 	  staff_type_id,
+    email,
       password,
     } = req.body;
 
@@ -112,16 +115,17 @@ router.post('/', async (req, res) => {
 
     const query = `
       INSERT INTO shiftly_schema.users
-        (empno, user_name, user_desc, user_type, role_id, staff_type_id, password_hash)
+         (empno, user_name, user_desc, user_type, role_id, staff_type_id, email, password_hash)
       VALUES
-        ($1,    $2,        $3,        $4,        $5,      $6,      $7)
+        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    $8)
       RETURNING id,
                 empno,
                 user_name,
                 user_desc,
                 user_type,
                 role_id,
-				staff_type_id
+				staff_type_id,
+        email
     `;
 
     const values = [
@@ -131,6 +135,7 @@ router.post('/', async (req, res) => {
       user_type,
       role_id ?? null,
 	  staff_type_id ?? null,
+     (email ?? null),
       hashedPassword,
     ];
 
@@ -152,7 +157,10 @@ router.put('/:id', async (req, res) => {
       user_type,
       role_id,
 	  staff_type_id,
+    email,
     } = req.body;
+
+    console.log(`[${req.rid}] USERS UPDATE id=${req.params.id} email=`, email, 'body=', req.body);
 
     if (!empno || !user_name || !user_type) {
       return res.status(400).json({
@@ -167,15 +175,17 @@ router.put('/:id', async (req, res) => {
           user_desc = $3,
           user_type = $4,
           role_id = $5,
-		  staff_type_id = $6
-      WHERE id = $7
+          		  staff_type_id = $6,
+          email = $7
+     WHERE id = $8
       RETURNING id,
                 empno,
                 user_name,
                 user_desc,
                 user_type,
                 role_id,
-				staff_type_id
+				staff_type_id,
+         email
     `;
 
     const values = [
@@ -185,10 +195,14 @@ router.put('/:id', async (req, res) => {
       user_type,
       role_id ?? null,
 	  staff_type_id ?? null,
+      (email ?? null),
       req.params.id,
     ];
 
     const result = await pool.query(query, values);
+
+    console.log(`[${req.rid}] USERS UPDATE result rows=${result.rows.length} email=`,
+      result.rows[0]?.email);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Not found' });
@@ -213,7 +227,8 @@ router.delete('/:id', async (req, res) => {
                 user_desc,
                 user_type,
                 role_id,
-				staff_type_id
+				staff_type_id,
+         email
     `;
     const result = await pool.query(query, [req.params.id]);
 

@@ -29,6 +29,7 @@ if (!usernameNorm || !password) {
              user_type,
              role_id,
              session_version,
+             email,
              password_hash
       FROM shiftly_schema.users
       WHERE regexp_replace(upper(empno), '\\s+', '', 'g') = $1
