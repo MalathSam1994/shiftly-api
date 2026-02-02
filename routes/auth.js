@@ -7,12 +7,17 @@ const requireAuth = require('../middleware/requireAuth');
 
 const router = express.Router();
 
-// Login endpoint: username = empno
+// Login endpoint: username = user_name
 router.post('/login', async (req, res) => {
- const usernameRaw = (req.body.username ?? '').toString();
- const passwordRaw = (req.body.password ?? '').toString();
- const usernameNorm = usernameRaw.replace(/\s+/g, '').toUpperCase(); // remove ALL spaces
- const password = passwordRaw;
+  const usernameRaw = (req.body.username ?? '').toString();
+  const passwordRaw = (req.body.password ?? '').toString();
+  // Normalize user_name for login:
+  // - trim ends
+  // - collapse internal whitespace to a single space
+  // - compare case-insensitively
+  const usernameNorm = usernameRaw.trim().replace(/\s+/g, ' ').toLowerCase();
+  const password = passwordRaw;
+ 
 
 if (!usernameNorm || !password) {
     return res
@@ -32,7 +37,7 @@ if (!usernameNorm || !password) {
              email,
              password_hash
       FROM shiftly_schema.users
-      WHERE regexp_replace(upper(empno), '\\s+', '', 'g') = $1
+      WHERE regexp_replace(lower(trim(user_name)), '\\s+', ' ', 'g') = $1
     `;
    const result = await pool.query(query, [usernameNorm]);
 

@@ -98,10 +98,10 @@ router.post('/', async (req, res) => {
       password,
     } = req.body;
 
-    if (!empno || !user_name || !user_type || !password) {
+   if (!user_name || !user_type || !password) {
       return res.status(400).json({
         error:
-          'empno, user_name, user_type and password are required to create a user.',
+          'user_name, user_type and password are required to create a user.',
       });
     }
 
@@ -129,7 +129,7 @@ router.post('/', async (req, res) => {
     `;
 
     const values = [
-      empno,
+     (empno ?? null),
       user_name,
       user_desc ?? null,
       user_type,
@@ -162,9 +162,9 @@ router.put('/:id', async (req, res) => {
 
     console.log(`[${req.rid}] USERS UPDATE id=${req.params.id} email=`, email, 'body=', req.body);
 
-    if (!empno || !user_name || !user_type) {
+ if (!user_name || !user_type) {
       return res.status(400).json({
-        error: 'empno, user_name and user_type are required for update.',
+         error: 'user_name and user_type are required for update.',
       });
     }
 
@@ -189,7 +189,7 @@ router.put('/:id', async (req, res) => {
     `;
 
     const values = [
-      empno,
+         (empno ?? null),
       user_name,
       user_desc ?? null,
       user_type,
