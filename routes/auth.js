@@ -5,7 +5,10 @@ const pool = require('../db');
 const jwt = require('jsonwebtoken');
 const requireAuth = require('../middleware/requireAuth');
 
+
 const router = express.Router();
+const { generateComplexPassword } = require('../services/passwordUtil');
+const { sendResetPasswordEmail } = require('../services/mailer');
 
 // Login endpoint: username = user_name
 router.post('/login', async (req, res) => {
@@ -35,6 +38,7 @@ if (!usernameNorm || !password) {
              role_id,
              session_version,
              email,
+              must_change_password,
              password_hash
       FROM shiftly_schema.users
       WHERE regexp_replace(lower(trim(user_name)), '\\s+', ' ', 'g') = $1
@@ -97,6 +101,69 @@ if (!usernameNorm || !password) {
   }
 });
 
+// Forgot password:
+// - User enters email
+// - If exists -> generate temp password, set must_change_password = true
+// - Email temp password
+router.post('/forgot-password', async (req, res) => {
+  const emailRaw = (req.body.email ?? '').toString().trim();
+  if (!emailRaw) {
+    return res.status(400).json({ error: 'Email is required.' });
+  }
+
+  const client = await pool.connect();
+  try {
+    await client.query('BEGIN');
+
+    const find = await client.query(
+      `
+      SELECT id, user_name, email
+      FROM shiftly_schema.users
+      WHERE lower(trim(email)) = lower(trim($1))
+      `,
+      [emailRaw],
+    );
+
+    // For security, respond OK even if not found (avoid user enumeration).
+    if (find.rows.length === 0) {
+      await client.query('COMMIT');
+      return res.json({ message: 'If the email exists, a reset has been sent.' });
+    }
+
+    const u = find.rows[0];
+    const tempPassword = generateComplexPassword(14);
+    const newHash = await bcrypt.hash(tempPassword, 10);
+
+    // Also rotate session_version to sign out other devices
+    await client.query(
+      `
+      UPDATE shiftly_schema.users
+      SET password_hash = $1,
+          must_change_password = TRUE,
+          session_version = session_version + 1
+      WHERE id = $2
+      `,
+      [newHash, u.id],
+    );
+
+    await sendResetPasswordEmail({
+      to: u.email,
+      username: u.user_name,
+      tempPassword,
+    });
+
+    await client.query('COMMIT');
+    return res.json({ message: 'If the email exists, a reset has been sent.' });
+  } catch (err) {
+    try { await client.query('ROLLBACK'); } catch (_) {}
+    console.error('Error during forgot-password:', err);
+    return res.status(500).json({ error: 'Database error' });
+  } finally {
+    client.release();
+  }
+});
+
+
 // Change password endpoint
 // Requires JWT so users can only change their own password.
 router.post('/change-password', requireAuth, async (req, res) => {
@@ -151,7 +218,8 @@ router.post('/change-password', requireAuth, async (req, res) => {
     const updateQuery = `
       UPDATE shiftly_schema.users
       SET password_hash = $1,
-          session_version = session_version + 1
+      must_change_password = FALSE,
+          session_version = session_version + 1       
       WHERE id = $2
       RETURNING session_version
     `;

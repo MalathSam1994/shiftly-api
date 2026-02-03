@@ -2,6 +2,8 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
+const { generateComplexPassword } = require('../services/passwordUtil');
+const { sendUserWelcomeEmail } = require('../services/mailer');
 
 const router = express.Router();
 
@@ -36,7 +38,8 @@ router.get('/', async (req, res) => {
              user_type,
              role_id,
 			 staff_type_id,
-       email
+       email,
+        must_change_password
       FROM shiftly_schema.users
       ORDER BY id
     `;
@@ -65,7 +68,8 @@ router.get('/:id', async (req, res) => {
              user_type,
              role_id,
 			 staff_type_id,
-       email
+       email,
+        must_change_password
       FROM shiftly_schema.users
       WHERE id = $1
     `;
@@ -86,7 +90,8 @@ router.get('/:id', async (req, res) => {
 
 // POST /users -> create a new user with hashed password
 router.post('/', async (req, res) => {
-  try {
+ const client = await pool.connect();
+ try {
     const {
       empno,
       user_name,
@@ -95,29 +100,31 @@ router.post('/', async (req, res) => {
       role_id,
 	  staff_type_id,
     email,
-      password,
     } = req.body;
 
-   if (!user_name || !user_type || !password) {
+if (!user_name || !user_type || !email) {
       return res.status(400).json({
         error:
-          'user_name, user_type and password are required to create a user.',
+        'user_name, user_type and email are required to create a user.',
       });
     }
 
-    if (password.length < 8) {
-      return res.status(400).json({
-        error: 'Password must be at least 8 characters long.',
-      });
-    }
 
-    const hashedPassword = await bcrypt.hash(password, 10);
+      const emailNorm = String(email).trim();
+  if (!emailNorm) {
+    return res.status(400).json({ error: 'email is required.' });
+  }
+
+   // ✅ Backend generates a strong random password (admin does NOT provide it).
+   const tempPassword = generateComplexPassword(14);
+   const hashedPassword = await bcrypt.hash(tempPassword, 10);
+ 
 
     const query = `
       INSERT INTO shiftly_schema.users
-         (empno, user_name, user_desc, user_type, role_id, staff_type_id, email, password_hash)
+        (empno, user_name, user_desc, user_type, role_id, staff_type_id, email, password_hash, must_change_password)
       VALUES
-        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    $8)
+        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    $8,    TRUE)
       RETURNING id,
                 empno,
                 user_name,
@@ -125,7 +132,8 @@ router.post('/', async (req, res) => {
                 user_type,
                 role_id,
 				staff_type_id,
-        email
+        email,
+        must_change_password
     `;
 
     const values = [
@@ -135,15 +143,28 @@ router.post('/', async (req, res) => {
       user_type,
       role_id ?? null,
 	  staff_type_id ?? null,
-     (email ?? null),
+    emailNorm,
       hashedPassword,
     ];
 
-    const result = await pool.query(query, values);
+   await client.query('BEGIN');
+    const result = await client.query(query, values);
+
+    // ✅ Send email via Brevo SMTP with username + generated password
+    await sendUserWelcomeEmail({
+      to: emailNorm,
+      username: result.rows[0].user_name,
+      tempPassword,
+    });
+
+    await client.query('COMMIT');
     res.status(201).json(result.rows[0]);
   } catch (err) {
+     try { await client.query('ROLLBACK'); } catch (_) {}
     console.error('Error inserting into DB (USERS CREATE):', err);
     res.status(500).json({ error: 'Database error' });
+      } finally {
+    client.release();
   }
 });
 
@@ -185,7 +206,8 @@ router.put('/:id', async (req, res) => {
                 user_type,
                 role_id,
 				staff_type_id,
-         email
+         email,
+         must_change_password
     `;
 
     const values = [
