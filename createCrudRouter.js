@@ -102,11 +102,23 @@ function createCrudRouter(config) {
           .json({ error: 'No valid columns provided for insert' });
       }
 
-      const query = `
-        INSERT INTO ${config.table} (${cols.join(', ')})
-        VALUES (${placeholders.join(', ')})
-        RETURNING ${allColumns.join(', ')}
-      `;
+     // Support string IDs (e.g., code tables) by allowing the caller to provide idColumn in body too
+   // when idColumn is not serial. If present, include it in the INSERT.
+   if (
+     config.idColumn &&
+     Object.prototype.hasOwnProperty.call(req.body, config.idColumn)
+   ) {
+     cols.unshift(config.idColumn);
+     placeholders.unshift(`$${i}`);
+     values.push(req.body[config.idColumn]);
+     i++;
+   }
+
+   const query = `
+     INSERT INTO ${config.table} (${cols.join(', ')})
+     VALUES (${placeholders.join(', ')})
+     RETURNING ${allColumns.join(', ')}
+   `;
 
        const result = await queryWithTimeout(query, values, timeoutMs);
       res.status(201).json(result.rows[0]);

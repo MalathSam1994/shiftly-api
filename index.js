@@ -34,6 +34,7 @@
 	const shiftOffersRouter = require('./routes/shiftOffers');
 	const holidayYearsRouter = require('./routes/holidayYears');
 	const yearlyHolidaysRouter = require('./routes/yearlyHolidays');
+	const absenceTypesRouter = require('./routes/absenceTypes');
 
 
 	const colleagueShiftsQuery = require('./query/colleagueShifts');
@@ -47,6 +48,7 @@
  const dropdownUsersQuery = require('./query/dropdownUsers');
  const dropdownDepartmentsQuery = require('./query/dropdownDepartments');
  const dropdownShiftTypesQuery = require('./query/dropdownShiftTypes');
+ const dropdownAbsenceTypesQuery = require('./query/dropdownAbsenceTypes');
 
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
@@ -181,6 +183,7 @@ app.use(requireAuth);
 	app.use('/shift-offers', shiftOffersRouter);
 	app.use('/holiday-years', holidayYearsRouter);
 	app.use('/yearly-holidays', yearlyHolidaysRouter);
+	app.use('/absence-types', absenceTypesRouter);
 
 	app.use('/colleague-shifts', colleagueShiftsQuery);
 	app.use('/switch-candidates', switchCandidatesQuery);
@@ -193,6 +196,7 @@ app.use(requireAuth);
  app.use('/dropdown/users', dropdownUsersQuery);
  app.use('/dropdown/departments', dropdownDepartmentsQuery);
  app.use('/dropdown/shift-types', dropdownShiftTypesQuery);
+ app.use('/dropdown/absence-types', dropdownAbsenceTypesQuery);
 
 
 	// =========================================================

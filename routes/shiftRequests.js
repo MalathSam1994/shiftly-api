@@ -39,6 +39,11 @@ const router = express.Router();
 }
 
 
+// Small helper: normalize client input for absence types
+function normalizeAbsenceType(code) {
+  const v = String(code ?? '').trim();
+  return v ? v.toUpperCase() : '';
+}
 
 
 
@@ -238,6 +243,17 @@ router.delete('/:id', async (req, res) => {
 router.post('/', async (req, res) => {
 
   try {
+
+        // Normalize absence type fields (client may send lowercase)
+    if (req?.body?.requested_absence_type != null) {
+      req.body.requested_absence_type = normalizeAbsenceType(
+        req.body.requested_absence_type
+      );
+    }
+    if (req?.body?.absence_type != null) {
+      req.body.absence_type = normalizeAbsenceType(req.body.absence_type);
+    }
+
        // One call: DB validates + inserts + returns row
     const result = await pool.query(
       `SELECT * FROM shiftly_api.shift_request_create($1::jsonb)`,
