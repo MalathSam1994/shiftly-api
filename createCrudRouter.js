@@ -80,7 +80,11 @@ function createCrudRouter(config) {
   // POST / -> insert (any subset of allowed columns)
   router.post('/', async (req, res) => {
     try {
-		
+		    // Allow per-route custom create handler
+     if (typeof config.createHandler === 'function') {
+       await config.createHandler(req, res, { pool, config, allColumns });
+       return;
+     }
 		
       const cols = [];
       const placeholders = [];
@@ -131,6 +135,14 @@ function createCrudRouter(config) {
   // PUT /:id -> update (any subset of allowed columns)
   router.put('/:id', async (req, res) => {
     try {
+
+      // Allow per-route custom update handler
+      if (typeof config.updateHandler === 'function') {
+        await config.updateHandler(req, res, { pool, config, allColumns });
+        return;
+      }
+
+
       const sets = [];
       const values = [];
       let i = 1;
@@ -173,6 +185,12 @@ function createCrudRouter(config) {
   // DELETE /:id
   router.delete('/:id', async (req, res) => {
     try {
+
+      // Allow per-route custom delete handler
+      if (typeof config.deleteHandler === 'function') {
+        await config.deleteHandler(req, res, { pool, config, allColumns });
+        return;
+      }
       const query = `
         DELETE FROM ${config.table}
         WHERE ${config.idColumn} = $1

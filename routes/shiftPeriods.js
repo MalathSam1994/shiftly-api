@@ -16,6 +16,56 @@ const shiftPeriodsConfig = {
     'status',
     'description',
   ],
+
+
+  // Prevent deleting APPROVED periods (locked)
+  deleteHandler: async (req, res, { pool, config, allColumns }) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid id.' });
+      }
+
+      const meta = await pool.query(
+        `SELECT status FROM ${config.table} WHERE ${config.idColumn} = $1`,
+        [id],
+      );
+      if (!meta.rows || meta.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      const status = (meta.rows[0].status || '').toString().trim();
+      if (status === 'APPROVED') {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: 'Cannot delete an APPROVED period.',
+          code: 'P0001',
+        });
+      }
+
+      const result = await pool.query(
+        `
+        DELETE FROM ${config.table}
+        WHERE ${config.idColumn} = $1
+        RETURNING ${allColumns.join(', ')}
+        `,
+        [id],
+      );
+      if (!result.rows || result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+      return res.json({ deleted: result.rows[0] });
+    } catch (err) {
+      console.error('Error deleting period:', err);
+      const isBusiness = err && err.code === 'P0001';
+      return res.status(isBusiness ? 400 : 500).json({
+        error: isBusiness ? 'Business rule violation' : 'Database error',
+        details: err.message,
+        code: err.code,
+        routine: err.routine,
+      });
+    }
+  },
+
 };
 const router = createCrudRouter(shiftPeriodsConfig);
 

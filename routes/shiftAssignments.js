@@ -78,10 +78,165 @@ const shiftAssignmentsConfig = {
     res.json(result.rows);
   },
   
-  
+
+  // ✅ Single source of truth for EDIT: delegate edit logic to PostgreSQL
+  // PUT /shift-assignments/:id
+  updateHandler: async (req, res, { pool }) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid id.' });
+      }
+
+      const b = req.body || {};
+      const shiftPeriodId = Number(b.shift_period_id ?? b.shiftPeriodId ?? b.shift_periodId);
+      const divisionId = (b.division_id ?? b.divisionId ?? null);
+      const departmentId = Number(b.department_id ?? b.departmentId);
+      const userId = Number(b.user_id ?? b.userId);
+      const shiftTypeId = Number(b.shift_type_id ?? b.shiftTypeId);
+      const shiftDate = (b.shift_date ?? b.shiftDate ?? '').toString().trim(); // YYYY-MM-DD
+      const status = (b.status ?? '').toString().trim();
+      const statusComment = (b.status_comment ?? b.statusComment ?? null);
+      const isAbsenceRaw = (b.is_absence ?? b.isAbsence ?? null);
+      const isAbsence = isAbsenceRaw != null ? Number(isAbsenceRaw) : 2; // 1=yes, 2=no
+      const absenceType = (b.absence_type ?? b.absenceType ?? null);
+
+      if (
+        !Number.isFinite(shiftPeriodId) ||
+        !Number.isFinite(departmentId) ||
+        !Number.isFinite(userId) ||
+        !Number.isFinite(shiftTypeId)
+      ) {
+        return res.status(400).json({ error: 'Invalid numeric fields.' });
+      }
+      if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
+        return res.status(400).json({ error: 'Invalid shiftDate (expected YYYY-MM-DD).' });
+      }
+      if (!status) {
+        return res.status(400).json({ error: 'status is required.' });
+      }
+
+      const result = await pool.query(
+        `
+        SELECT *
+        FROM shiftly_api.update_shift_assignment(
+          $1,        -- id
+          $2,        -- shift_period_id
+          $3::int,   -- division_id
+          $4,        -- department_id
+          $5,        -- user_id
+          $6,        -- shift_type_id
+          $7::date,  -- shift_date
+          $8,        -- status
+          $9,        -- status_comment
+          $10::int,  -- is_absence
+          $11        -- absence_type
+        )
+        `,
+        [
+          id,
+          shiftPeriodId,
+          divisionId,
+          departmentId,
+          userId,
+          shiftTypeId,
+          shiftDate,
+          status,
+          statusComment,
+          Number.isFinite(isAbsence) ? isAbsence : 2,
+          absenceType,
+        ],
+      );
+
+      if (!result.rows || result.rows.length === 0) {
+        return res.status(500).json({ error: 'No row returned from update_shift_assignment.' });
+      }
+
+      return res.json(result.rows[0]);
+    } catch (err) {
+      console.error('Error updating assignment (DB function):', err);
+      const isBusiness = err && err.code === 'P0001';
+      return res.status(isBusiness ? 400 : 500).json({
+        error: isBusiness ? 'Business rule violation' : 'Database error',
+        details: err.message,
+        code: err.code,
+        routine: err.routine,
+      });
+    }
+  },
+   
+
 };
 
 const router = createCrudRouter(shiftAssignmentsConfig);
+
+/**
+ * DELETE /shift-assignments/:id/hard
+ *
+ * ✅ Hard delete an assignment row (real remove).
+ * Guards:
+ * - period must NOT be APPROVED (editing locked)
+ *
+ * Returns:
+ * - 200 { deleted: { ...row } }
+ * - 404 if not found
+ */
+router.delete('/:id/hard', async (req, res) => {
+  try {
+    const id = parseInt(req.params.id, 10);
+    if (Number.isNaN(id)) {
+      return res.status(400).json({ error: 'Invalid id.' });
+    }
+
+    // Load period status for this assignment
+    const meta = await pool.query(
+      `
+      SELECT sa.id, sa.shift_period_id, sp.status AS period_status
+      FROM shiftly_schema.shift_assignments sa
+      JOIN shiftly_schema.shift_periods sp ON sp.id = sa.shift_period_id
+      WHERE sa.id = $1
+      `,
+      [id],
+    );
+    if (!meta.rows || meta.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const periodStatus = (meta.rows[0].period_status || '').toString().trim();
+    if (periodStatus === 'APPROVED') {
+      return res.status(400).json({
+        error: 'Business rule violation',
+        details: 'Cannot delete assignments for an APPROVED period.',
+        code: 'P0001',
+      });
+    }
+
+    const result = await pool.query(
+      `
+      DELETE FROM shiftly_schema.shift_assignments
+      WHERE id = $1
+      RETURNING *
+      `,
+      [id],
+    );
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+
+    return res.json({ deleted: result.rows[0] });
+  } catch (err) {
+    console.error('Error hard deleting assignment:', err);
+    const isBusiness = err && err.code === 'P0001';
+    return res.status(isBusiness ? 400 : 500).json({
+      error: isBusiness ? 'Business rule violation' : 'Database error',
+      details: err.message,
+      code: err.code,
+      routine: err.routine,
+    });
+  }
+});
+
+
 
 /**
  * POST /shift-assignments/create-smart
