@@ -57,6 +57,7 @@
 	const searchAssignedShiftsQuery = require('./query/searchAssignedShifts');
 	const searchPendingShiftRequestsQuery = require('./query/searchPendingShiftRequests');
 	const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
+	const mobileDashboardQuery = require('./query/mobileDashboard');
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
@@ -206,7 +207,8 @@ app.use(requireAuth);
 	app.use('/search/assigned-shifts', searchAssignedShiftsQuery);
 	app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
 	app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
-
+	app.use('/dashboard/mobile', mobileDashboardQuery);
+	
 	app.use('/fcm', fcm);
 	app.use('/notifications', notifications);
 
