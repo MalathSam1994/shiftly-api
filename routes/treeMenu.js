@@ -36,7 +36,7 @@ router.get('/admin/all', requirePermission(ADMIN_PERM), async (req, res) => {
     const { rows } = await pool.query(`
       SELECT
         screen_id, parent_id, screen_type, screen_file_name, menu_label,
-        screen_key, open_permission_key, sort_order
+        screen_key, sort_order
       FROM shiftly_schema.tree_menu
       ORDER BY parent_id NULLS FIRST, sort_order, screen_id
     `);
@@ -55,7 +55,6 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
     menu_label,
     screen_file_name,     // for SCREEN
     screen_key,           // stable key for SCREEN (recommended)
-    open_permission_key,  // optional override
   } = req.body ?? {};
 
   try {
@@ -79,16 +78,15 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
 
     const { rows } = await pool.query(
       `INSERT INTO shiftly_schema.tree_menu
-        (parent_id, screen_type, screen_file_name, menu_label, screen_key, open_permission_key, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6, $7)
-       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, open_permission_key, sort_order`,
+        (parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order`,
       [
         parent_id ?? null,
         type,
         type === 'SCREEN' ? screen_file_name : null,
         menu_label,
         type === 'SCREEN' ? (screen_key ?? null) : null,
-        type === 'SCREEN' ? (open_permission_key ?? null) : null,
         nextOrder,
       ]
     );
@@ -107,12 +105,11 @@ router.put('/admin/:id', requirePermission(ADMIN_PERM), async (req, res) => {
     menu_label,
     screen_file_name,
     screen_key,          // only allowed if currently NULL/empty
-    open_permission_key, // only allowed if currently NULL/empty
   } = req.body ?? {};
 
   try {
     const { rows: curRows } = await pool.query(
-      `SELECT screen_type, screen_key, open_permission_key
+      `SELECT screen_type, screen_key
        FROM shiftly_schema.tree_menu WHERE screen_id=$1`,
       [id]
     );
@@ -128,22 +125,20 @@ router.put('/admin/:id', requirePermission(ADMIN_PERM), async (req, res) => {
       return res.status(400).json({ error: 'screen_file_name is required for SCREEN' });
     }
 
-    // Lock screen_key & open_permission_key once set to avoid breaking RBAC mappings.
+    // Lock screen_key  once set to avoid breaking RBAC mappings.
     const canSetKey = !cur.screen_key || String(cur.screen_key).trim() === '';
-    const canSetOpen = !cur.open_permission_key || String(cur.open_permission_key).trim() === '';
 
     const newScreenKey = (type === 'SCREEN' && canSetKey) ? (screen_key ?? null) : cur.screen_key;
-    const newOpenKey = (type === 'SCREEN' && canSetOpen) ? (open_permission_key ?? null) : cur.open_permission_key;
 
     const { rows } = await pool.query(
       `UPDATE shiftly_schema.tree_menu
        SET menu_label=$2,
            screen_file_name=$3,
-           screen_key=$4,
-           open_permission_key=$5
+           screen_key=$4
+           
        WHERE screen_id=$1
-       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, open_permission_key, sort_order`,
-      [id, menu_label, type === 'SCREEN' ? screen_file_name : null, newScreenKey, newOpenKey]
+       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order`,
+      [id, menu_label, type === 'SCREEN' ? screen_file_name : null, newScreenKey]
     );
 
     res.json(rows[0]);
@@ -230,7 +225,7 @@ router.patch('/admin/:id/move', requirePermission(ADMIN_PERM), async (req, res) 
     await client.query('COMMIT');
 
     const { rows: outRows } = await pool.query(
-      `SELECT screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, open_permission_key, sort_order
+      `SELECT screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order
        FROM shiftly_schema.tree_menu
        WHERE screen_id=$1`,
       [id]
