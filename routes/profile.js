@@ -99,4 +99,35 @@ router.put('/', async (req, res) => {
   }
 });
 
+
+
+// GET /profile/permissions -> list permission_key for current user (optional UI hints)
+router.get('/permissions', async (req, res) => {
+  try {
+   const userId = Number(req.user?.sub);
+    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+
+    const sql = `
+      SELECT DISTINCT p.permission_key
+      FROM shiftly_schema.permissions p
+      JOIN shiftly_schema.role_permissions rp ON rp.permission_id = p.id
+      JOIN shiftly_schema.user_roles ur ON ur.role_id = rp.role_id
+      WHERE ur.user_id = $1
+      UNION
+      SELECT DISTINCT p.permission_key
+      FROM shiftly_schema.permissions p
+      JOIN shiftly_schema.role_permissions rp ON rp.permission_id = p.id
+      JOIN shiftly_schema.users u ON u.role_id = rp.role_id
+      WHERE u.id = $1 AND u.role_id IS NOT NULL
+      ORDER BY permission_key
+    `;
+    const result = await pool.query(sql, [userId]);
+    res.json(result.rows.map(r => r.permission_key));
+  } catch (e) {
+    console.error('PROFILE PERMISSIONS error:', e);
+    res.status(500).json({ error: 'Database error' });
+  }
+});
+ 
+
 module.exports = router;

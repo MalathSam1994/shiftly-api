@@ -16,6 +16,10 @@
 	const divisionDepartmentsRouter = require('./routes/division_departments');
 	const authRouter = require('./routes/auth');
 	const profileRouter = require('./routes/profile');
+    const rolesRouter = require('./routes/roles');
+    const permissionsRouter = require('./routes/permissions');
+    const rolePermissionsRouter = require('./routes/rolePermissions');
+    const userRolesRouter = require('./routes/userRoles');
 
 	// new routes
 	const staffTypesRouter = require('./routes/staffTypes');
@@ -161,6 +165,10 @@ app.use((req, res, next) => {
 	// Protect EVERYTHING below (all business endpoints)
 app.use(requireAuth);
 	app.use('/profile', profileRouter);
+    app.use('/roles', rolesRouter);
+    app.use('/permissions', permissionsRouter);
+    app.use('/role-permissions', rolePermissionsRouter);
+    app.use('/user-roles', userRolesRouter);
 	app.use('/tree-menu', treeMenuRouter);
 	app.use('/items', itemsRouter);
 	app.use('/departments', departmentsRouter);

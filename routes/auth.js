@@ -65,7 +65,7 @@ if (!usernameNorm || !password) {
     const bump = await pool.query(
       `
         UPDATE shiftly_schema.users
-        SET session_version = session_version + 1
+       SET session_version = COALESCE(session_version, 0) + 1
         WHERE id = $1
         RETURNING session_version
       `,
@@ -140,7 +140,7 @@ router.post('/forgot-password', async (req, res) => {
       UPDATE shiftly_schema.users
       SET password_hash = $1,
           must_change_password = TRUE,
-          session_version = session_version + 1
+             session_version = COALESCE(session_version, 0) + 1
       WHERE id = $2
       `,
       [newHash, u.id],
@@ -219,7 +219,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
       UPDATE shiftly_schema.users
       SET password_hash = $1,
       must_change_password = FALSE,
-          session_version = session_version + 1       
+         session_version = COALESCE(session_version, 0) + 1    
       WHERE id = $2
       RETURNING session_version
     `;
