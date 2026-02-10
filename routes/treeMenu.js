@@ -14,7 +14,12 @@ router.get('/', async (req, res) => {
     const userId = Number(req.user?.sub ?? req.user?.id);
     if (!userId) return res.status(401).json({ error: 'Unauthorized' });
 
-    const sql = `SELECT * FROM shiftly_api.fn_tree_menu_for_user($1)`;
+    // Ensure stable ordering for UI consumption (also ordered inside the function).
+    const sql = `
+      SELECT *
+      FROM shiftly_api.fn_tree_menu_for_user($1)
+      ORDER BY parent_id NULLS FIRST, sort_order, screen_id
+    `;
     const result = await pool.query(sql, [userId]);
     res.json(result.rows);
   } catch (e) {
