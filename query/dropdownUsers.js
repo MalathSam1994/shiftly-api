@@ -32,13 +32,13 @@ router.get('/', async (req, res) => {
  try {
  const sql = staffTypeId == null
  ? `
- SELECT id, empno, user_name, user_desc, user_type, role_id, staff_type_id
+ SELECT id, empno, user_name, user_desc, role_id, staff_type_id
  FROM shiftly_schema.v_dropdown_dep_users
  WHERE department_id = $1
  ORDER BY user_name, empno
  `
  : `
- SELECT id, empno, user_name, user_desc, user_type, role_id, staff_type_id
+ SELECT id, empno, user_name, user_desc, role_id, staff_type_id
  FROM shiftly_schema.v_dropdown_dep_users
  WHERE department_id = $1
  AND staff_type_id = $2

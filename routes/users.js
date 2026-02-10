@@ -35,7 +35,6 @@ router.get('/', async (req, res) => {
              empno,
              user_name,
              user_desc,
-             user_type,
              role_id,
 			 staff_type_id,
        email,
@@ -65,7 +64,6 @@ router.get('/:id', async (req, res) => {
              empno,
              user_name,
              user_desc,
-             user_type,
              role_id,
 			 staff_type_id,
        email,
@@ -96,16 +94,15 @@ router.post('/', async (req, res) => {
       empno,
       user_name,
       user_desc,
-      user_type,
       role_id,
 	  staff_type_id,
     email,
     } = req.body;
 
-if (!user_name || !user_type || !email) {
+if (!user_name  || !email) {
       return res.status(400).json({
         error:
-        'user_name, user_type and email are required to create a user.',
+        'user_name and email are required to create a user.',
       });
     }
 
@@ -122,14 +119,13 @@ if (!user_name || !user_type || !email) {
 
     const query = `
       INSERT INTO shiftly_schema.users
-        (empno, user_name, user_desc, user_type, role_id, staff_type_id, email, password_hash, must_change_password)
+        (empno, user_name, user_desc, role_id, staff_type_id, email, password_hash, must_change_password)
       VALUES
-        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    $8,    TRUE)
+        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    TRUE)
       RETURNING id,
                 empno,
                 user_name,
                 user_desc,
-                user_type,
                 role_id,
 				staff_type_id,
         email,
@@ -140,7 +136,6 @@ if (!user_name || !user_type || !email) {
      (empno ?? null),
       user_name,
       user_desc ?? null,
-      user_type,
       role_id ?? null,
 	  staff_type_id ?? null,
     emailNorm,
@@ -175,7 +170,6 @@ router.put('/:id', async (req, res) => {
       empno,
       user_name,
       user_desc,
-      user_type,
       role_id,
 	  staff_type_id,
     email,
@@ -183,9 +177,9 @@ router.put('/:id', async (req, res) => {
 
     console.log(`[${req.rid}] USERS UPDATE id=${req.params.id} email=`, email, 'body=', req.body);
 
- if (!user_name || !user_type) {
+ if (!user_name ) {
       return res.status(400).json({
-         error: 'user_name and user_type are required for update.',
+         error: 'user_name  are required for update.',
       });
     }
 
@@ -194,16 +188,14 @@ router.put('/:id', async (req, res) => {
       SET empno = $1,
           user_name = $2,
           user_desc = $3,
-          user_type = $4,
-          role_id = $5,
-          		  staff_type_id = $6,
-          email = $7
-     WHERE id = $8
+          role_id = $4,
+          		  staff_type_id = $5,
+          email = $6
+     WHERE id = $7
       RETURNING id,
                 empno,
                 user_name,
                 user_desc,
-                user_type,
                 role_id,
 				staff_type_id,
          email,
@@ -214,7 +206,6 @@ router.put('/:id', async (req, res) => {
          (empno ?? null),
       user_name,
       user_desc ?? null,
-      user_type,
       role_id ?? null,
 	  staff_type_id ?? null,
       (email ?? null),
@@ -247,7 +238,6 @@ router.delete('/:id', async (req, res) => {
                 empno,
                 user_name,
                 user_desc,
-                user_type,
                 role_id,
 				staff_type_id,
          email

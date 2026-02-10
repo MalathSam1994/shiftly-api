@@ -34,7 +34,6 @@ if (!usernameNorm || !password) {
              empno,
              user_name,
              user_desc,
-             user_type,
              role_id,
              session_version,
              email,
@@ -87,7 +86,6 @@ if (!usernameNorm || !password) {
       {
         sub: safeUser.id,
         role_id: safeUser.role_id ?? null,
-        user_type: safeUser.user_type ?? null,
          sv: sessionVersion, // session version claim
       },
       process.env.JWT_SECRET,
@@ -189,7 +187,7 @@ router.post('/change-password', requireAuth, async (req, res) => {
 
   try {
     const selectQuery = `
-      SELECT id, password_hash, session_version, role_id, user_type, empno, user_name, user_desc
+      SELECT id, password_hash, session_version, role_id, empno, user_name, user_desc
       FROM shiftly_schema.users
       WHERE id = $1
     `;
@@ -231,7 +229,6 @@ router.post('/change-password', requireAuth, async (req, res) => {
       {
         sub: Number(userId),
         role_id: user.role_id ?? null,
-        user_type: user.user_type ?? null,
         sv: sessionVersion,
       },
       process.env.JWT_SECRET,
