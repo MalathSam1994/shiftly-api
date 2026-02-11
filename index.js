@@ -53,6 +53,7 @@
  const dropdownDepartmentsQuery = require('./query/dropdownDepartments');
  const dropdownShiftTypesQuery = require('./query/dropdownShiftTypes');
  const dropdownAbsenceTypesQuery = require('./query/dropdownAbsenceTypes');
+ const divDepDropdownQuery = require('./query/divDepDropdown');
 
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
@@ -206,6 +207,7 @@ app.use(requireAuth);
  app.use('/dropdown/departments', dropdownDepartmentsQuery);
  app.use('/dropdown/shift-types', dropdownShiftTypesQuery);
  app.use('/dropdown/absence-types', dropdownAbsenceTypesQuery);
+ app.use('/dropdown/div-dep', divDepDropdownQuery);
 
 
 	// =========================================================
