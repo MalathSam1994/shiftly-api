@@ -5,6 +5,28 @@ const createCrudRouter = require('../createCrudRouter');
 
 
 
+// Parse a date input into a Date (UTC midnight) if possible.
+// Accepts ISO strings like "2026-02-14" or "2026-02-14T00:00:00.000Z",
+// and also accepts Date objects.
+function toUtcMidnightDate(value) {
+  if (!value) return null;
+  if (value instanceof Date && !Number.isNaN(value.getTime())) {
+    return new Date(Date.UTC(value.getUTCFullYear(), value.getUTCMonth(), value.getUTCDate()));
+  }
+  const s = String(value).trim();
+  if (!s) return null;
+  const datePart = s.split('T')[0];
+  const d = new Date(`${datePart}T00:00:00.000Z`);
+  if (Number.isNaN(d.getTime())) return null;
+  return d;
+}
+
+function utcTodayMidnight() {
+  const now = new Date();
+  return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
+}
+
+
 const shiftPeriodsConfig = {
   table: 'shiftly_schema.shift_periods',
   idColumn: 'id',
@@ -19,10 +41,57 @@ const shiftPeriodsConfig = {
     'description',
   ],
 
+  
     // Override CREATE so we can map constraint/unique errors into friendly JSON
   createHandler: async (req, res, { pool, config, allColumns }) => {
     try {
       const body = req.body || {};
+
+
+      // ✅ Business validation: do not allow creating periods with dates in the past.
+      // Rule:
+      // - start_date must be >= today
+      // - end_date must be >= today
+      //
+      // Notes:
+      // - We compare by DATE (not time) using UTC midnight to avoid timezone surprises.
+      // - This validation is best enforced server-side even if UI also blocks it.
+      const today = utcTodayMidnight();
+      const start = toUtcMidnightDate(body.start_date);
+      const end = toUtcMidnightDate(body.end_date);
+
+      // If either date is present but invalid, return a clean 400.
+      if (body.start_date !== undefined && start == null) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: 'Invalid start_date. Expected an ISO date like YYYY-MM-DD.',
+          code: 'P0001',
+        });
+      }
+      if (body.end_date !== undefined && end == null) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: 'Invalid end_date. Expected an ISO date like YYYY-MM-DD.',
+          code: 'P0001',
+        });
+      }
+
+      // Only validate when dates are provided (they should be for CREATE).
+      if (start != null && start < today) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: 'Start date cannot be in the past.',
+          code: 'P0001',
+        });
+      }
+      if (end != null && end < today) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: 'End date cannot be in the past.',
+          code: 'P0001',
+        });
+      }
+
 
       // Only allow configured columns that were provided
       const cols = config.columns.filter((c) => body[c] !== undefined);
