@@ -41,7 +41,7 @@ const shiftPeriodsConfig = {
     'description',
   ],
 
-  
+
     // Override CREATE so we can map constraint/unique errors into friendly JSON
   createHandler: async (req, res, { pool, config, allColumns }) => {
     try {
@@ -231,6 +231,46 @@ function mapShiftPeriodsDbError(err, payload) {
   return null;
 }
 
+ 
+// Try to parse Postgres error DETAIL (often JSON text when raised from PL/pgSQL)
+function tryParseJson(text) {
+  if (text == null) return null;
+  const s = String(text).trim();
+  if (!s) return null;
+  // Accept JSON objects/arrays only
+  if (!(s.startsWith('{') || s.startsWith('['))) return null;
+  try {
+    return JSON.parse(s);
+  } catch (_) {
+    return null;
+  }
+}
+
+// Build consistent JSON error responses for "business" exceptions (ERRCODE P0001)
+function buildBusinessError(err, fallbackMessage) {
+  const parsedDetail = tryParseJson(err && err.detail);
+
+  return {
+    http: 400,
+    body: {
+      error: 'Business rule violation',
+      details: (err && err.message) ? err.message : (fallbackMessage || 'Business rule violation.'),
+      code: (err && err.code) ? err.code : 'P0001',
+      routine: err && err.routine,
+      // IMPORTANT:
+      // If the DB raised DETAIL as JSON (e.g. validation errors array),
+      // expose it as structured data so the UI can show real details.
+      validation_errors:
+        Array.isArray(parsedDetail) || (parsedDetail && typeof parsedDetail === 'object')
+          ? parsedDetail
+          : undefined,
+      // Keep the raw detail too (helps troubleshooting when JSON parsing fails)
+      db_detail: err && err.detail,
+    },
+  };
+}
+
+
 /**
  * POST /shift-periods/:id/generate-from-template
  *
@@ -306,13 +346,22 @@ router.post('/:id/approve', async (req, res) => {
  } catch (err) {
  
     console.error('Error approving period:', err);
-     const isBusiness = err && err.code === 'P0001';
-   return res.status(isBusiness ? 400 : 500).json({
-     error: isBusiness ? 'Business rule violation' : 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
-    });
+    const isBusiness = err && err.code === 'P0001';
+     if (isBusiness) {
+       const built = buildBusinessError(
+         err,
+         `Coverage validation failed for period (${periodId}).`,
+       );
+       return res.status(built.http).json(built.body);
+     }
+
+     return res.status(500).json({
+       error: 'Database error',
+       details: err.message,
+       code: err.code,
+       routine: err.routine,
+     });
+ 
 
   }
 });
@@ -330,4 +379,35 @@ router.use((err, req, res, next) => {
 });
 
 
+
+// Optional: Validate coverage without approving (for UI pre-check)
+router.get('/:id/validate-approval', async (req, res) => {
+  const periodId = parseInt(req.params.id, 10);
+  if (Number.isNaN(periodId)) {
+    return res.status(400).json({ error: 'Invalid period id.' });
+  }
+  try {
+    const result = await pool.query(
+      `SELECT shiftly_api.validate_period_coverage($1) AS result`,
+      [periodId],
+    );
+    return res.json(result.rows[0].result);
+  } catch (err) {
+    console.error('Error validating period coverage:', err);
+    const isBusiness = err && err.code === 'P0001';
+    if (isBusiness) {
+      const built = buildBusinessError(err, 'Coverage validation failed.');
+      return res.status(built.http).json(built.body);
+    }
+    return res.status(500).json({
+      error: 'Database error',
+      details: err.message,
+      code: err.code,
+      routine: err.routine,
+    });
+  }
+});
+
 module.exports = router;
+
+
