@@ -72,7 +72,7 @@ router.get('/', async (req, res) => {
 
     const sql = `
       SELECT
-        existing,
+        existing AS exists,
         rule_id,
         required_staff_count,
         scope
