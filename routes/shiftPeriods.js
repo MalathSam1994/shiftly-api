@@ -246,9 +246,42 @@ function tryParseJson(text) {
   }
 }
 
+// Normalize ANY "validation_errors" payload into the shape:
+//   { errors: [...], warnings: [...] }
+// Supported inputs:
+// - { errors: [...], warnings: [...] }
+// - { validation_errors: { errors: [...], warnings: [...] } }
+// - { validation_errors: [...] }  -> treated as errors
+// - [ ... ]                       -> treated as errors
+function normalizeValidationErrors(anyVal) {
+  let v = anyVal;
+  if (v && typeof v === 'object' && !Array.isArray(v) && v.validation_errors !== undefined) {
+    v = v.validation_errors;
+  }
+
+  if (Array.isArray(v)) {
+    return { errors: v, warnings: [] };
+  }
+
+  if (v && typeof v === 'object') {
+    const errors = Array.isArray(v.errors) ? v.errors : [];
+    const warnings = Array.isArray(v.warnings) ? v.warnings : [];
+    // Some earlier versions may have used "validation_errors" as a list inside an object:
+    // { validation_errors: [...] } already handled above, but keep this for safety.
+    if (!errors.length && !warnings.length && Array.isArray(v.validation_errors)) {
+      return { errors: v.validation_errors, warnings: [] };
+    }
+    return { errors, warnings };
+  }
+
+  return { errors: [], warnings: [] };
+}
+
+
 // Build consistent JSON error responses for "business" exceptions (ERRCODE P0001)
 function buildBusinessError(err, fallbackMessage) {
   const parsedDetail = tryParseJson(err && err.detail);
+  const normalized = normalizeValidationErrors(parsedDetail);
 
   return {
     http: 400,
@@ -260,10 +293,11 @@ function buildBusinessError(err, fallbackMessage) {
       // IMPORTANT:
       // If the DB raised DETAIL as JSON (e.g. validation errors array),
       // expose it as structured data so the UI can show real details.
-      validation_errors:
-        Array.isArray(parsedDetail) || (parsedDetail && typeof parsedDetail === 'object')
-          ? parsedDetail
-          : undefined,
+      // ✅ Always return { errors: [], warnings: [] } when any validation exists.
+     validation_errors:
+       (normalized.errors.length || normalized.warnings.length)
+         ? normalized
+         : undefined,
       // Keep the raw detail too (helps troubleshooting when JSON parsing fails)
       db_detail: err && err.detail,
     },
@@ -337,6 +371,45 @@ router.post('/:id/approve', async (req, res) => {
     return res.status(400).json({ error: 'Invalid period id.' });
   }
 
+    // ✅ DEBUG PATH:
+  // Call: POST /shift-periods/:id/approve?__debug_validation=1
+  // This returns a deterministic payload containing BOTH warnings + errors
+  // so you can verify whether the issue is in:
+  // - Dart parsing (CoverageValidationException)
+  // - SnackBar display/queueing
+  // - endpoint mapping
+  if (String(req.query.__debug_validation || '') === '1') {
+    const errors = [
+      {
+        code: 'GAP_DETECTED',
+        message:
+          'DEBUG ERROR: St Johns Park care / Radiology: Missing coverage 2026-03-29 22:00 → 2026-03-30 10:00 (12:00:00) between assignment 791 and assignment 796.',
+        division_name: 'St Johns Park care',
+        department_name: 'Radiology',
+      },
+    ];
+    const warnings = [
+      {
+        code: 'OVERLAP_DETECTED',
+        message:
+          'DEBUG WARNING: St Johns Park care / Radiology: Overlap 2026-03-10 06:00 → 2026-03-10 08:00 (02:00:00) between assignment 555 and assignment 556.',
+        division_name: 'St Johns Park care',
+        department_name: 'Radiology',
+      },
+    ];
+
+    return res.status(400).json({
+      error: 'Business rule violation',
+      details: 'DEBUG: synthetic coverage validation payload (warnings + errors).',
+      code: 'P0001',
+      validation_errors: { errors, warnings },
+      // keep top-level too (Flutter parser supports both)
+      errors,
+      warnings,
+    });
+  }
+
+
    try {
  const result = await pool.query(
  `SELECT shiftly_api.approve_period_with_assignments($1) AS result`,
@@ -352,6 +425,13 @@ router.post('/:id/approve', async (req, res) => {
          err,
          `Coverage validation failed for period (${periodId}).`,
        );
+
+
+      // Also ensure top-level "errors"/"warnings" exist for maximum compatibility,
+      // while keeping validation_errors for structured parsing.
+      const ve = normalizeValidationErrors(built.body.validation_errors);
+      built.body.errors = ve.errors;
+      built.body.warnings = ve.warnings;       
        return res.status(built.http).json(built.body);
      }
 
