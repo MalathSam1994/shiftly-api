@@ -136,6 +136,18 @@ function createCrudRouter(config) {
   router.put('/:id', async (req, res) => {
     try {
 
+      // Allow lightweight pre-validation hook while still using generic update flow.
+      if (typeof config.beforeUpdate === 'function') {
+        const shouldContinue = await config.beforeUpdate(req, res, {
+          pool,
+          config,
+          allColumns,
+        });
+        if (shouldContinue === false) {
+          return;
+        }
+      }
+
       // Allow per-route custom update handler
       if (typeof config.updateHandler === 'function') {
         await config.updateHandler(req, res, { pool, config, allColumns });
@@ -178,6 +190,23 @@ function createCrudRouter(config) {
       res.json(result.rows[0]);
     } catch (err) {
       console.error('Error updating DB (UPDATE):', err);
+
+
+      if (typeof config.mapDbError === 'function') {
+        const mapped = config.mapDbError(err, {
+          action: 'UPDATE',
+          req,
+          res,
+          pool,
+          config,
+          allColumns,
+        });
+        if (mapped && mapped.http && mapped.body) {
+          return res.status(mapped.http).json(mapped.body);
+        }
+      }
+
+
       res.status(500).json({ error: 'Database error' });
     }
   });
@@ -185,7 +214,17 @@ function createCrudRouter(config) {
   // DELETE /:id
   router.delete('/:id', async (req, res) => {
     try {
-
+      // Allow lightweight pre-validation hook while still using generic delete flow.
+      if (typeof config.beforeDelete === 'function') {
+        const shouldContinue = await config.beforeDelete(req, res, {
+          pool,
+          config,
+          allColumns,
+        });
+        if (shouldContinue === false) {
+          return;
+        }
+      }
       // Allow per-route custom delete handler
       if (typeof config.deleteHandler === 'function') {
         await config.deleteHandler(req, res, { pool, config, allColumns });
@@ -205,6 +244,21 @@ function createCrudRouter(config) {
       res.json({ deleted: result.rows[0] });
     } catch (err) {
       console.error('Error deleting from DB (DELETE):', err);
+
+      if (typeof config.mapDbError === 'function') {
+        const mapped = config.mapDbError(err, {
+          action: 'DELETE',
+          req,
+          res,
+          pool,
+          config,
+          allColumns,
+        });
+        if (mapped && mapped.http && mapped.body) {
+          return res.status(mapped.http).json(mapped.body);
+        }
+      }
+
       res.status(500).json({ error: 'Database error' });
     }
   });
