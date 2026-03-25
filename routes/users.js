@@ -7,6 +7,33 @@ const { sendUserWelcomeEmail } = require('../services/mailer');
 
 const router = express.Router();
 
+
+function normalizeValidationErrors(anyVal) {
+  let v = anyVal;
+
+  if (
+    v &&
+    typeof v === 'object' &&
+    !Array.isArray(v) &&
+    v.validation_errors !== undefined
+  ) {
+    v = v.validation_errors;
+  }
+
+  if (Array.isArray(v)) {
+    return { errors: v, warnings: [] };
+  }
+
+  if (v && typeof v === 'object') {
+    return {
+      errors: Array.isArray(v.errors) ? v.errors : [],
+      warnings: Array.isArray(v.warnings) ? v.warnings : [],
+    };
+  }
+
+  return { errors: [], warnings: [] };
+}
+
 // Run a single query with a per-request statement_timeout that does NOT leak to pooled sessions.
 async function queryWithTimeout(sql, params, timeoutMs = 20000) {
   const client = await pool.connect();
@@ -183,6 +210,32 @@ router.put('/:id', async (req, res) => {
       });
     }
 
+
+    const validationResult = await queryWithTimeout(
+      `SELECT shiftly_api.validate_user_change($1, 'UPDATE') AS result`,
+      [req.params.id],
+      20000,
+    );
+
+    const validationPayload = validationResult.rows?.[0]?.result;
+    const normalizedValidation = normalizeValidationErrors(validationPayload);
+    const ok =
+      validationPayload &&
+      Object.prototype.hasOwnProperty.call(validationPayload, 'ok')
+        ? Boolean(validationPayload.ok)
+        : true;
+
+    if (!ok) {
+      return res.status(400).json({
+        error: 'Business rule violation',
+        details: `User cannot be updated because this user is already linked.`,
+        code: 'P0001',
+        validation_errors: normalizedValidation,
+        errors: normalizedValidation.errors,
+        warnings: normalizedValidation.warnings,
+      });
+    }
+
     const query = `
       UPDATE shiftly_schema.users
       SET empno = $1,
@@ -231,6 +284,31 @@ router.put('/:id', async (req, res) => {
 // DELETE /users/:id -> delete user
 router.delete('/:id', async (req, res) => {
   try {
+    const validationResult = await queryWithTimeout(
+      `SELECT shiftly_api.validate_user_change($1, 'DELETE') AS result`,
+      [req.params.id],
+      20000,
+    );
+
+    const validationPayload = validationResult.rows?.[0]?.result;
+    const normalizedValidation = normalizeValidationErrors(validationPayload);
+    const ok =
+      validationPayload &&
+      Object.prototype.hasOwnProperty.call(validationPayload, 'ok')
+        ? Boolean(validationPayload.ok)
+        : true;
+
+    if (!ok) {
+      return res.status(400).json({
+        error: 'Business rule violation',
+        details: `User cannot be deleted because this user is already linked.`,
+        code: 'P0001',
+        validation_errors: normalizedValidation,
+        errors: normalizedValidation.errors,
+        warnings: normalizedValidation.warnings,
+      });
+    }
+
     const query = `
       DELETE FROM shiftly_schema.users
       WHERE id = $1
