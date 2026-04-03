@@ -51,6 +51,7 @@
  // =========================================================
  const dropdownUsersQuery = require('./query/dropdownUsers');
  const dropdownDepartmentsQuery = require('./query/dropdownDepartments');
+ const dropdownShiftPeriodUsersQuery = require('./query/dropdownShiftPeriodUsers');
  const dropdownShiftTypesQuery = require('./query/dropdownShiftTypes');
  const dropdownAbsenceTypesQuery = require('./query/dropdownAbsenceTypes');
  const divDepDropdownQuery = require('./query/divDepDropdown');
@@ -205,6 +206,7 @@ app.use(requireAuth);
  // DROPDOWNS (read-only)
  // =========================================================
  app.use('/dropdown/users', dropdownUsersQuery);
+ app.use('/dropdown/shift-period-users', dropdownShiftPeriodUsersQuery);
  app.use('/dropdown/departments', dropdownDepartmentsQuery);
  app.use('/dropdown/shift-types', dropdownShiftTypesQuery);
  app.use('/dropdown/absence-types', dropdownAbsenceTypesQuery);
