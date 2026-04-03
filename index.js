@@ -5,7 +5,7 @@
 	require('dotenv').config();
 	const requireAuth = require('./middleware/requireAuth');
 
-
+	const systemConfigurationRouter = require('./routes/systemConfiguration');
 	const treeMenuRouter = require('./routes/treeMenu');
 	const itemsRouter = require('./routes/items');
 	const departmentsRouter = require('./routes/departments');
@@ -167,6 +167,7 @@ app.use((req, res, next) => {
 	
 	// Protect EVERYTHING below (all business endpoints)
 app.use(requireAuth);
+	app.use('/system-configuration', systemConfigurationRouter);
 	app.use('/profile', profileRouter);
     app.use('/roles', rolesRouter);
     app.use('/permissions', permissionsRouter);
