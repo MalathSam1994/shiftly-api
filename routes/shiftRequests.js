@@ -290,6 +290,11 @@ router.post('/:id/approve', async (req, res) => {
       });
     }
 
+    const who = await pool.query(
+  `select current_database(), current_user, inet_server_addr(), inet_server_port()`
+);
+console.log('DB INFO', who.rows[0]);
+
     // Thin wrapper around DB function
     const result = await pool.query(
       `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,

@@ -44,7 +44,7 @@
 	const colleagueShiftsQuery = require('./query/colleagueShifts');
 	const switchCandidatesQuery = require('./query/switchCandidates');
 	const availableShiftsQuery = require('./query/availableShifts');
-	
+	const mobileCalendarDayStates = require('./query/mobileCalendarDayStates');
 	
  // =========================================================
  // DROPDOWNS (read-only) backed by DB views
@@ -223,6 +223,7 @@ app.use(requireAuth);
 	app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
 	app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
 	app.use('/dashboard/mobile', mobileDashboardQuery);
+	app.use('/mobile-calendar/day-states', mobileCalendarDayStates);
 	
 	app.use('/fcm', fcm);
 	app.use('/notifications', notifications);
