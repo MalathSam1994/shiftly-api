@@ -1,4 +1,5 @@
 // routes/shiftAssignments.js
+const express = require('express');
 const createCrudRouter = require('../createCrudRouter');
 const pool = require('../db');
 
@@ -168,7 +169,58 @@ const shiftAssignmentsConfig = {
 
 };
 
-const router = createCrudRouter(shiftAssignmentsConfig);
+const router = express.Router();
+
+
+/**
+ * GET /shift-assignments/mobile-day-details?user_id=123&date=YYYY-MM-DD
+ *
+ * Centralized mobile payload:
+ * - backend decides tap_action
+ * - backend decides which assignments DayDetails should show
+ * - backend returns pending requests + effective user absence type
+ */
+router.get('/mobile-day-details', async (req, res) => {
+  try {
+    const rawUserId = req.query.user_id ?? req.query.userId;
+    const rawDate = (req.query.date ?? '').toString().trim();
+
+    const userId = Number(rawUserId);
+    if (!Number.isFinite(userId)) {
+      return res.status(400).json({ error: 'Invalid user_id.' });
+    }
+    if (!rawDate || !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
+      return res.status(400).json({ error: 'Invalid date (expected YYYY-MM-DD).' });
+    }
+
+    const result = await pool.query(
+      `
+      SELECT shiftly_api.fn_mobile_day_details($1::int, $2::date) AS payload
+      `,
+      [userId, rawDate],
+    );
+
+    if (!result.rows || result.rows.length === 0) {
+      return res.status(404).json({ error: 'No payload returned.' });
+    }
+
+    return res.json(result.rows[0].payload);
+  } catch (err) {
+    console.error('Error loading mobile day details:', err);
+    return res.status(500).json({
+      error: 'Database error',
+      details: err.message,
+      code: err.code,
+      routine: err.routine,
+    });
+  }
+});
+
+
+// IMPORTANT:
+// Mount CRUD routes only AFTER custom static routes,
+// otherwise "/mobile-day-details" may be captured by "/:id".
+router.use('/', createCrudRouter(shiftAssignmentsConfig));
 
 /**
  * DELETE /shift-assignments/:id/hard
