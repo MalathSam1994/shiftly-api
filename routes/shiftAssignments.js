@@ -58,7 +58,24 @@ const shiftAssignmentsConfig = {
     }
 
     let sql = `
-      SELECT ${allColumns.join(', ')}
+      SELECT
+        id,
+        shift_period_id,
+        to_char(shift_date, 'YYYY-MM-DD') AS shift_date,
+        division_id,
+        department_id,
+        user_id,
+        staff_type_id,
+        shift_type_id,
+        source_type,
+        status,
+        status_comment,
+        is_absence,
+        absence_type,
+        created_at,
+        updated_at,
+        staff_shift_rule_id,
+        required_staff_snapshot
       FROM ${config.table}
     `;
     if (where.length) {
@@ -119,20 +136,37 @@ const shiftAssignmentsConfig = {
 
       const result = await pool.query(
         `
-        SELECT *
+        SELECT
+          r.id,
+          r.shift_period_id,
+          to_char(r.shift_date, 'YYYY-MM-DD') AS shift_date,
+          r.division_id,
+          r.department_id,
+          r.user_id,
+          r.staff_type_id,
+          r.shift_type_id,
+          r.source_type,
+          r.status,
+          r.status_comment,
+          r.is_absence,
+          r.absence_type,
+          r.created_at,
+          r.updated_at,
+          r.staff_shift_rule_id,
+          r.required_staff_snapshot
         FROM shiftly_api.update_shift_assignment(
-          $1,        -- id
-          $2,        -- shift_period_id
-          $3::int,   -- division_id
-          $4,        -- department_id
-          $5,        -- user_id
-          $6,        -- shift_type_id
-          $7::date,  -- shift_date
-          $8,        -- status
-          $9,        -- status_comment
-          $10::int,  -- is_absence
-          $11        -- absence_type
-        )
+          $1,
+          $2,
+          $3::int,
+          $4,
+          $5,
+          $6,
+          $7::date,
+          $8,
+          $9,
+          $10::int,
+          $11
+        ) AS r
         `,
         [
           id,
@@ -328,20 +362,37 @@ router.post('/create-smart', async (req, res) => {
 
     const result = await pool.query(
       `
-      SELECT *
+      SELECT
+        r.id,
+        r.shift_period_id,
+        to_char(r.shift_date, 'YYYY-MM-DD') AS shift_date,
+        r.department_id,
+        r.user_id,
+        r.staff_type_id,
+        r.shift_type_id,
+        r.source_type,
+        r.status,
+        r.status_comment,
+        r.created_at,
+        r.updated_at,
+        r.staff_shift_rule_id,
+        r.required_staff_snapshot,
+        r.is_absence,
+        r.absence_type,
+        r.division_id
       FROM shiftly_api.create_shift_assignment(
-        $1,              -- shift_period_id
-        $2::int,         -- division_id
-        $3,              -- department_id
-        $4,              -- user_id
-        $5,              -- shift_type_id
-        $6::date,        -- shift_date
-        $7,              -- status
-        $8,              -- status_comment
-        $9, -- source_type
-        $10::int, -- is_absence
-        $11 -- absence_type
-      )
+        $1,
+        $2::int,
+        $3,
+        $4,
+        $5,
+        $6::date,
+        $7,
+        $8,
+        $9,
+        $10::int,
+        $11
+      ) AS r
       `,
       [
         shiftPeriodId,
