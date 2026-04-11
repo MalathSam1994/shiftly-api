@@ -28,10 +28,40 @@ router.get('/', async (req, res) => {
         .json({ error: 'shift_date is required (YYYY-MM-DD)' });
     }
 
-   const sql = `
-              SELECT *
-                FROM shiftly_api.fn_available_shift_options($1::int, $2::date)
-               `;
+    // IMPORTANT:
+    // Do NOT return PostgreSQL DATE columns as raw JS Date objects here.
+    // Always stringify business dates explicitly as YYYY-MM-DD to avoid
+    // timezone-based off-by-one shifts in JSON.
+    const sql = `
+      SELECT
+        x.option_id,
+        x.user_id,
+        to_char(x.shift_date, 'YYYY-MM-DD') AS shift_date,
+        x.department_id,
+        x.department_desc,
+        x.staff_type_id,
+        x.staff_type_name,
+        x.division_id,
+        x.division_desc,
+        x.shift_type_id,
+        x.shift_label,
+        x.start_time,
+        x.end_time,
+        x.duration_hours,
+        x.required_staff_count,
+        x.assigned_count,
+        x.free_slots,
+        x.user_has_assigned_shift,
+        x.can_request_new_shift,
+        x.blocked_reason,
+        x.is_offered,
+        x.offer_id,
+        x.offer_assignment_id,
+        x.offered_by_user_id,
+        x.offer_note
+      FROM shiftly_api.fn_available_shift_options($1::int, $2::date) x
+      ORDER BY x.is_offered DESC, x.division_id ASC, x.department_id ASC, x.shift_type_id ASC
+    `;
 
     const result = await pool.query(sql, [userId, shiftDate]);
     return res.json(result.rows);

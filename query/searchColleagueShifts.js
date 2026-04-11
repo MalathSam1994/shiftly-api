@@ -82,7 +82,7 @@ router.get('/', async (req, res) => {
   const sql = `
     SELECT 
 	base_user_id,
-   shift_date,
+to_char(${shiftDateExpr}, 'YYYY-MM-DD') AS shift_date,
    department_id,
    department_desc,
    division_id,

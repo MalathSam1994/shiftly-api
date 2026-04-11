@@ -39,11 +39,27 @@ router.get('/', async (req, res) => {
       where.push(`shift_date::date = $${i++}::date`);
     }
 
+    // IMPORTANT:
+    // Stringify shift_date explicitly to keep it as a stable business date.
     const sql = `
-      SELECT *
+      SELECT
+        base_user_id,
+        to_char(shift_date::date, 'YYYY-MM-DD') AS shift_date,
+        division_id,
+        division_desc,
+        department_id,
+        department_desc,
+        shift_type_id,
+        shift_label,
+        start_time,
+        end_time,
+        duration_hours,
+        colleague_user_id,
+        colleague_name,
+        status
       FROM shiftly_schema.v_colleague_shifts_in_user_metrics
       WHERE ${where.join(' AND ')}
-      ORDER BY shift_date ASC, division_id ASC, department_id ASC, shift_type_id ASC, colleague_user_id ASC
+      ORDER BY shift_date::date ASC, division_id ASC, department_id ASC, shift_type_id ASC, colleague_user_id ASC
     `;
 
     const result = await pool.query(sql, params);
