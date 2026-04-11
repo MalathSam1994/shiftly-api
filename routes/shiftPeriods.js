@@ -109,7 +109,16 @@ const shiftPeriodsConfig = {
       const sql = `
         INSERT INTO ${config.table} (${cols.join(', ')})
         VALUES (${placeholders})
-        RETURNING ${allColumns.join(', ')}
+        RETURNING
+          id,
+          period_type,
+          to_char(start_date, 'YYYY-MM-DD') AS start_date,
+          to_char(end_date, 'YYYY-MM-DD') AS end_date,
+          template_id,
+          generated_at,
+          generated_by_user_id,
+          status,
+          description
       `;
 
       const result = await pool.query(sql, values);
@@ -159,7 +168,16 @@ const shiftPeriodsConfig = {
         `
         DELETE FROM ${config.table}
         WHERE ${config.idColumn} = $1
-        RETURNING ${allColumns.join(', ')}
+        RETURNING
+          id,
+          period_type,
+          to_char(start_date, 'YYYY-MM-DD') AS start_date,
+          to_char(end_date, 'YYYY-MM-DD') AS end_date,
+          template_id,
+          generated_at,
+          generated_by_user_id,
+          status,
+          description
         `,
         [id],
       );

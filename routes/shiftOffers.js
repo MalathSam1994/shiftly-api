@@ -59,14 +59,33 @@ router.get('/', async (req, res) => {
     ];
 
     const q = `
-      SELECT *
-        FROM shiftly_api.fn_shift_offer_list(
-          $1::int,
-          $2::date,
-          $3::int,
-          $4::int,
-          $5::int
-        )
+      SELECT
+        x.id,
+        x.shift_assignment_id,
+        x.offered_by_user_id,
+        x.offered_at,
+        x.status,
+        x.original_assignment_status,
+        x.visibility_scope,
+        x.target_user_id,
+        x.note,
+        to_char(x.shift_date, 'YYYY-MM-DD') AS shift_date,
+        x.division_id,
+        x.department_id,
+        x.shift_type_id,
+        x.staff_type_id,
+        x.assignment_owner_user_id,
+        x.shift_label,
+        x.start_time,
+        x.end_time,
+        x.duration_hours
+      FROM shiftly_api.fn_shift_offer_list(
+        $1::int,
+        $2::date,
+        $3::int,
+        $4::int,
+        $5::int
+      ) x
     `;
 
     const r = await pool.query(q, values);

@@ -300,7 +300,24 @@ router.delete('/:id/hard', async (req, res) => {
       `
       DELETE FROM shiftly_schema.shift_assignments
       WHERE id = $1
-      RETURNING *
+      RETURNING
+        id,
+        shift_period_id,
+        to_char(shift_date, 'YYYY-MM-DD') AS shift_date,
+        division_id,
+        department_id,
+        user_id,
+        staff_type_id,
+        shift_type_id,
+        source_type,
+        status,
+        status_comment,
+        created_at,
+        updated_at,
+        staff_shift_rule_id,
+        required_staff_snapshot,
+        is_absence,
+        absence_type
       `,
       [id],
     );

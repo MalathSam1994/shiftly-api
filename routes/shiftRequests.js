@@ -4,6 +4,23 @@ const pool = require('../db');
 
 const router = express.Router();
 
+
+function normalizeShiftRequestRow(row) {
+  if (!row || typeof row !== 'object') return row;
+  return {
+    ...row,
+    requested_shift_date:
+      row.requested_shift_date == null
+        ? row.requested_shift_date
+        : String(row.requested_shift_date).slice(0, 10),
+  };
+}
+
+function normalizeShiftRequestRows(rows) {
+  if (!Array.isArray(rows)) return rows;
+  return rows.map(normalizeShiftRequestRow);
+}
+
  function pgErrorToHttpStatus(err) {
    const code = String(err?.code ?? '');
    if (code === 'P0002') return 404;   // no_data_found (custom raise)
@@ -157,14 +174,16 @@ router.get('/', async (req, res) => {
 
        // Read from VIEW (centralized projection)
    const query = `
-     SELECT *
+     SELECT
+       sr.*,
+       to_char(sr.requested_shift_date, 'YYYY-MM-DD') AS requested_shift_date
        FROM shiftly_api.v_shift_requests sr
      ${whereSql}
      ORDER BY created_at DESC
    `;
 
     const result = await pool.query(query, values);
-    res.json(result.rows);
+    res.json(normalizeShiftRequestRows(result.rows));
   } catch (err) {
     console.error('Error querying DB (SHIFT REQUESTS LIST):', err);
      return sendDbError(res, err, 'SHIFT REQUESTS LIST', pgErrorToHttpStatus(err));
@@ -259,7 +278,7 @@ router.post('/', async (req, res) => {
       `SELECT * FROM shiftly_api.shift_request_create($1::jsonb)`,
       [JSON.stringify(req.body ?? {})]
     );
-    return res.status(201).json(result.rows[0]);
+    return res.status(201).json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
 
     console.error('Error inserting into DB (SHIFT REQUESTS CREATE):', err);
@@ -300,7 +319,7 @@ console.log('DB INFO', who.rows[0]);
       `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,
       [rid, decision_by_user_id, decision_comment ?? null]
     );
-    return res.json(result.rows[0]);
+     return res.json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
     console.error('Error approving shift request:', err);
     const http = pgErrorToHttpStatus(err);
@@ -389,7 +408,7 @@ router.post('/:id/attach-assignment', async (req, res) => {
          inbox_user_id,
          shift_assignment_id,
          division_id,
-         requested_shift_date,
+         to_char(requested_shift_date, 'YYYY-MM-DD') AS requested_shift_date,
          requested_shift_type_id,
          requested_department_id,
          created_at,
@@ -456,7 +475,7 @@ router.post('/:id/attach-assignment', async (req, res) => {
     }
 
     await client.query('COMMIT');
-    return res.json(updRes.rows[0]);
+     return res.json(normalizeShiftRequestRow(updRes.rows[0]));
   } catch (err) {
     if (client) {
       try { await client.query('ROLLBACK'); } catch (_) {}
@@ -497,7 +516,7 @@ router.post('/:id/reject', async (req, res) => {
       `SELECT * FROM shiftly_api.shift_request_reject($1::int, $2::int, $3::text)`,
       [rid, decision_by_user_id, decision_comment ?? null]
     );
-    return res.json(result.rows[0]);
+    return res.json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
     console.error('Error rejecting shift request:', err);
    const http = pgErrorToHttpStatus(err);

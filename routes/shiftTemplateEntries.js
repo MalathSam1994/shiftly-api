@@ -20,6 +20,7 @@ const shiftTemplateEntriesConfig = {
     'day_of_week',
     'week_of_cycle',
   ],
+  
 };
 
 const router = createCrudRouter(shiftTemplateEntriesConfig);

@@ -37,8 +37,14 @@ router.get('/', async (req, res) => {
     }
 
     const sql = `
-      SELECT id, holiday_year_id, holiday_date, occasion, created_by, created_at
-      FROM shiftly_schema.yearly_holidays
+     SELECT
+       id,
+       holiday_year_id,
+       to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+       occasion,
+       created_by,
+       created_at
+    FROM shiftly_schema.yearly_holidays
       WHERE holiday_year_id = $1
       ORDER BY holiday_date
     `;
@@ -60,7 +66,13 @@ router.get('/:id', async (req, res) => {
     }
 
     const sql = `
-      SELECT id, holiday_year_id, holiday_date, occasion, created_by, created_at
+      SELECT
+        id,
+        holiday_year_id,
+        to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+        occasion,
+        created_by,
+        created_at
       FROM shiftly_schema.yearly_holidays
       WHERE id = $1
     `;
@@ -105,7 +117,13 @@ router.post('/', async (req, res) => {
         (holiday_year_id, holiday_date, occasion, created_by)
       VALUES
         ($1, $2::date, $3, $4)
-      RETURNING id, holiday_year_id, holiday_date, occasion, created_by, created_at
+      RETURNING
+        id,
+        holiday_year_id,
+        to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+        occasion,
+        created_by,
+        created_at
     `;
 
     const result = await queryWithTimeout(
@@ -159,8 +177,14 @@ router.put('/:id', async (req, res) => {
       UPDATE shiftly_schema.yearly_holidays
       SET ${sets.join(', ')}
       WHERE id = $${i}
-      RETURNING id, holiday_year_id, holiday_date, occasion, created_by, created_at
-    `;
+      RETURNING
+        id,
+        holiday_year_id,
+        to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+        occasion,
+        created_by,
+        created_at   
+         `;
 
     const result = await queryWithTimeout(sql, values, 20000);
     if (result.rows.length === 0) {
@@ -184,9 +208,15 @@ router.delete('/:id', async (req, res) => {
 
     const sql = `
       DELETE FROM shiftly_schema.yearly_holidays
-      WHERE id = $1
-      RETURNING id, holiday_year_id, holiday_date, occasion, created_by, created_at
-    `;
+     WHERE id = $1
+      RETURNING
+        id,
+        holiday_year_id,
+        to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
+        occasion,
+        created_by,
+        created_at    
+        `;
 
     const result = await queryWithTimeout(sql, [id], 20000);
     if (result.rows.length === 0) {
