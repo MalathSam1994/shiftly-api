@@ -3,6 +3,13 @@ const pool = require('../db');
 
 const router = express.Router();
 
+
+function parseOptionalInt(value) {
+  if (value == null || `${value}`.trim() === '') return null;
+  const parsed = parseInt(value, 10);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
 async function queryWithTimeout(sql, params, timeoutMs = 20000) {
   const client = await pool.connect();
   try {
@@ -27,13 +34,22 @@ router.get('/', async (req, res) => {
     const depRaw = req.query.department_id;
     const staffRaw = req.query.staff_type_id;
     const divRaw = req.query.division_id;
-
+    const userId = parseOptionalInt(req.query.user_id);
+    const templateId = parseOptionalInt(req.query.template_id);
+    const dayOfWeek = parseOptionalInt(req.query.day_of_week);
+    const weekOfCycle = parseOptionalInt(req.query.week_of_cycle);
+    const excludeEntryId = parseOptionalInt(req.query.exclude_entry_id);
+    const shiftPeriodId = parseOptionalInt(req.query.shift_period_id);
+    const excludeAssignmentId = parseOptionalInt(req.query.exclude_assignment_id);
+    const shiftDateRaw = req.query.shift_date;
+    const shiftDate =
+      shiftDateRaw == null || `${shiftDateRaw}`.trim() === ''
+        ? null
+        : `${shiftDateRaw}`.trim();
     const hasDep = depRaw != null && `${depRaw}`.trim() !== '';
     const hasStaff = staffRaw != null && `${staffRaw}`.trim() !== '';
 
-    const divisionId =
-      divRaw == null || `${divRaw}`.trim() === '' ? null : parseInt(divRaw, 10);
-
+const divisionId = parseOptionalInt(divRaw);
     // If called WITHOUT params (e.g. app bootstrap), return a global list of shift types.
     // This prevents 400s like:
     //   /dropdown/shift-types status=400 Missing/invalid query params...
@@ -81,6 +97,103 @@ router.get('/', async (req, res) => {
           'Missing/invalid query params. Required together: department_id, staff_type_id. Optional: division_id',
       });
     }
+
+    const isTemplateMode =
+      templateId != null || dayOfWeek != null || weekOfCycle != null || excludeEntryId != null;
+
+    const isPeriodMode =
+      shiftPeriodId != null || shiftDate != null;
+
+    if (isTemplateMode) {
+      if (templateId == null || dayOfWeek == null || weekOfCycle == null) {
+        return res.status(400).json({
+          error: 'template mode requires template_id, day_of_week, and week_of_cycle',
+        });
+      }
+
+      const sql = `
+        SELECT
+          rule_id,
+          division_id,
+          department_id,
+          staff_type_id,
+          id,
+          shift_type_id,
+          shift_code,
+          shift_label,
+          start_time,
+          end_time,
+          duration_hours,
+          day_type,
+          notes,
+          required_staff_count
+        FROM shiftly_api.fn_dropdown_template_shift_types($1, $2, $3, $4, $5, $6, $7, $8)
+      `;
+
+      const params = [
+        departmentId,
+        staffTypeId,
+        divisionId,
+        userId,
+        templateId,
+        dayOfWeek,
+        weekOfCycle,
+        excludeEntryId,
+      ];
+
+      console.log(
+        `[${req.rid}] DROPDOWN shift-types (template) params=${JSON.stringify(params)}`
+      );
+
+      const result = await queryWithTimeout(sql, params, 20000);
+      return res.json(result.rows);
+    }
+
+    if (isPeriodMode) {
+      if (shiftPeriodId == null || !shiftDate) {
+        return res.status(400).json({
+          error: 'period mode requires shift_period_id and shift_date',
+        });
+      }
+
+      const sql = `
+        SELECT
+          rule_id,
+          division_id,
+          department_id,
+          staff_type_id,
+          id,
+          shift_type_id,
+          shift_code,
+          shift_label,
+          start_time,
+          end_time,
+          duration_hours,
+          day_type,
+          notes,
+          required_staff_count
+        FROM shiftly_api.fn_dropdown_period_shift_types($1, $2, $3, $4, $5, $6::date, $7)
+      `;
+
+      const params = [
+        departmentId,
+        staffTypeId,
+        divisionId,
+        userId,
+        shiftPeriodId,
+        shiftDate,
+        excludeAssignmentId,
+      ];
+
+      console.log(
+        `[${req.rid}] DROPDOWN shift-types (period) params=${JSON.stringify(params)}`
+      );
+
+      const result = await queryWithTimeout(sql, params, 20000);
+      return res.json(result.rows);
+    }
+
+
 
     const sql = `
       SELECT DISTINCT ON (shift_type_id)
