@@ -58,6 +58,7 @@
  const dropdownTemplatePeriodDivisionsQuery = require('./query/dropdownTemplatePeriodDivisions');
  const dropdownTemplatePeriodDepartmentsQuery = require('./query/dropdownTemplatePeriodDepartments');
 const dropdownUserManagerUsersQuery = require('./query/dropdownUserManagerUsers');
+const dropdownUserManagerManagersQuery = require('./query/dropdownUserManagerManagers');
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
 	// =========================================================
@@ -216,6 +217,7 @@ app.use(requireAuth);
  app.use('/dropdown/template-period-divisions', dropdownTemplatePeriodDivisionsQuery);
  app.use('/dropdown/template-period-departments', dropdownTemplatePeriodDepartmentsQuery);
 app.use('/dropdown/user-manager-users', dropdownUserManagerUsersQuery);
+app.use('/dropdown/user-manager-managers', dropdownUserManagerManagersQuery);
 
 	// =========================================================
 	// SEARCH (read-only)
