@@ -57,7 +57,7 @@
  const staffShiftRuleValidation = require('./query/staffShiftRuleLookup');
  const dropdownTemplatePeriodDivisionsQuery = require('./query/dropdownTemplatePeriodDivisions');
  const dropdownTemplatePeriodDepartmentsQuery = require('./query/dropdownTemplatePeriodDepartments');
-
+const dropdownUserManagerUsersQuery = require('./query/dropdownUserManagerUsers');
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
 	// =========================================================
@@ -215,7 +215,7 @@ app.use(requireAuth);
  app.use('/rules/staff-shift-rule', staffShiftRuleValidation);
  app.use('/dropdown/template-period-divisions', dropdownTemplatePeriodDivisionsQuery);
  app.use('/dropdown/template-period-departments', dropdownTemplatePeriodDepartmentsQuery);
-
+app.use('/dropdown/user-manager-users', dropdownUserManagerUsersQuery);
 
 	// =========================================================
 	// SEARCH (read-only)
