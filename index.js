@@ -50,12 +50,13 @@
  // DROPDOWNS (read-only) backed by DB views
  // =========================================================
  const dropdownUsersQuery = require('./query/dropdownUsers');
- const dropdownDepartmentsQuery = require('./query/dropdownDepartments');
  const dropdownShiftPeriodUsersQuery = require('./query/dropdownShiftPeriodUsers');
  const dropdownShiftTypesQuery = require('./query/dropdownShiftTypes');
  const dropdownAbsenceTypesQuery = require('./query/dropdownAbsenceTypes');
  const divDepDropdownQuery = require('./query/divDepDropdown');
  const staffShiftRuleValidation = require('./query/staffShiftRuleLookup');
+ const dropdownTemplatePeriodDivisionsQuery = require('./query/dropdownTemplatePeriodDivisions');
+ const dropdownTemplatePeriodDepartmentsQuery = require('./query/dropdownTemplatePeriodDepartments');
 
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
@@ -208,11 +209,12 @@ app.use(requireAuth);
  // =========================================================
  app.use('/dropdown/users', dropdownUsersQuery);
  app.use('/dropdown/shift-period-users', dropdownShiftPeriodUsersQuery);
- app.use('/dropdown/departments', dropdownDepartmentsQuery);
  app.use('/dropdown/shift-types', dropdownShiftTypesQuery);
  app.use('/dropdown/absence-types', dropdownAbsenceTypesQuery);
  app.use('/dropdown/div-dep', divDepDropdownQuery);
  app.use('/rules/staff-shift-rule', staffShiftRuleValidation);
+ app.use('/dropdown/template-period-divisions', dropdownTemplatePeriodDivisionsQuery);
+ app.use('/dropdown/template-period-departments', dropdownTemplatePeriodDepartmentsQuery);
 
 
 	// =========================================================
