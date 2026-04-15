@@ -67,6 +67,7 @@ const dropdownUserManagerManagersQuery = require('./query/dropdownUserManagerMan
 	const searchPendingShiftRequestsQuery = require('./query/searchPendingShiftRequests');
 	const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
 	const mobileDashboardQuery = require('./query/mobileDashboard');
+const managerDashboardQuery = require('./query/managerDashboard');
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
@@ -227,6 +228,7 @@ app.use('/dropdown/user-manager-managers', dropdownUserManagerManagersQuery);
 	app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
 	app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
 	app.use('/dashboard/mobile', mobileDashboardQuery);
+	app.use('/dashboard/manager', managerDashboardQuery);
 	app.use('/mobile-calendar/day-states', mobileCalendarDayStates);
 	
 	app.use('/fcm', fcm);

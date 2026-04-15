@@ -22,6 +22,8 @@ router.get('/', async (req, res) => {
         coverage_validation_enabled,
         gap_validation_enabled,
         overlap_validation_enabled,
+         mobile_dashboard_default_days,
+       desktop_dashboard_default_days,
         updated_at,
         updated_by
       FROM shiftly_schema.system_configuration
@@ -38,6 +40,8 @@ router.get('/', async (req, res) => {
           coverage_validation_enabled,
           gap_validation_enabled,
           overlap_validation_enabled,
+          mobile_dashboard_default_days,
+          desktop_dashboard_default_days,
           updated_at,
           updated_by
         )
@@ -47,6 +51,8 @@ router.get('/', async (req, res) => {
           true,
           true,
           true,
+           14,
+          14,
           now(),
           NULL
         )
@@ -55,6 +61,8 @@ router.get('/', async (req, res) => {
           coverage_validation_enabled,
           gap_validation_enabled,
           overlap_validation_enabled,
+           mobile_dashboard_default_days,
+          desktop_dashboard_default_days,
           updated_at,
           updated_by
         `
@@ -92,6 +100,28 @@ router.put('/', async (req, res) => {
       'overlap_validation_enabled'
     );
 
+    const mobileDashboardDefaultDays = Number.parseInt(
+      String(req.body.mobile_dashboard_default_days ?? ''),
+      10
+    );
+    if (!Number.isFinite(mobileDashboardDefaultDays) || mobileDashboardDefaultDays < 0) {
+      return res.status(400).json({
+        error: 'Validation error',
+        details: 'Invalid value for "mobile_dashboard_default_days". Expected integer >= 0.',
+      });
+    }
+
+    const desktopDashboardDefaultDays = Number.parseInt(
+      String(req.body.desktop_dashboard_default_days ?? ''),
+      10
+    );
+    if (!Number.isFinite(desktopDashboardDefaultDays) || desktopDashboardDefaultDays < 0) {
+      return res.status(400).json({
+        error: 'Validation error',
+        details: 'Invalid value for "desktop_dashboard_default_days". Expected integer >= 0.',
+      });
+    }
+
     const updatedBy =
       req.user && req.user.id != null
         ? Number(req.user.id)
@@ -105,6 +135,8 @@ router.put('/', async (req, res) => {
         coverage_validation_enabled,
         gap_validation_enabled,
         overlap_validation_enabled,
+           mobile_dashboard_default_days,
+        desktop_dashboard_default_days,
         updated_at,
         updated_by
       )
@@ -114,14 +146,18 @@ router.put('/', async (req, res) => {
         $1,
         $2,
         $3,
+        $4,
+        $5,
         now(),
-        $4
+        $6
       )
       ON CONFLICT (id)
       DO UPDATE SET
         coverage_validation_enabled = EXCLUDED.coverage_validation_enabled,
         gap_validation_enabled = EXCLUDED.gap_validation_enabled,
         overlap_validation_enabled = EXCLUDED.overlap_validation_enabled,
+        mobile_dashboard_default_days = EXCLUDED.mobile_dashboard_default_days,
+       desktop_dashboard_default_days = EXCLUDED.desktop_dashboard_default_days,
         updated_at = now(),
         updated_by = EXCLUDED.updated_by
       RETURNING
@@ -129,6 +165,8 @@ router.put('/', async (req, res) => {
         coverage_validation_enabled,
         gap_validation_enabled,
         overlap_validation_enabled,
+       mobile_dashboard_default_days,
+        desktop_dashboard_default_days,
         updated_at,
         updated_by
       `,
@@ -136,6 +174,8 @@ router.put('/', async (req, res) => {
         coverageValidationEnabled,
         gapValidationEnabled,
         overlapValidationEnabled,
+        mobileDashboardDefaultDays,
+        desktopDashboardDefaultDays,
         updatedBy,
       ]
     );
