@@ -59,6 +59,7 @@
  const dropdownTemplatePeriodDepartmentsQuery = require('./query/dropdownTemplatePeriodDepartments');
 const dropdownUserManagerUsersQuery = require('./query/dropdownUserManagerUsers');
 const dropdownUserManagerManagersQuery = require('./query/dropdownUserManagerManagers');
+const dropdownOfferTargetUsersQuery = require('./query/dropdownOfferTargetUsers');
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
 	// =========================================================
@@ -68,6 +69,7 @@ const dropdownUserManagerManagersQuery = require('./query/dropdownUserManagerMan
 	const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
 	const mobileDashboardQuery = require('./query/mobileDashboard');
 const managerDashboardQuery = require('./query/managerDashboard');
+const mobileDayDetailsUiQuery = require('./query/mobileDayDetailsUi');
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
@@ -193,6 +195,10 @@ app.use(requireAuth);
 	app.use('/shift-templates', shiftTemplatesRouter);
 	app.use('/shift-template-entries', shiftTemplateEntriesRouter);
 	app.use('/shift-periods', shiftPeriodsRouter);
+	// IMPORTANT:
+	// Mount this specific static endpoint BEFORE the generic /shift-assignments router.
+	// Otherwise "/shift-assignments/mobile-day-details-ui" may be captured by CRUD "/:id".
+	app.use('/shift-assignments/mobile-day-details-ui', mobileDayDetailsUiQuery);
 	app.use('/shift-assignments', shiftAssignmentsRouter);
 	app.use('/shift-requests', shiftRequestsRouter);
 	app.use('/user-absences', userAbsencesRouter);
@@ -219,7 +225,7 @@ app.use(requireAuth);
  app.use('/dropdown/template-period-departments', dropdownTemplatePeriodDepartmentsQuery);
 app.use('/dropdown/user-manager-users', dropdownUserManagerUsersQuery);
 app.use('/dropdown/user-manager-managers', dropdownUserManagerManagersQuery);
-
+app.use('/dropdown/offer-target-users', dropdownOfferTargetUsersQuery);
 	// =========================================================
 	// SEARCH (read-only)
 	// =========================================================
@@ -229,7 +235,7 @@ app.use('/dropdown/user-manager-managers', dropdownUserManagerManagersQuery);
 	app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
 	app.use('/dashboard/mobile', mobileDashboardQuery);
 	app.use('/dashboard/manager', managerDashboardQuery);
-	app.use('/mobile-calendar/day-states', mobileCalendarDayStates);
+app.use('/mobile-calendar/day-states', mobileCalendarDayStates);
 	
 	app.use('/fcm', fcm);
 	app.use('/notifications', notifications);
