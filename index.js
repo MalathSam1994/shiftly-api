@@ -60,6 +60,8 @@
 const dropdownUserManagerUsersQuery = require('./query/dropdownUserManagerUsers');
 const dropdownUserManagerManagersQuery = require('./query/dropdownUserManagerManagers');
 const dropdownOfferTargetUsersQuery = require('./query/dropdownOfferTargetUsers');
+const dropdownUserAbsenceUsersQuery = require('./query/dropdownUserAbsenceUsers');
+const dropdownSearchColleagueUsersQuery = require('./query/dropdownSearchColleagueUsers');
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
 	// =========================================================
@@ -226,6 +228,8 @@ app.use(requireAuth);
 app.use('/dropdown/user-manager-users', dropdownUserManagerUsersQuery);
 app.use('/dropdown/user-manager-managers', dropdownUserManagerManagersQuery);
 app.use('/dropdown/offer-target-users', dropdownOfferTargetUsersQuery);
+app.use('/dropdown/user-absence-users', dropdownUserAbsenceUsersQuery);
+app.use('/dropdown/search-colleague-users', dropdownSearchColleagueUsersQuery);
 	// =========================================================
 	// SEARCH (read-only)
 	// =========================================================
