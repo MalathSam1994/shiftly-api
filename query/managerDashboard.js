@@ -113,24 +113,25 @@ router.get('/', async (req, res) => {
         $12::int AS team_cancelled_shifts,
         $13::int AS team_total_shifts,
         $14::numeric AS team_approved_hours,
-        to_char($15::date, 'YYYY-MM-DD') AS date_from,
-        to_char($16::date, 'YYYY-MM-DD') AS date_to_inclusive,
-        $17::int AS waiting_request_id,
-        $18::text AS waiting_request_type,
-        $19::text AS waiting_request_status,
+        $15::numeric AS team_approved_effective_hours,
+        to_char($16::date, 'YYYY-MM-DD') AS date_from,
+        to_char($17::date, 'YYYY-MM-DD') AS date_to_inclusive,
+        $18::int AS waiting_request_id,
+        $19::text AS waiting_request_type,
+        $20::text AS waiting_request_status,
         CASE
-          WHEN $20::date IS NULL THEN NULL
-          ELSE to_char($20::date, 'YYYY-MM-DD')
+          WHEN $21::date IS NULL THEN NULL
+          ELSE to_char($21::date, 'YYYY-MM-DD')
         END AS waiting_requested_shift_date,
-        $21::int AS waiting_requested_by_user_id,
-        $22::text AS waiting_requested_by_user_name,
-        $23::int AS waiting_target_user_id,
-        $24::text AS waiting_target_user_name,
-        $25::text AS waiting_department_desc,
-        $26::text AS waiting_division_desc,
-        $27::text AS waiting_shift_label,
-        $28::time AS waiting_shift_start_time,
-        $29::time AS waiting_shift_end_time
+        $22::int AS waiting_requested_by_user_id,
+        $23::text AS waiting_requested_by_user_name,
+        $24::int AS waiting_target_user_id,
+        $25::text AS waiting_target_user_name,
+        $26::text AS waiting_department_desc,
+        $27::text AS waiting_division_desc,
+        $28::text AS waiting_shift_label,
+        $29::time AS waiting_shift_start_time,
+        $30::time AS waiting_shift_end_time
       `,
       [
         baseRow.manager_user_id,
@@ -147,6 +148,7 @@ router.get('/', async (req, res) => {
         baseRow.team_cancelled_shifts,
         baseRow.team_total_shifts,
         baseRow.team_approved_hours,
+        baseRow.team_approved_effective_hours,
         baseRow.date_from,
         baseRow.date_to_inclusive,
         baseRow.waiting_request_id,

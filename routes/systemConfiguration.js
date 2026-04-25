@@ -22,8 +22,10 @@ router.get('/', async (req, res) => {
         coverage_validation_enabled,
         gap_validation_enabled,
         overlap_validation_enabled,
-         mobile_dashboard_default_days,
-       desktop_dashboard_default_days,
+        mobile_dashboard_default_days,
+        desktop_dashboard_default_days,
+        break_duration_minutes,
+        shift_handover_minutes,
         updated_at,
         updated_by
       FROM shiftly_schema.system_configuration
@@ -42,6 +44,8 @@ router.get('/', async (req, res) => {
           overlap_validation_enabled,
           mobile_dashboard_default_days,
           desktop_dashboard_default_days,
+          break_duration_minutes,
+          shift_handover_minutes,
           updated_at,
           updated_by
         )
@@ -51,8 +55,10 @@ router.get('/', async (req, res) => {
           true,
           true,
           true,
-           14,
           14,
+          14,
+          0,
+          0,
           now(),
           NULL
         )
@@ -63,6 +69,8 @@ router.get('/', async (req, res) => {
           overlap_validation_enabled,
            mobile_dashboard_default_days,
           desktop_dashboard_default_days,
+          break_duration_minutes,
+          shift_handover_minutes,
           updated_at,
           updated_by
         `
@@ -122,6 +130,29 @@ router.put('/', async (req, res) => {
       });
     }
 
+
+    const breakDurationMinutes = Number.parseInt(
+      String(req.body.break_duration_minutes ?? ''),
+      10
+    );
+    if (!Number.isFinite(breakDurationMinutes) || breakDurationMinutes < 0) {
+      return res.status(400).json({
+        error: 'Validation error',
+        details: 'Invalid value for "break_duration_minutes". Expected integer >= 0.',
+      });
+    }
+
+    const shiftHandoverMinutes = Number.parseInt(
+      String(req.body.shift_handover_minutes ?? ''),
+      10
+    );
+    if (!Number.isFinite(shiftHandoverMinutes) || shiftHandoverMinutes < 0) {
+      return res.status(400).json({
+        error: 'Validation error',
+        details: 'Invalid value for "shift_handover_minutes". Expected integer >= 0.',
+      });
+    }
+
     const updatedBy =
       req.user && req.user.id != null
         ? Number(req.user.id)
@@ -137,6 +168,8 @@ router.put('/', async (req, res) => {
         overlap_validation_enabled,
            mobile_dashboard_default_days,
         desktop_dashboard_default_days,
+        break_duration_minutes,
+        shift_handover_minutes,
         updated_at,
         updated_by
       )
@@ -148,8 +181,10 @@ router.put('/', async (req, res) => {
         $3,
         $4,
         $5,
+        $6,
+        $7,
         now(),
-        $6
+        $8
       )
       ON CONFLICT (id)
       DO UPDATE SET
@@ -157,7 +192,9 @@ router.put('/', async (req, res) => {
         gap_validation_enabled = EXCLUDED.gap_validation_enabled,
         overlap_validation_enabled = EXCLUDED.overlap_validation_enabled,
         mobile_dashboard_default_days = EXCLUDED.mobile_dashboard_default_days,
-       desktop_dashboard_default_days = EXCLUDED.desktop_dashboard_default_days,
+        desktop_dashboard_default_days = EXCLUDED.desktop_dashboard_default_days,
+        break_duration_minutes = EXCLUDED.break_duration_minutes,
+        shift_handover_minutes = EXCLUDED.shift_handover_minutes,
         updated_at = now(),
         updated_by = EXCLUDED.updated_by
       RETURNING
@@ -167,6 +204,8 @@ router.put('/', async (req, res) => {
         overlap_validation_enabled,
        mobile_dashboard_default_days,
         desktop_dashboard_default_days,
+        break_duration_minutes,
+        shift_handover_minutes,
         updated_at,
         updated_by
       `,
@@ -176,6 +215,8 @@ router.put('/', async (req, res) => {
         overlapValidationEnabled,
         mobileDashboardDefaultDays,
         desktopDashboardDefaultDays,
+        breakDurationMinutes,
+        shiftHandoverMinutes,
         updatedBy,
       ]
     );
