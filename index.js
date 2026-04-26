@@ -62,6 +62,7 @@ const dropdownUserManagerManagersQuery = require('./query/dropdownUserManagerMan
 const dropdownOfferTargetUsersQuery = require('./query/dropdownOfferTargetUsers');
 const dropdownUserAbsenceUsersQuery = require('./query/dropdownUserAbsenceUsers');
 const dropdownSearchColleagueUsersQuery = require('./query/dropdownSearchColleagueUsers');
+const dropdownShiftAssignmentHistoryUsersQuery = require('./query/dropdownShiftAssignmentHistoryUsers');
 	// =========================================================
 	// SEARCH (read-only) query endpoints (backed by DB views)
 	// =========================================================
@@ -72,6 +73,7 @@ const dropdownSearchColleagueUsersQuery = require('./query/dropdownSearchColleag
 	const mobileDashboardQuery = require('./query/mobileDashboard');
 const managerDashboardQuery = require('./query/managerDashboard');
 const mobileDayDetailsUiQuery = require('./query/mobileDayDetailsUi');
+const shiftAssignmentHistoryQuery = require('./query/shiftAssignmentHistory');
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
@@ -240,10 +242,13 @@ app.use('/dropdown/search-colleague-users', dropdownSearchColleagueUsersQuery);
 	app.use('/dashboard/mobile', mobileDashboardQuery);
 	app.use('/dashboard/manager', managerDashboardQuery);
 app.use('/mobile-calendar/day-states', mobileCalendarDayStates);
-	
+	app.use('/search/shift-assignment-history', shiftAssignmentHistoryQuery);
 	app.use('/fcm', fcm);
 	app.use('/notifications', notifications);
-
+app.use(
+  '/dropdown/shift-assignment-history-users',
+  dropdownShiftAssignmentHistoryUsersQuery
+);
 	app.listen(port, host, () => {
 	   console.log(`API listening on ${host}:${port}`);
 		// ✅ Start push dispatcher once API is up.
