@@ -41,6 +41,39 @@ const shiftPeriodsConfig = {
     'description',
   ],
 
+    // ✅ Always list periods newest first.
+  // ✅ Return DATE columns as pure YYYY-MM-DD strings to avoid JS/Flutter timezone shifts
+  //    like DB 2026-05-01 appearing in UI as 30/04/2026.
+  listHandler: async (req, res, { pool, config }) => {
+    try {
+      const result = await pool.query(`
+        SELECT
+          id,
+          period_type,
+          to_char(start_date, 'YYYY-MM-DD') AS start_date,
+          to_char(end_date, 'YYYY-MM-DD') AS end_date,
+          template_id,
+          generated_at,
+          generated_by_user_id,
+          status,
+          description
+        FROM ${config.table}
+        ORDER BY start_date DESC, id DESC
+      `);
+
+      return res.json(result.rows);
+    } catch (err) {
+      console.error('Error listing shift periods:', err);
+      return res.status(500).json({
+        error: 'Database error',
+        details: err.message,
+        code: err.code,
+        routine: err.routine,
+      });
+    }
+  },
+
+
 
     // Override CREATE so we can map constraint/unique errors into friendly JSON
   createHandler: async (req, res, { pool, config, allColumns }) => {
