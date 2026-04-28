@@ -74,6 +74,7 @@ const dropdownShiftAssignmentHistoryUsersQuery = require('./query/dropdownShiftA
 const managerDashboardQuery = require('./query/managerDashboard');
 const mobileDayDetailsUiQuery = require('./query/mobileDayDetailsUi');
 const shiftAssignmentHistoryQuery = require('./query/shiftAssignmentHistory');
+const desktopShiftMatrixSearchQuery = require('./query/desktopShiftMatrixSearch');
 
 	const app = express();
 	const port = process.env.API_PORT || 3000;
@@ -249,6 +250,7 @@ app.use(
   '/dropdown/shift-assignment-history-users',
   dropdownShiftAssignmentHistoryUsersQuery
 );
+app.use('/desktop-search/shift-matrix', desktopShiftMatrixSearchQuery);
 	app.listen(port, host, () => {
 	   console.log(`API listening on ${host}:${port}`);
 		// ✅ Start push dispatcher once API is up.
