@@ -293,11 +293,11 @@ function minuteOfDay(value) {
 function statusArgb(status, opacityHex = '2A') {
   const normalized = String(status || '').trim().toUpperCase();
 
-  if (normalized === 'APPROVED') return `${opacityHex}4CAF50`;
+ if (normalized === 'APPROVED') return 'FFE4EBD8';
   if (normalized === 'PENDING' || normalized.startsWith('PENDING_')) {
     return `${opacityHex}FF9800`;
   }
-  if (normalized === 'CANCELLED') return `${opacityHex}F44336`;
+   if (normalized === 'CANCELLED') return 'FFE9D4D3';
 
   return `${opacityHex}607D8B`;
 }
@@ -305,11 +305,11 @@ function statusArgb(status, opacityHex = '2A') {
 function statusBorderArgb(status) {
   const normalized = String(status || '').trim().toUpperCase();
 
-  if (normalized === 'APPROVED') return 'FF4CAF50';
+if (normalized === 'APPROVED') return 'FF8EA36E';
   if (normalized === 'PENDING' || normalized.startsWith('PENDING_')) {
     return 'FFFF9800';
   }
-  if (normalized === 'CANCELLED') return 'FFF44336';
+  if (normalized === 'CANCELLED') return 'FFB98583';
 
   return 'FF607D8B';
 }
@@ -747,7 +747,7 @@ router.get('/excel-matrix', async (req, res) => {
           const text = [
             displayShift(shift),
             displayTimeRange(shift),
-          ].filter(Boolean).join(' • ');
+          ].filter(Boolean).join(' - ');
 
           cell.value = existing ? `${existing}\n${text}` : text;
           cell.font = {
