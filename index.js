@@ -80,7 +80,7 @@ const desktopShiftMatrixSearchQuery = require('./query/desktopShiftMatrixSearch'
 	const port = process.env.API_PORT || 3000;
 	const host = process.env.API_HOST || '127.0.0.1';
 
-	+// Behind Nginx (reverse proxy)
+	// Behind Nginx (reverse proxy)
 app.set('trust proxy', 1);
 
 // CORS (supports production allow-list + always allow localhost dev ports)
