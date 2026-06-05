@@ -10,6 +10,17 @@ router.post('/register', async (req, res) => {
     const token = String(req.body.token || '').trim();
     const platform = String(req.body.platform || '').trim();
 
+
+    console.log('[FCM REGISTER] incoming', {
+      userId,
+      platform,
+      tokenLength: token.length,
+      tokenPrefix: token.substring(0, token.length > 18 ? 18 : token.length),
+      authUserId: req.user?.id ?? req.user?.sub ?? null,
+    });
+
+
+
     if (!userId) return res.status(400).json({ error: 'userId is required' });
     if (!token) return res.status(400).json({ error: 'token is required' });
 
@@ -24,8 +35,10 @@ router.post('/register', async (req, res) => {
     `;
 
     await pool.query(sql, [userId, token, platform]);
+    console.log('[FCM REGISTER] saved', { userId, platform });
     res.json({ ok: true });
   } catch (e) {
+    console.error('[FCM REGISTER] failed', e);
     res.status(500).json({ error: e.message });
   }
 });

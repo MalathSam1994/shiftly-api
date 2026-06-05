@@ -16,6 +16,7 @@ function _safeJsonParse(s) {
 }
 
 async function _dispatchByNotificationId(notificationId) {
+  onsole.log('[dispatcher] dispatch start', { notificationId });
   // Keep transaction open while sending to avoid duplicates across concurrent notifies.
   await _client.query('BEGIN');
   try {
@@ -39,18 +40,24 @@ async function _dispatchByNotificationId(notificationId) {
 
     const n = rows[0];
     if (!n) {
+      console.log('[dispatcher] notification not found', { notificationId });
       await _client.query('COMMIT');
       return;
     }
 
     // already sent
     if (n.push_sent_at) {
+      console.log('[dispatcher] already sent', { notificationId: n.id });
       await _client.query('COMMIT');
       return;
     }
 
     // stop retrying after a few attempts
     if ((n.push_attempts ?? 0) >= 5) {
+     console.log('[dispatcher] max attempts reached', {
+       notificationId: n.id,
+       pushAttempts: n.push_attempts,
+     });
       await _client.query('COMMIT');
       return;
     }
@@ -64,11 +71,22 @@ async function _dispatchByNotificationId(notificationId) {
     data.type = n.notification_type || 'UNKNOWN';
     data.notificationId = String(n.id);
     data.recipientUserId = String(n.recipient_user_id);
+   console.log('[dispatcher] payload built', {
+     notificationId: n.id,
+     recipientUserId: n.recipient_user_id,
+     title: n.title,
+     body: n.body,
+     data,
+   });
 
     let sent = 0;
     let errText = null;
 
     try {
+     console.log('[dispatcher] sending push', {
+       notificationId: n.id,
+       recipientUserId: n.recipient_user_id,
+     });
       const resp = await sendToUsers({
         userIds: [n.recipient_user_id],
         title: n.title || 'Shiftly',
@@ -76,12 +94,17 @@ async function _dispatchByNotificationId(notificationId) {
         data,
       });
       sent = resp?.sent ?? 0;
+     console.log('[dispatcher] send result', {
+       notificationId: n.id,
+       sent,
+     });
     } catch (err) {
       errText = err?.message || String(err);
       console.error('FCM dispatch error:', errText);
     }
 
     if (sent > 0) {
+       console.log('[dispatcher] marking sent', { notificationId: n.id });
       await _client.query(
         `
         UPDATE shiftly_schema.notifications
@@ -93,6 +116,10 @@ async function _dispatchByNotificationId(notificationId) {
         [n.id],
       );
     } else {
+     console.log('[dispatcher] marking failed', {
+       notificationId: n.id,
+       error: errText || 'NO_TOKENS_OR_NOT_DELIVERED',
+     });
       await _client.query(
         `
         UPDATE shiftly_schema.notifications
@@ -112,6 +139,7 @@ async function _dispatchByNotificationId(notificationId) {
 }
 
 async function _drainPending(limit = 100) {
+  console.log('[dispatcher] drain start', { limit });
   // Drain older pending rows (covers: API restart, token registered later, missed NOTIFY, etc.)
   const { rows } = await pool.query(
     `
@@ -124,6 +152,12 @@ async function _drainPending(limit = 100) {
     `,
     [limit],
   );
+
+  console.log('[dispatcher] drain found', {
+    count: rows.length,
+    ids: rows.map(r => Number(r.id)),
+  });
+
 
   for (const r of rows) {
     await _dispatchByNotificationId(Number(r.id));
@@ -149,6 +183,10 @@ async function startNotificationDispatcher() {
   }, 60 * 1000);
 
   _client.on('notification', (msg) => {
+    console.log('[dispatcher] postgres NOTIFY received', {
+      channel: msg?.channel,
+      payload: msg?.payload,
+    });
     if (!msg || msg.channel !== CHANNEL) return;
     const p = _safeJsonParse(msg.payload || '');
     const id = Number(p?.notificationId);

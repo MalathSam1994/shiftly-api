@@ -85,11 +85,19 @@ router.post('/mark-all-read', async (req, res) => {
 // Creates MANUAL notifications for a specific user or all users in a department.
 router.post('/push', async (req, res) => {
   try {
+
     const title = String(req.body.title || '').trim();
     const body = (req.body.body == null) ? null : String(req.body.body);
     const recipientUserId = req.body.recipientUserId == null ? null : Number(req.body.recipientUserId);
     const departmentId = req.body.departmentId == null ? null : Number(req.body.departmentId);
     const payload = req.body.payload == null ? null : req.body.payload;
+
+       console.log('[NOTIFICATIONS PUSH] incoming', {
+     title,
+     recipientUserId,
+     departmentId,
+     payload,
+   });
 
     if (!title) return res.status(400).json({ error: 'title is required' });
     if (!recipientUserId && !departmentId) {
@@ -118,6 +126,10 @@ router.post('/push', async (req, res) => {
     `;
 
     for (const uid of userIds) {
+      console.log('[NOTIFICATIONS PUSH] inserting row', {
+        recipientUserId: uid,
+        title,
+      });
       await pool.query(insertSql, [uid, title, body, payload]);
     }
 	
@@ -127,6 +139,7 @@ router.post('/push', async (req, res) => {
     res.json({ ok: true, inserted: userIds.length });
 
   } catch (e) {
+     console.error('[NOTIFICATIONS PUSH] failed', e);
     res.status(500).json({ error: e.message });
   }
 });

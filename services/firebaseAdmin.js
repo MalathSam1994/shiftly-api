@@ -28,7 +28,13 @@ async function getTokensForUsers(userIds) {
     `SELECT token FROM shiftly_schema.user_fcm_tokens WHERE user_id = ANY($1::int[])`,
     [userIds]
   );
-  return rows.map(r => r.token).filter(Boolean);
+  const tokens = rows.map(r => r.token).filter(Boolean);
+  console.log('[firebaseAdmin] tokens fetched', {
+    userIds,
+    tokenCount: tokens.length,
+    tokenPrefixes: tokens.map(t => t.substring(0, t.length > 18 ? 18 : t.length)),
+  });
+  return tokens;
 }
 
 async function removeBadTokens(tokens) {
@@ -43,7 +49,10 @@ async function sendToUsers({ userIds, title, body, data }) {
   initFirebase();
 
   const tokens = await getTokensForUsers(userIds);
-  if (tokens.length === 0) return { ok: true, sent: 0 };
+ if (tokens.length === 0) {
+   console.log('[firebaseAdmin] no tokens for users', { userIds });
+   return { ok: true, sent: 0 };
+ }
 
   // FCM data values must be strings.
   const dataStrings = {};
@@ -60,6 +69,12 @@ async function sendToUsers({ userIds, title, body, data }) {
 
   for (let i = 0; i < tokens.length; i += 500) {
     const chunk = tokens.slice(i, i + 500);
+    console.log('[firebaseAdmin] sendEachForMulticast start', {
+      chunkSize: chunk.length,
+      title,
+      body,
+      data: dataStrings,
+    });    
     const resp = await admin.messaging().sendEachForMulticast({
       tokens: chunk,
       notification: {
@@ -73,10 +88,18 @@ async function sendToUsers({ userIds, title, body, data }) {
     });
 
     sent += resp.successCount;
+   console.log('[firebaseAdmin] multicast result', {
+     successCount: resp.successCount,
+     failureCount: resp.failureCount,
+   });
 
     resp.responses.forEach((r, idx) => {
       if (!r.success) {
         const code = r.error?.code || '';
+       console.log('[firebaseAdmin] token failure', {
+         code,
+         tokenPrefix: chunk[idx].substring(0, chunk[idx].length > 18 ? 18 : chunk[idx].length),
+       });
         if (
           code.includes('registration-token-not-registered') ||
           code.includes('invalid-registration-token')
@@ -88,6 +111,7 @@ async function sendToUsers({ userIds, title, body, data }) {
   }
 
   await removeBadTokens(badTokens);
+console.log('[firebaseAdmin] sendToUsers end', { sent, removedBadTokens: badTokens.length });
   return { ok: true, sent };
 }
 
