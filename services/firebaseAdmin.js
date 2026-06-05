@@ -85,6 +85,18 @@ async function sendToUsers({ userIds, title, body, data }) {
       android: {
         priority: 'high',
       },
+ apns: {
+   headers: {
+     'apns-priority': '10',
+     'apns-push-type': 'alert',
+   },
+   payload: {
+     aps: {
+       sound: 'default',
+       badge: 1,
+     },
+   },
+ },
     });
 
     sent += resp.successCount;
@@ -94,6 +106,12 @@ async function sendToUsers({ userIds, title, body, data }) {
    });
 
     resp.responses.forEach((r, idx) => {
+ console.log('[firebaseAdmin] token result', {
+   success: r.success,
+   code: r.error?.code || null,
+   message: r.error?.message || null,
+   tokenPrefix: chunk[idx].substring(0, chunk[idx].length > 18 ? 18 : chunk[idx].length),
+ });      
       if (!r.success) {
         const code = r.error?.code || '';
        console.log('[firebaseAdmin] token failure', {
