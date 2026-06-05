@@ -16,7 +16,7 @@ function _safeJsonParse(s) {
 }
 
 async function _dispatchByNotificationId(notificationId) {
-  onsole.log('[dispatcher] dispatch start', { notificationId });
+  console.log('[dispatcher] dispatch start', { notificationId });
   // Keep transaction open while sending to avoid duplicates across concurrent notifies.
   await _client.query('BEGIN');
   try {
