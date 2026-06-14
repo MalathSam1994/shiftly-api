@@ -5,6 +5,15 @@ const pool = require('../db');
 const { generateComplexPassword } = require('../services/passwordUtil');
 const { sendUserWelcomeEmail } = require('../services/mailer');
 
+
+const {
+  enforceModuleLimit,
+  isLicenseLimitError,
+  buildLicenseLimitResponse,
+} = require('../services/moduleLicense');
+
+
+
 const router = express.Router();
 
 
@@ -169,7 +178,13 @@ if (!user_name  || !email) {
       hashedPassword,
     ];
 
-   await client.query('BEGIN');
+    await client.query('BEGIN');
+    await client.query(`SET LOCAL statement_timeout = '20000ms'`);
+
+    // Backend-only module license validation.
+    // Example: SHIFTLY_LICENSE_MAX_USERS=500
+    // If 500 users already exist, creating user 501 is blocked here.
+    await enforceModuleLimit(client, 'users');
     const result = await client.query(query, values);
 
     // ✅ Send email via Brevo SMTP with username + generated password
@@ -183,8 +198,25 @@ if (!user_name  || !email) {
     res.status(201).json(result.rows[0]);
   } catch (err) {
      try { await client.query('ROLLBACK'); } catch (_) {}
+
+
+    if (isLicenseLimitError(err)) {
+      console.warn('User license limit reached:', {
+        currentCount: err.currentCount,
+        maxAllowed: err.maxAllowed,
+      });
+
+      const built = buildLicenseLimitResponse(err);
+      return res.status(built.http).json(built.body);
+    }
+
+
     console.error('Error inserting into DB (USERS CREATE):', err);
-    res.status(500).json({ error: 'Database error' });
+    res.status(500).json({
+      error: 'Database error',
+      details: err.message,
+      code: err.code,
+    });
       } finally {
     client.release();
   }

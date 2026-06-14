@@ -1,5 +1,12 @@
 const createCrudRouter = require('../createCrudRouter');
 
+
+const {
+  enforceModuleLimit,
+  isLicenseLimitError,
+  buildLicenseLimitResponse,
+} = require('../services/moduleLicense');
+ 
 function tryParseJson(text) {
   if (text == null) return null;
   const s = String(text).trim();
@@ -72,6 +79,69 @@ const divisionsConfig = {
   table: 'shiftly_schema.divisions',
   idColumn: 'id',
   columns: ['division_desc'],
+
+  createHandler: async (req, res, { pool, config, allColumns }) => {
+    const divisionDesc =
+      typeof req.body?.division_desc === 'string'
+        ? req.body.division_desc.trim()
+        : req.body?.division_desc;
+
+    if (typeof divisionDesc !== 'string' || !divisionDesc) {
+      return res.status(400).json({
+        error: 'division_desc is required.',
+      });
+    }
+
+    const client = await pool.connect();
+
+    try {
+      await client.query('BEGIN');
+      await client.query(`SET LOCAL statement_timeout = '20000ms'`);
+
+      // Backend-only module license validation.
+      // Example:
+      // SHIFTLY_LICENSE_MAX_DIVISIONS=3
+      // If 3 divisions already exist, creating the 4th one is blocked here.
+      await enforceModuleLimit(client, 'divisions');
+
+      const result = await client.query(
+        `
+        INSERT INTO ${config.table} (division_desc)
+        VALUES ($1)
+        RETURNING ${allColumns.join(', ')}
+        `,
+        [divisionDesc],
+      );
+
+      await client.query('COMMIT');
+      return res.status(201).json(result.rows[0]);
+    } catch (err) {
+      try {
+        await client.query('ROLLBACK');
+      } catch (_) {}
+
+      if (isLicenseLimitError(err)) {
+        console.warn('Division license limit reached:', {
+          currentCount: err.currentCount,
+          maxAllowed: err.maxAllowed,
+        });
+
+        const built = buildLicenseLimitResponse(err);
+        return res.status(built.http).json(built.body);
+      }
+
+      console.error('Error inserting division:', err);
+      return res.status(500).json({
+        error: 'Database error',
+        details: err.message,
+        code: err.code,
+        routine: err.routine,
+      });
+    } finally {
+      client.release();
+    }
+  },
+
   deleteHandler: async (req, res, { pool, config, allColumns }) => {
     try {
       const id = parseInt(req.params.id, 10);
