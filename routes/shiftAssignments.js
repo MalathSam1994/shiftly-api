@@ -3,6 +3,44 @@ const express = require('express');
 const createCrudRouter = require('../createCrudRouter');
 const pool = require('../db');
 
+function parseNullableInt(value) {
+  if (value == null || `${value}`.trim() === '') return null;
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+async function validateAssignmentPeriodScope({
+  shiftPeriodId,
+  divisionId,
+  departmentId,
+}) {
+  const periodId = parseNullableInt(shiftPeriodId);
+  const divId = parseNullableInt(divisionId);
+  const deptId = parseNullableInt(departmentId);
+
+  if (periodId == null || divId == null || deptId == null) {
+    return 'shift_period_id, division_id, and department_id are required.';
+  }
+
+  const result = await pool.query(
+    `
+    SELECT id
+    FROM shiftly_schema.shift_periods
+    WHERE id = $1
+      AND division_id = $2
+      AND department_id = $3
+    LIMIT 1
+    `,
+    [periodId, divId, deptId],
+  );
+
+  if (!result.rows.length) {
+    return 'The selected Shift Period does not belong to this division and department.';
+  }
+
+  return null;
+}
+
 const shiftAssignmentsConfig = {
   table: 'shiftly_schema.shift_assignments',
   idColumn: 'id',
@@ -24,6 +62,111 @@ const shiftAssignmentsConfig = {
 	'staff_shift_rule_id',
     'required_staff_snapshot',
   ],
+
+  createHandler: async (req, res) => {
+    try {
+      const b = req.body || {};
+      const shiftPeriodId = Number(b.shift_period_id ?? b.shiftPeriodId ?? b.shift_periodId);
+      const divisionId = b.division_id ?? b.divisionId ?? null;
+      const departmentId = Number(b.department_id ?? b.departmentId);
+      const userId = Number(b.user_id ?? b.userId);
+      const shiftTypeId = Number(b.shift_type_id ?? b.shiftTypeId);
+      const shiftDate = (b.shift_date ?? b.shiftDate ?? '').toString().trim();
+      const status = (b.status ?? '').toString().trim();
+      const statusComment = (b.status_comment ?? b.statusComment ?? null);
+      const sourceType = (b.source_type ?? b.sourceType ?? 'MANUAL').toString().trim();
+      const isAbsenceRaw = (b.is_absence ?? b.isAbsence ?? null);
+      const isAbsence = isAbsenceRaw != null ? Number(isAbsenceRaw) : 2;
+      const absenceType = (b.absence_type ?? b.absenceType ?? null);
+
+      if (!Number.isFinite(shiftPeriodId) || !Number.isFinite(departmentId) || !Number.isFinite(userId) || !Number.isFinite(shiftTypeId)) {
+        return res.status(400).json({ error: 'Invalid numeric fields.' });
+      }
+      if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
+        return res.status(400).json({ error: 'Invalid shiftDate (expected YYYY-MM-DD).' });
+      }
+      if (!status) {
+        return res.status(400).json({ error: 'status is required.' });
+      }
+
+      const scopeError = await validateAssignmentPeriodScope({
+        shiftPeriodId,
+        divisionId,
+        departmentId,
+      });
+      if (scopeError) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: scopeError,
+          code: 'P0001',
+        });
+      }
+
+      const result = await pool.query(
+        `
+        SELECT
+          r.id,
+          r.shift_period_id,
+          to_char(r.shift_date, 'YYYY-MM-DD') AS shift_date,
+          r.division_id,
+          r.department_id,
+          r.user_id,
+          r.staff_type_id,
+          r.shift_type_id,
+          r.source_type,
+          r.status,
+          r.status_comment,
+          r.is_absence,
+          r.absence_type,
+          r.created_at,
+          r.updated_at,
+          r.staff_shift_rule_id,
+          r.required_staff_snapshot
+        FROM shiftly_api.create_shift_assignment(
+          $1,
+          $2::int,
+          $3,
+          $4,
+          $5,
+          $6::date,
+          $7,
+          $8,
+          $9,
+          $10::int,
+          $11
+        ) AS r
+        `,
+        [
+          shiftPeriodId,
+          divisionId,
+          departmentId,
+          userId,
+          shiftTypeId,
+          shiftDate,
+          status,
+          statusComment,
+          sourceType,
+          Number.isFinite(isAbsence) ? isAbsence : 2,
+          absenceType,
+        ],
+      );
+
+      if (!result.rows || result.rows.length === 0) {
+        return res.status(500).json({ error: 'No row returned from create_shift_assignment.' });
+      }
+
+      return res.status(201).json(result.rows[0]);
+    } catch (err) {
+      console.error('Error creating assignment (DB function):', err);
+      const isBusiness = err && err.code === 'P0001';
+      return res.status(isBusiness ? 400 : 500).json({
+        error: isBusiness ? 'Business rule violation' : 'Database error',
+        details: err.message,
+        code: err.code,
+        routine: err.routine,
+      });
+    }
+  },
   
   
   
@@ -132,6 +275,19 @@ const shiftAssignmentsConfig = {
       }
       if (!status) {
         return res.status(400).json({ error: 'status is required.' });
+      }
+
+      const scopeError = await validateAssignmentPeriodScope({
+        shiftPeriodId,
+        divisionId,
+        departmentId,
+      });
+      if (scopeError) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: scopeError,
+          code: 'P0001',
+        });
       }
 
       const result = await pool.query(
@@ -375,6 +531,19 @@ router.post('/create-smart', async (req, res) => {
     }
     if (!status) {
       return res.status(400).json({ error: 'status is required.' });
+    }
+
+    const scopeError = await validateAssignmentPeriodScope({
+      shiftPeriodId,
+      divisionId,
+      departmentId,
+    });
+    if (scopeError) {
+      return res.status(400).json({
+        error: 'Business rule violation',
+        details: scopeError,
+        code: 'P0001',
+      });
     }
 
     const result = await pool.query(

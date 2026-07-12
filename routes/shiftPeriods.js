@@ -26,6 +26,120 @@ function utcTodayMidnight() {
   return new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
 }
 
+function parseRequiredInt(value) {
+  const parsed = Number(value);
+  return Number.isInteger(parsed) ? parsed : null;
+}
+
+function buildPeriodSelect(tableName = 'shiftly_schema.shift_periods') {
+  return `
+    SELECT
+      sp.id,
+      sp.period_type,
+      to_char(sp.start_date, 'YYYY-MM-DD') AS start_date,
+      to_char(sp.end_date, 'YYYY-MM-DD') AS end_date,
+      sp.division_id,
+      sp.department_id,
+      COALESCE(dd.division_desc, dv.division_desc) AS division_desc,
+      COALESCE(dd.department_desc, dep.department_desc) AS department_desc,
+      sp.template_id,
+      sp.generated_at,
+      sp.generated_by_user_id,
+      sp.status,
+      sp.description
+    FROM ${tableName} sp
+    LEFT JOIN shiftly_schema.division_departments dd
+      ON dd.division_id = sp.division_id
+     AND dd.department_id = sp.department_id
+    LEFT JOIN shiftly_schema.divisions dv ON dv.id = sp.division_id
+    LEFT JOIN shiftly_schema.departments dep ON dep.id = sp.department_id
+  `;
+}
+
+async function validatePeriodOrgAndRange(pool, payload, options = {}) {
+  const periodId = options.periodId ?? null;
+  const current = options.current ?? {};
+  const merged = { ...current, ...payload };
+
+  const divisionId = parseRequiredInt(merged.division_id);
+  const departmentId = parseRequiredInt(merged.department_id);
+  const periodType = String(merged.period_type || '').trim().toUpperCase();
+  const startDate = merged.start_date;
+  const endDate = merged.end_date;
+
+  if (divisionId == null || departmentId == null) {
+    return 'Division and Department are required for Shift Periods.';
+  }
+
+  if (!periodType) {
+    return 'period_type is required.';
+  }
+
+  const start = toUtcMidnightDate(startDate);
+  const end = toUtcMidnightDate(endDate);
+
+  if (start == null || end == null) {
+    return 'Invalid start_date or end_date. Expected ISO dates like YYYY-MM-DD.';
+  }
+
+  if (end < start) {
+    return 'End date must be on/after start date.';
+  }
+
+  const mapping = await pool.query(
+    `
+    SELECT 1
+    FROM shiftly_schema.division_departments
+    WHERE division_id = $1
+      AND department_id = $2
+    LIMIT 1
+    `,
+    [divisionId, departmentId],
+  );
+
+  if (!mapping.rows.length) {
+    return 'Selected Department does not belong to the selected Division.';
+  }
+
+  const duplicate = await pool.query(
+    `
+    SELECT id
+    FROM shiftly_schema.shift_periods
+    WHERE period_type = 'MONTHLY'
+      AND $1 = 'MONTHLY'
+      AND start_month = make_date(EXTRACT(year FROM $2::date)::int, EXTRACT(month FROM $2::date)::int, 1)
+      AND division_id = $3
+      AND department_id = $4
+      AND ($5::int IS NULL OR id <> $5::int)
+    LIMIT 1
+    `,
+    [periodType, startDate, divisionId, departmentId, periodId],
+  );
+
+  if (duplicate.rows.length) {
+    return 'A Shift Period already exists for this month, division, and department.';
+  }
+
+  const overlap = await pool.query(
+    `
+    SELECT id
+    FROM shiftly_schema.shift_periods
+    WHERE division_id = $1
+      AND department_id = $2
+      AND daterange(start_date, end_date, '[]') && daterange($3::date, $4::date, '[]')
+      AND ($5::int IS NULL OR id <> $5::int)
+    LIMIT 1
+    `,
+    [divisionId, departmentId, startDate, endDate, periodId],
+  );
+
+  if (overlap.rows.length) {
+    return 'A Shift Period already overlaps this date range for the selected division and department.';
+  }
+
+  return null;
+}
+
 
 const shiftPeriodsConfig = {
   table: 'shiftly_schema.shift_periods',
@@ -34,6 +148,8 @@ const shiftPeriodsConfig = {
     'period_type',
     'start_date',
     'end_date',
+    'division_id',
+    'department_id',
     'template_id',
     'generated_at',
     'generated_by_user_id',
@@ -47,18 +163,8 @@ const shiftPeriodsConfig = {
   listHandler: async (req, res, { pool, config }) => {
     try {
       const result = await pool.query(`
-        SELECT
-          id,
-          period_type,
-          to_char(start_date, 'YYYY-MM-DD') AS start_date,
-          to_char(end_date, 'YYYY-MM-DD') AS end_date,
-          template_id,
-          generated_at,
-          generated_by_user_id,
-          status,
-          description
-        FROM ${config.table}
-        ORDER BY start_date DESC, id DESC
+        ${buildPeriodSelect(config.table)}
+        ORDER BY sp.start_date DESC, sp.division_id ASC, sp.department_id ASC, sp.id DESC
       `);
 
       return res.json(result.rows);
@@ -125,6 +231,14 @@ const shiftPeriodsConfig = {
         });
       }
 
+      const validationError = await validatePeriodOrgAndRange(pool, body);
+      if (validationError) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: validationError,
+          code: 'P0001',
+        });
+      }
 
       // Only allow configured columns that were provided
       const cols = config.columns.filter((c) => body[c] !== undefined);
@@ -142,20 +256,109 @@ const shiftPeriodsConfig = {
       const sql = `
         INSERT INTO ${config.table} (${cols.join(', ')})
         VALUES (${placeholders})
-        RETURNING
+        RETURNING id
+      `;
+
+      const result = await pool.query(sql, values);
+      const selected = await pool.query(
+        `
+        ${buildPeriodSelect(config.table)}
+        WHERE sp.id = $1
+        `,
+        [result.rows[0].id],
+      );
+      return res.status(201).json(selected.rows[0]);
+    } catch (err) {
+      const mapped = mapShiftPeriodsDbError(err, req.body);
+      if (mapped) {
+        return res.status(mapped.http).json(mapped.body);
+      }
+      const isBusiness = err && err.code === 'P0001';
+      return res.status(isBusiness ? 400 : 500).json({
+        error: isBusiness ? 'Business rule violation' : 'Database error',
+        details: err.message,
+        code: err.code,
+        constraint: err.constraint,
+        routine: err.routine,
+      });
+    }
+  },
+
+  updateHandler: async (req, res, { pool, config }) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid id.' });
+      }
+
+      const currentResult = await pool.query(
+        `
+        SELECT
           id,
           period_type,
           to_char(start_date, 'YYYY-MM-DD') AS start_date,
           to_char(end_date, 'YYYY-MM-DD') AS end_date,
+          division_id,
+          department_id,
           template_id,
           generated_at,
           generated_by_user_id,
           status,
           description
-      `;
+        FROM ${config.table}
+        WHERE id = $1
+        `,
+        [id],
+      );
 
-      const result = await pool.query(sql, values);
-      return res.status(201).json(result.rows[0]);
+      if (!currentResult.rows.length) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      const body = req.body || {};
+      const validationError = await validatePeriodOrgAndRange(pool, body, {
+        periodId: id,
+        current: currentResult.rows[0],
+      });
+      if (validationError) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details: validationError,
+          code: 'P0001',
+        });
+      }
+
+      const cols = config.columns.filter((c) => body[c] !== undefined);
+      if (!cols.length) {
+        return res.status(400).json({
+          error: 'Invalid payload',
+          details: 'No valid columns were provided.',
+          code: 'P0001',
+        });
+      }
+
+      const sets = cols.map((c, i) => `${c} = $${i + 1}`);
+      const values = cols.map((c) => body[c]);
+      values.push(id);
+
+      await pool.query(
+        `
+        UPDATE ${config.table}
+        SET ${sets.join(', ')}
+        WHERE id = $${values.length}
+        `,
+        values,
+      );
+
+      const result = await pool.query(
+        `
+        ${buildPeriodSelect(config.table)}
+        WHERE sp.id = $1
+        `,
+        [id],
+      );
+
+      return res.json(result.rows[0]);
     } catch (err) {
       const mapped = mapShiftPeriodsDbError(err, req.body);
       if (mapped) {
@@ -206,6 +409,8 @@ const shiftPeriodsConfig = {
           period_type,
           to_char(start_date, 'YYYY-MM-DD') AS start_date,
           to_char(end_date, 'YYYY-MM-DD') AS end_date,
+          division_id,
+          department_id,
           template_id,
           generated_at,
           generated_by_user_id,
@@ -238,14 +443,16 @@ const router = createCrudRouter(shiftPeriodsConfig);
 // Optional: a small helper to convert common DB constraint errors into clearer messages.
 function mapShiftPeriodsDbError(err, payload) {
   // Postgres UNIQUE VIOLATION
-  if (err && err.code === '23505') {
+  if (err && (err.code === '23505' || err.code === '23P01')) {
      const periodType = (payload && payload.period_type
       ? String(payload.period_type)
       : '').toUpperCase();
 
     const friendly =
-      periodType === 'MONTHLY'
-        ? 'A MONTHLY period already exists for this month. Only one monthly period per month is allowed.'
+      err.code === '23P01'
+        ? 'A Shift Period already overlaps this date range for the selected division and department.'
+        : periodType === 'MONTHLY'
+        ? 'A Shift Period already exists for this month, division, and department.'
         : 'A shift period with the same key already exists.';
 
     return {
