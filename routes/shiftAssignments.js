@@ -3,6 +3,9 @@ const express = require('express');
 const createCrudRouter = require('../createCrudRouter');
 const pool = require('../db');
 
+const EDIT_APPROVED_ASSIGNMENTS_PERMISSION =
+  'action:shift_periods:edit_approved_assignments';
+
 function parseNullableInt(value) {
   if (value == null || `${value}`.trim() === '') return null;
   const parsed = Number(value);
@@ -41,6 +44,68 @@ async function validateAssignmentPeriodScope({
   return null;
 }
 
+function parseNullableTime(value) {
+  if (value == null || `${value}`.trim() === '') return null;
+  const s = `${value}`.trim();
+  const match = /^(\d{1,2}):(\d{2})(?::(\d{2}))?$/.exec(s);
+  if (!match) return undefined;
+  const h = Number(match[1]);
+  const m = Number(match[2]);
+  const sec = match[3] == null ? 0 : Number(match[3]);
+  if (h < 0 || h > 23 || m < 0 || m > 59 || sec < 0 || sec > 59) {
+    return undefined;
+  }
+  return `${String(h).padStart(2, '0')}:${String(m).padStart(2, '0')}:${String(sec).padStart(2, '0')}`;
+}
+
+async function ensureApprovedPeriodAssignmentEditAllowed({
+  req,
+  shiftPeriodId,
+  assignmentId,
+}) {
+  let result;
+  if (assignmentId != null) {
+    result = await pool.query(
+      `
+      SELECT sp.status
+      FROM shiftly_schema.shift_assignments sa
+      JOIN shiftly_schema.shift_periods sp ON sp.id = sa.shift_period_id
+      WHERE sa.id = $1
+      LIMIT 1
+      `,
+      [assignmentId],
+    );
+  } else {
+    result = await pool.query(
+      `
+      SELECT status
+      FROM shiftly_schema.shift_periods
+      WHERE id = $1
+      LIMIT 1
+      `,
+      [shiftPeriodId],
+    );
+  }
+
+  if (!result.rows.length) return 'Shift Period or assignment not found.';
+  const status = (result.rows[0].status || '').toString().trim().toUpperCase();
+  if (status !== 'APPROVED') return null;
+
+  const userId = Number(req.user?.sub ?? req.user?.id);
+  if (!userId) return 'Unauthorized.';
+
+  const permissionResult = await pool.query(
+    `SELECT shiftly_api.fn_user_has_permission($1, $2) AS ok`,
+    [userId, EDIT_APPROVED_ASSIGNMENTS_PERMISSION],
+  );
+
+  if (!permissionResult.rows?.[0]?.ok) {
+    return 'Cannot edit assignments for an APPROVED period.';
+  }
+
+  return null;
+}
+
 const shiftAssignmentsConfig = {
   table: 'shiftly_schema.shift_assignments',
   idColumn: 'id',
@@ -61,6 +126,8 @@ const shiftAssignmentsConfig = {
     'updated_at',
 	'staff_shift_rule_id',
     'required_staff_snapshot',
+    'start_time',
+    'end_time',
   ],
 
   createHandler: async (req, res) => {
@@ -78,6 +145,8 @@ const shiftAssignmentsConfig = {
       const isAbsenceRaw = (b.is_absence ?? b.isAbsence ?? null);
       const isAbsence = isAbsenceRaw != null ? Number(isAbsenceRaw) : 2;
       const absenceType = (b.absence_type ?? b.absenceType ?? null);
+      const startTime = parseNullableTime(b.start_time ?? b.startTime ?? null);
+      const endTime = parseNullableTime(b.end_time ?? b.endTime ?? null);
 
       if (!Number.isFinite(shiftPeriodId) || !Number.isFinite(departmentId) || !Number.isFinite(userId) || !Number.isFinite(shiftTypeId)) {
         return res.status(400).json({ error: 'Invalid numeric fields.' });
@@ -87,6 +156,9 @@ const shiftAssignmentsConfig = {
       }
       if (!status) {
         return res.status(400).json({ error: 'status is required.' });
+      }
+      if (startTime === undefined || endTime === undefined) {
+        return res.status(400).json({ error: 'Invalid time format (expected HH:MM or HH:MM:SS).' });
       }
 
       const scopeError = await validateAssignmentPeriodScope({
@@ -99,6 +171,18 @@ const shiftAssignmentsConfig = {
           error: 'Business rule violation',
           details: scopeError,
           code: 'P0001',
+        });
+      }
+
+      const approvedEditError = await ensureApprovedPeriodAssignmentEditAllowed({
+        req,
+        shiftPeriodId,
+      });
+      if (approvedEditError) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          details: approvedEditError,
+          permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION,
         });
       }
 
@@ -121,7 +205,9 @@ const shiftAssignmentsConfig = {
           r.created_at,
           r.updated_at,
           r.staff_shift_rule_id,
-          r.required_staff_snapshot
+          r.required_staff_snapshot,
+          to_char(r.start_time, 'HH24:MI:SS') AS start_time,
+          to_char(r.end_time, 'HH24:MI:SS') AS end_time
         FROM shiftly_api.create_shift_assignment(
           $1,
           $2::int,
@@ -133,7 +219,9 @@ const shiftAssignmentsConfig = {
           $8,
           $9,
           $10::int,
-          $11
+          $11,
+          $12::time,
+          $13::time
         ) AS r
         `,
         [
@@ -148,6 +236,8 @@ const shiftAssignmentsConfig = {
           sourceType,
           Number.isFinite(isAbsence) ? isAbsence : 2,
           absenceType,
+          startTime,
+          endTime,
         ],
       );
 
@@ -218,8 +308,25 @@ const shiftAssignmentsConfig = {
         created_at,
         updated_at,
         staff_shift_rule_id,
-        required_staff_snapshot
-      FROM ${config.table}
+        required_staff_snapshot,
+        to_char(start_time, 'HH24:MI:SS') AS start_time,
+        to_char(end_time, 'HH24:MI:SS') AS end_time,
+        counts.assigned_count,
+        GREATEST(COALESCE(required_staff_snapshot, 0) - counts.assigned_count, 0)::int AS available_count,
+        (counts.assigned_count > COALESCE(required_staff_snapshot, 0)) AS is_overridden
+      FROM ${config.table} sa
+      LEFT JOIN LATERAL (
+        SELECT COUNT(*)::int AS assigned_count
+        FROM shiftly_schema.shift_assignments x
+        WHERE x.shift_period_id = sa.shift_period_id
+          AND x.shift_date = sa.shift_date
+          AND COALESCE(x.division_id, 0) = COALESCE(sa.division_id, 0)
+          AND x.department_id = sa.department_id
+          AND COALESCE(x.staff_type_id, 0) = COALESCE(sa.staff_type_id, 0)
+          AND x.shift_type_id = sa.shift_type_id
+          AND COALESCE(x.is_absence, 2) <> 1
+          AND x.status <> 'CANCELLED'
+      ) counts ON TRUE
     `;
     if (where.length) {
       sql += ` WHERE ${where.join(' AND ')}`;
@@ -261,6 +368,8 @@ const shiftAssignmentsConfig = {
       const isAbsenceRaw = (b.is_absence ?? b.isAbsence ?? null);
       const isAbsence = isAbsenceRaw != null ? Number(isAbsenceRaw) : 2; // 1=yes, 2=no
       const absenceType = (b.absence_type ?? b.absenceType ?? null);
+      const startTime = parseNullableTime(b.start_time ?? b.startTime ?? null);
+      const endTime = parseNullableTime(b.end_time ?? b.endTime ?? null);
 
       if (
         !Number.isFinite(shiftPeriodId) ||
@@ -276,6 +385,9 @@ const shiftAssignmentsConfig = {
       if (!status) {
         return res.status(400).json({ error: 'status is required.' });
       }
+      if (startTime === undefined || endTime === undefined) {
+        return res.status(400).json({ error: 'Invalid time format (expected HH:MM or HH:MM:SS).' });
+      }
 
       const scopeError = await validateAssignmentPeriodScope({
         shiftPeriodId,
@@ -287,6 +399,23 @@ const shiftAssignmentsConfig = {
           error: 'Business rule violation',
           details: scopeError,
           code: 'P0001',
+        });
+      }
+
+      const currentPeriodEditError = await ensureApprovedPeriodAssignmentEditAllowed({
+        req,
+        assignmentId: id,
+      });
+      const targetPeriodEditError = await ensureApprovedPeriodAssignmentEditAllowed({
+        req,
+        shiftPeriodId,
+      });
+      const approvedEditError = currentPeriodEditError || targetPeriodEditError;
+      if (approvedEditError) {
+        return res.status(403).json({
+          error: 'Forbidden',
+          details: approvedEditError,
+          permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION,
         });
       }
 
@@ -309,7 +438,9 @@ const shiftAssignmentsConfig = {
           r.created_at,
           r.updated_at,
           r.staff_shift_rule_id,
-          r.required_staff_snapshot
+          r.required_staff_snapshot,
+          to_char(r.start_time, 'HH24:MI:SS') AS start_time,
+          to_char(r.end_time, 'HH24:MI:SS') AS end_time
         FROM shiftly_api.update_shift_assignment(
           $1,
           $2,
@@ -321,7 +452,9 @@ const shiftAssignmentsConfig = {
           $8,
           $9,
           $10::int,
-          $11
+          $11,
+          $12::time,
+          $13::time
         ) AS r
         `,
         [
@@ -336,6 +469,8 @@ const shiftAssignmentsConfig = {
           statusComment,
           Number.isFinite(isAbsence) ? isAbsence : 2,
           absenceType,
+          startTime,
+          endTime,
         ],
       );
 
@@ -443,12 +578,15 @@ router.delete('/:id/hard', async (req, res) => {
     if (!meta.rows || meta.rows.length === 0) {
       return res.status(404).json({ error: 'Not found' });
     }
-    const periodStatus = (meta.rows[0].period_status || '').toString().trim();
-    if (periodStatus === 'APPROVED') {
-      return res.status(400).json({
-        error: 'Business rule violation',
-        details: 'Cannot delete assignments for an APPROVED period.',
-        code: 'P0001',
+    const approvedEditError = await ensureApprovedPeriodAssignmentEditAllowed({
+      req,
+      assignmentId: id,
+    });
+    if (approvedEditError) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        details: approvedEditError,
+        permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION,
       });
     }
 
@@ -473,7 +611,9 @@ router.delete('/:id/hard', async (req, res) => {
         staff_shift_rule_id,
         required_staff_snapshot,
         is_absence,
-        absence_type
+        absence_type,
+        to_char(start_time, 'HH24:MI:SS') AS start_time,
+        to_char(end_time, 'HH24:MI:SS') AS end_time
       `,
       [id],
     );
@@ -521,6 +661,8 @@ router.post('/create-smart', async (req, res) => {
     const isAbsenceRaw = (b.isAbsence ?? b.is_absence ?? null);
     const isAbsence = isAbsenceRaw != null ? Number(isAbsenceRaw) : 2; // 1=yes, 2=no
     const absenceType = (b.absenceType ?? b.absence_type ?? null);
+    const startTime = parseNullableTime(b.startTime ?? b.start_time ?? null);
+    const endTime = parseNullableTime(b.endTime ?? b.end_time ?? null);
 
 
     if (!Number.isFinite(shiftPeriodId) || !Number.isFinite(departmentId) || !Number.isFinite(userId) || !Number.isFinite(shiftTypeId)) {
@@ -531,6 +673,9 @@ router.post('/create-smart', async (req, res) => {
     }
     if (!status) {
       return res.status(400).json({ error: 'status is required.' });
+    }
+    if (startTime === undefined || endTime === undefined) {
+      return res.status(400).json({ error: 'Invalid time format (expected HH:MM or HH:MM:SS).' });
     }
 
     const scopeError = await validateAssignmentPeriodScope({
@@ -543,6 +688,18 @@ router.post('/create-smart', async (req, res) => {
         error: 'Business rule violation',
         details: scopeError,
         code: 'P0001',
+      });
+    }
+
+    const approvedEditError = await ensureApprovedPeriodAssignmentEditAllowed({
+      req,
+      shiftPeriodId,
+    });
+    if (approvedEditError) {
+      return res.status(403).json({
+        error: 'Forbidden',
+        details: approvedEditError,
+        permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION,
       });
     }
 
@@ -565,7 +722,9 @@ router.post('/create-smart', async (req, res) => {
         r.required_staff_snapshot,
         r.is_absence,
         r.absence_type,
-        r.division_id
+        r.division_id,
+        to_char(r.start_time, 'HH24:MI:SS') AS start_time,
+        to_char(r.end_time, 'HH24:MI:SS') AS end_time
       FROM shiftly_api.create_shift_assignment(
         $1,
         $2::int,
@@ -577,7 +736,9 @@ router.post('/create-smart', async (req, res) => {
         $8,
         $9,
         $10::int,
-        $11
+        $11,
+        $12::time,
+        $13::time
       ) AS r
       `,
       [
@@ -592,6 +753,8 @@ router.post('/create-smart', async (req, res) => {
         sourceType,
         Number.isFinite(isAbsence) ? isAbsence : 2,
         absenceType,
+        startTime,
+        endTime,
       ],
     );
 
