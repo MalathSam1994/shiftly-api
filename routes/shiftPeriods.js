@@ -595,6 +595,23 @@ router.post('/:id/generate-from-template', async (req, res) => {
   }
 
  try {
+ const precheck = await pool.query(
+   `SELECT sp.template_id,
+           st.is_active AS template_is_active
+    FROM shiftly_schema.shift_periods sp
+    LEFT JOIN shiftly_schema.shift_templates st ON st.id = sp.template_id
+    WHERE sp.id = $1
+    GROUP BY sp.template_id, st.is_active`,
+   [periodId],
+ );
+ const guard = precheck.rows[0];
+ if (!guard || guard.template_id == null) {
+   return res.status(400).json({ error: 'Shift Period has no template selected.' });
+ }
+ if (guard.template_is_active !== true) {
+   return res.status(400).json({ error: 'Cannot generate assignments from an inactive template.' });
+ }
+
  const result = await pool.query(
  `SELECT shiftly_api.generate_assignments_from_template($1) AS result`,
  [periodId],

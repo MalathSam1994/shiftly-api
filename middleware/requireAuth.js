@@ -16,7 +16,8 @@ async function requireAuth(req, res, next) {
      return res.status(401).json({ error: 'Invalid or expired token' });
    }
    const db = await pool.query(
-   `SELECT COALESCE(session_version, 0) AS session_version
+   `SELECT COALESCE(session_version, 0) AS session_version,
+           is_active
     FROM shiftly_schema.users
     WHERE id = $1`,
      [userId],
@@ -25,6 +26,9 @@ async function requireAuth(req, res, next) {
      return res.status(401).json({ error: 'Invalid or expired token' });
    }
    const currentSv = Number(db.rows[0].session_version ?? 0);
+   if (db.rows[0].is_active !== true) {
+     return res.status(401).json({ error: 'Invalid or expired token' });
+   }
    if (tokenSv !== currentSv) {
      // Token belongs to an older session (user logged in elsewhere).
      return res.status(401).json({ error: 'Session replaced by another login' });

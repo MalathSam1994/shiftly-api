@@ -106,12 +106,23 @@ router.post('/push', async (req, res) => {
 
     let userIds = [];
     if (recipientUserId) {
-      userIds = [recipientUserId];
-    } else {
-      // Adjust table name if yours differs:
-      // We assume: shiftly_schema.user_departments(user_id, department_id)
       const { rows } = await pool.query(
-        `SELECT DISTINCT user_id FROM shiftly_schema.user_department WHERE department_id = $1`,
+        `SELECT id
+         FROM shiftly_schema.users
+         WHERE id = $1 AND is_active = true`,
+        [recipientUserId]
+      );
+      userIds = rows.map(r => r.id);
+    } else {
+      const { rows } = await pool.query(
+        `SELECT DISTINCT ud.user_id
+         FROM shiftly_schema.user_departments ud
+         JOIN shiftly_schema.users u ON u.id = ud.user_id
+         JOIN shiftly_schema.departments d ON d.id = ud.department_id
+         WHERE ud.department_id = $1
+           AND ud.is_active = true
+           AND u.is_active = true
+           AND d.is_active = true`,
         [departmentId]
       );
       userIds = rows.map(r => r.user_id);

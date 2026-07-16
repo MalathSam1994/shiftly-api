@@ -1,5 +1,13 @@
 // routes/shiftTemplates.js
 const createCrudRouter = require('../createCrudRouter');
+const {
+  activeStatusSqlWithInclude,
+  parseIncludeIds,
+  parseActiveStatusQuery,
+  parseCreateIsActive,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 const shiftTemplatesConfig = {
   table: 'shiftly_schema.shift_templates',
@@ -12,20 +20,36 @@ const shiftTemplatesConfig = {
     'is_active',
     'description',
   ],
+  activeFilter: true,
     listHandler: async (req, res, { pool, config }) => {
-    const result = await pool.query(`
-      SELECT
-        id,
-        template_name,
-        pattern_type,
-        cycle_length_weeks,
-        to_char(cycle_anchor_date, 'YYYY-MM-DD') AS cycle_anchor_date,
-        is_active,
-        description
-      FROM ${config.table}
-      ORDER BY ${config.idColumn}
-    `);
-    res.json(result.rows);
+    try {
+      const active = activeStatusSqlWithInclude({
+        status: parseActiveStatusQuery(req.query),
+        activeColumn: 'is_active',
+        idColumn: 'id',
+        startIndex: 1,
+        includeIds: parseIncludeIds(req.query),
+      });
+      const where = active.clause ? `WHERE ${active.clause}` : '';
+
+      const result = await pool.query(`
+        SELECT
+          id,
+          template_name,
+          pattern_type,
+          cycle_length_weeks,
+          to_char(cycle_anchor_date, 'YYYY-MM-DD') AS cycle_anchor_date,
+          is_active,
+          description
+        FROM ${config.table}
+        ${where}
+        ORDER BY ${config.idColumn}
+      `, active.params);
+      res.json(result.rows);
+    } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
+      throw err;
+    }
   },
   createHandler: async (req, res, { pool, config }) => {
     const body = req.body || {};
@@ -37,7 +61,11 @@ const shiftTemplatesConfig = {
       return res.status(400).json({ error: 'No valid columns provided for insert' });
     }
 
-    const values = cols.map((c) => body[c]);
+    const values = cols.map((c) =>
+      c === 'is_active'
+        ? parseCreateIsActive({ is_active: body[c] })
+        : body[c],
+    );
     const placeholders = cols.map((_, i) => `$${i + 1}`).join(', ');
 
     const result = await pool.query(
@@ -67,7 +95,11 @@ const shiftTemplatesConfig = {
     for (const col of config.columns) {
       if (Object.prototype.hasOwnProperty.call(body, col)) {
         sets.push(`${col} = $${i}`);
-        values.push(body[col]);
+        values.push(
+          col === 'is_active'
+            ? parseOptionalBoolean(body[col], 'is_active')
+            : body[col],
+        );
         i++;
       }
     }

@@ -1,6 +1,14 @@
 // createCrudRouter.js
 const express = require('express');
 const pool = require('./db');
+const {
+  activeStatusSqlWithInclude,
+  parseIncludeIds,
+  parseActiveStatusQuery,
+  parseCreateIsActive,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('./utils/activeStatus');
 
 // Run a single query with a per-request statement_timeout that does NOT leak to pooled sessions.
 async function queryWithTimeout(sql, params = [], timeoutMs = 20000) {
@@ -32,6 +40,23 @@ function createCrudRouter(config) {
 
   const allColumns = [config.idColumn, ...config.columns];
   const timeoutMs = config.timeoutMs ?? 20000;
+  const activeColumn = config.activeColumn || 'is_active';
+
+  function activeStatusClause(req, params, nextIndex) {
+    if (!config.activeFilter) {
+      return { clause: '', nextIndex };
+    }
+
+    const active = activeStatusSqlWithInclude({
+      status: parseActiveStatusQuery(req.query),
+      activeColumn,
+      idColumn: config.idColumn,
+      startIndex: nextIndex,
+      includeIds: parseIncludeIds(req.query),
+    });
+    params.push(...active.params);
+    return { clause: active.clause, nextIndex: active.nextIndex };
+  }
 
   // GET / -> list all rows
   router.get('/', async (req, res) => {
@@ -43,14 +68,19 @@ function createCrudRouter(config) {
        return;
      }
 
+      const params = [];
+      const active = activeStatusClause(req, params, 1);
+      const where = active.clause ? `WHERE ${active.clause}` : '';
       const query = `
         SELECT ${allColumns.join(', ')}
         FROM ${config.table}
+        ${where}
         ORDER BY ${config.idColumn}
       `;
-      const result = await queryWithTimeout(query, [], timeoutMs);
+      const result = await queryWithTimeout(query, params, timeoutMs);
       res.json(result.rows);
     } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
       console.error('Error querying DB (LIST):', err);
       res.status(500).json({ error: 'Database error' });
     }
@@ -95,7 +125,11 @@ function createCrudRouter(config) {
         if (Object.prototype.hasOwnProperty.call(req.body, col)) {
           cols.push(col);
           placeholders.push(`$${i}`);
-          values.push(req.body[col]);
+          values.push(
+            col === activeColumn
+              ? parseCreateIsActive({ is_active: req.body[col] })
+              : req.body[col],
+          );
           i++;
         }
       }
@@ -127,6 +161,7 @@ function createCrudRouter(config) {
        const result = await queryWithTimeout(query, values, timeoutMs);
       res.status(201).json(result.rows[0]);
     } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
       console.error('Error inserting into DB (CREATE):', err);
       res.status(500).json({ error: 'Database error' });
     }
@@ -162,7 +197,11 @@ function createCrudRouter(config) {
       for (const col of config.columns) {
         if (Object.prototype.hasOwnProperty.call(req.body, col)) {
           sets.push(`${col} = $${i}`);
-          values.push(req.body[col]);
+          values.push(
+            col === activeColumn
+              ? parseOptionalBoolean(req.body[col], activeColumn)
+              : req.body[col],
+          );
           i++;
         }
       }
@@ -189,6 +228,7 @@ function createCrudRouter(config) {
 
       res.json(result.rows[0]);
     } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
       console.error('Error updating DB (UPDATE):', err);
 
 

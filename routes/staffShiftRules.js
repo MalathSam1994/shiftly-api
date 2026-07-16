@@ -1,5 +1,9 @@
 // routes/staffShiftRules.js
 const createCrudRouter = require('../createCrudRouter');
+const {
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -96,7 +100,9 @@ const staffShiftRulesConfig = {
     'staff_type_id',
     'shift_type_id',
     'required_staff_count',
+    'is_active',
   ],
+  activeFilter: true,
   updateHandler: async (req, res, { pool, config, allColumns }) => {
     try {
       const id = parseInt(req.params.id, 10);
@@ -140,7 +146,11 @@ const staffShiftRulesConfig = {
       for (const col of config.columns) {
         if (Object.prototype.hasOwnProperty.call(req.body, col)) {
           sets.push(`${col} = $${i}`);
-          values.push(req.body[col]);
+          values.push(
+            col === 'is_active'
+              ? parseOptionalBoolean(req.body[col], 'is_active')
+              : req.body[col],
+          );
           i++;
         }
       }
@@ -167,6 +177,7 @@ const staffShiftRulesConfig = {
 
       return res.json(result.rows[0]);
     } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
       console.error('Error updating staff shift rule:', err);
 
       const isBusiness = err && err.code === 'P0001';

@@ -1,5 +1,31 @@
 const createCrudRouter = require('../createCrudRouter');
 
+const {
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function isOnlyDepartmentStatusChange(body, currentRow) {
+  if (!hasOwn(body, 'is_active')) {
+    return false;
+  }
+
+  // The Flutter repository sends the complete object during update.
+  // Therefore, department_desc may still be included even when only the
+  // status switch was changed.
+  if (!hasOwn(body, 'department_desc')) {
+    return true;
+  }
+
+  return String(body.department_desc ?? '').trim() ===
+      String(currentRow.department_desc ?? '').trim();
+}
+
+
 function tryParseJson(text) {
   if (text == null) return null;
   const s = String(text).trim();
@@ -72,8 +98,129 @@ function buildBusinessError(err, fallbackMessage) {
 const departmentsConfig = {
   table: 'shiftly_schema.departments',
   idColumn: 'id',
-  columns: ['department_desc'],
-   deleteHandler: async (req, res, { pool, config, allColumns }) => {
+  columns: ['department_desc', 'is_active'],
+  activeFilter: true,
+  updateHandler: async (req, res, { pool, config, allColumns }) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      if (Number.isNaN(id)) {
+        return res.status(400).json({ error: 'Invalid id.' });
+      }
+
+      const currentResult = await pool.query(
+        `
+        SELECT department_desc, is_active
+        FROM ${config.table}
+        WHERE ${config.idColumn} = $1
+        `,
+        [id],
+      );
+
+      if (!currentResult.rows || currentResult.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      const currentDepartment = currentResult.rows[0];
+      const onlyStatusChange = isOnlyDepartmentStatusChange(
+        req.body,
+        currentDepartment,
+      );
+
+      if (onlyStatusChange) {
+        const isActive = parseOptionalBoolean(
+          req.body.is_active,
+          'is_active',
+        );
+
+        /*
+         * Dedicated active/inactive update path.
+         *
+         * Do not run linked-record or department-description validations when
+         * only is_active is being modified.
+         */
+        const statusResult = await pool.query(
+          `
+          UPDATE ${config.table}
+          SET is_active = $1
+          WHERE ${config.idColumn} = $2
+          RETURNING ${allColumns.join(', ')}
+          `,
+          [isActive, id],
+        );
+
+        return res.json(statusResult.rows[0]);
+      }
+
+      /*
+       * Normal department update path.
+       *
+       * Any existing database or route validation for department data remains
+       * applicable when department_desc or another business field changes.
+       */
+      const sets = [];
+      const values = [];
+      let parameterIndex = 1;
+
+      for (const column of config.columns) {
+        if (!hasOwn(req.body, column)) {
+          continue;
+        }
+
+        sets.push(`${column} = $${parameterIndex}`);
+        values.push(
+          column === 'is_active'
+            ? parseOptionalBoolean(req.body[column], 'is_active')
+            : req.body[column],
+        );
+        parameterIndex++;
+      }
+
+      if (sets.length === 0) {
+        return res.status(400).json({
+          error: 'No valid columns provided for update',
+        });
+      }
+
+      values.push(id);
+
+      const result = await pool.query(
+        `
+        UPDATE ${config.table}
+        SET ${sets.join(', ')}
+        WHERE ${config.idColumn} = $${parameterIndex}
+        RETURNING ${allColumns.join(', ')}
+        `,
+        values,
+      );
+
+      if (!result.rows || result.rows.length === 0) {
+        return res.status(404).json({ error: 'Not found' });
+      }
+
+      return res.json(result.rows[0]);
+    } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
+
+      console.error('Error updating department:', err);
+
+      const isBusiness = err && err.code === 'P0001';
+      if (isBusiness) {
+        const built = buildBusinessError(
+          err,
+          'Department cannot be updated because it is already linked.',
+        );
+        return res.status(built.http).json(built.body);
+      }
+
+      return res.status(500).json({
+        error: 'Database error',
+        details: err.message,
+        code: err.code,
+        routine: err.routine,
+      });
+    }
+  },
+  deleteHandler: async (req, res, { pool, config, allColumns }) => {
    try {
      const id = parseInt(req.params.id, 10);
      if (Number.isNaN(id)) {

@@ -4,6 +4,14 @@ const bcrypt = require('bcryptjs');
 const pool = require('../db');
 const { generateComplexPassword } = require('../services/passwordUtil');
 const { sendUserWelcomeEmail } = require('../services/mailer');
+const {
+  activeStatusSqlWithInclude,
+  parseIncludeIds,
+  parseActiveStatusQuery,
+  parseCreateIsActive,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 
 const {
@@ -66,6 +74,15 @@ router.get('/', async (req, res) => {
 	console.log(`[${req.rid}] USERS LIST entered`);
   try {
 	  console.log(`[${req.rid}] USERS LIST before DB query`);
+    const active = activeStatusSqlWithInclude({
+      status: parseActiveStatusQuery(req.query),
+      activeColumn: 'is_active',
+      idColumn: 'id',
+      startIndex: 1,
+      includeIds: parseIncludeIds(req.query),
+    });
+    const where = active.clause ? `WHERE ${active.clause}` : '';
+
     const query = `
       SELECT id,
              empno,
@@ -74,18 +91,21 @@ router.get('/', async (req, res) => {
              role_id,
 			 staff_type_id,
        email,
-        must_change_password
+        must_change_password,
+        is_active
       FROM shiftly_schema.users
+      ${where}
       ORDER BY id
     `;
 	
     // NOTE: do NOT send "SET ...; SELECT ..." as one string.
    // node-postgres returns an array of results for multi-statements -> result.rows becomes undefined.
-   const result = await queryWithTimeout(query, [], 20000);
+   const result = await queryWithTimeout(query, active.params, 20000);
 
     console.log(`[${req.rid}] USERS LIST after DB query rows=${result.rows.length}`);
     res.json(result.rows);
   } catch (err) {
+    if (sendActiveStatusError(res, err)) return;
     console.error('Error querying DB (USERS LIST):', err);
     res.status(500).json({ error: 'Database error' });
   }
@@ -103,7 +123,8 @@ router.get('/:id', async (req, res) => {
              role_id,
 			 staff_type_id,
        email,
-        must_change_password
+        must_change_password,
+        is_active
       FROM shiftly_schema.users
       WHERE id = $1
     `;
@@ -133,6 +154,7 @@ router.post('/', async (req, res) => {
       role_id,
 	  staff_type_id,
     email,
+    is_active,
     } = req.body;
 
 if (!user_name  || !email) {
@@ -149,15 +171,16 @@ if (!user_name  || !email) {
   }
 
    // ✅ Backend generates a strong random password (admin does NOT provide it).
+   const isActive = parseCreateIsActive({ is_active });
    const tempPassword = generateComplexPassword(14);
    const hashedPassword = await bcrypt.hash(tempPassword, 10);
  
 
     const query = `
       INSERT INTO shiftly_schema.users
-        (empno, user_name, user_desc, role_id, staff_type_id, email, password_hash, must_change_password)
+        (empno, user_name, user_desc, role_id, staff_type_id, email, password_hash, must_change_password, is_active)
       VALUES
-        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    TRUE)
+        ($1,    $2,        $3,        $4,        $5,      $6,      $7,    TRUE, $8)
       RETURNING id,
                 empno,
                 user_name,
@@ -165,7 +188,8 @@ if (!user_name  || !email) {
                 role_id,
 				staff_type_id,
         email,
-        must_change_password
+        must_change_password,
+        is_active
     `;
 
     const values = [
@@ -176,6 +200,7 @@ if (!user_name  || !email) {
 	  staff_type_id ?? null,
     emailNorm,
       hashedPassword,
+      isActive,
     ];
 
     await client.query('BEGIN');
@@ -199,6 +224,7 @@ if (!user_name  || !email) {
   } catch (err) {
      try { await client.query('ROLLBACK'); } catch (_) {}
 
+    if (sendActiveStatusError(res, err)) return;
 
     if (isLicenseLimitError(err)) {
       console.warn('User license limit reached:', {
@@ -232,75 +258,175 @@ router.put('/:id', async (req, res) => {
       role_id,
 	  staff_type_id,
     email,
+    is_active,
     } = req.body;
 
-    console.log(`[${req.rid}] USERS UPDATE id=${req.params.id} email=`, email, 'body=', req.body);
+    console.log(
+      `[${req.rid}] USERS UPDATE id=${req.params.id} email=`,
+      email,
+      'body=',
+      req.body,
+    );
 
- if (!user_name ) {
-      return res.status(400).json({
-         error: 'user_name  are required for update.',
-      });
-    }
 
 
-    const validationResult = await queryWithTimeout(
-      `SELECT shiftly_api.validate_user_change($1, 'UPDATE') AS result`,
+    /*
+     * Read the current row first.
+     *
+     * The Flutter client sends the complete user object when the administrator
+     * clicks Deactivate/Reactivate. Therefore, checking only whether fields
+     * exist in req.body is not enough to determine whether business data was
+     * modified.
+     *
+     * We compare the submitted business fields with the stored values and run
+     * validate_user_change only when at least one of those fields really
+     * changed. An is_active-only update is intentionally allowed.
+     */
+    const currentResult = await queryWithTimeout(
+      `
+      SELECT id,
+             empno,
+             user_name,
+             user_desc,
+             role_id,
+             staff_type_id,
+             email,
+             is_active
+      FROM shiftly_schema.users
+      WHERE id = $1
+      `,
       [req.params.id],
       20000,
     );
 
-    const validationPayload = validationResult.rows?.[0]?.result;
-    const normalizedValidation = normalizeValidationErrors(validationPayload);
-    const ok =
-      validationPayload &&
-      Object.prototype.hasOwnProperty.call(validationPayload, 'ok')
-        ? Boolean(validationPayload.ok)
-        : true;
+    if (currentResult.rows.length === 0) {
+      return res.status(404).json({ error: 'Not found' });
+    }
 
-    if (!ok) {
+    const currentUser = currentResult.rows[0];
+    const hasField = (fieldName) =>
+      Object.prototype.hasOwnProperty.call(req.body, fieldName);
+
+    // Support both full PUT requests and status-only requests.
+    const nextEmpno = hasField('empno')
+      ? (empno ?? null)
+      : currentUser.empno;
+    const nextUserName = hasField('user_name')
+      ? user_name
+      : currentUser.user_name;
+    const nextUserDesc = hasField('user_desc')
+      ? (user_desc ?? null)
+      : currentUser.user_desc;
+    const nextRoleId = hasField('role_id')
+      ? (role_id ?? null)
+      : currentUser.role_id;
+    const nextStaffTypeId = hasField('staff_type_id')
+      ? (staff_type_id ?? null)
+      : currentUser.staff_type_id;
+    const nextEmail = hasField('email')
+      ? (email ?? null)
+      : currentUser.email;
+
+    if (
+      nextUserName == null ||
+      String(nextUserName).trim().length === 0
+    ) {
       return res.status(400).json({
-        error: 'Business rule violation',
-        details: `User cannot be updated because this user is already linked.`,
-        code: 'P0001',
-        validation_errors: normalizedValidation,
-        errors: normalizedValidation.errors,
-        warnings: normalizedValidation.warnings,
+        error: 'user_name is required for update.',
       });
     }
 
+
+    const businessFieldsChanged =
+      currentUser.empno !== nextEmpno ||
+      currentUser.user_name !== nextUserName ||
+      currentUser.user_desc !== nextUserDesc ||
+      currentUser.role_id !== nextRoleId ||
+      currentUser.staff_type_id !== nextStaffTypeId ||
+      currentUser.email !== nextEmail;
+
+    if (businessFieldsChanged) {
+      const validationResult = await queryWithTimeout(
+        `SELECT shiftly_api.validate_user_change($1, 'UPDATE') AS result`,
+        [req.params.id],
+        20000,
+      );
+
+      const validationPayload = validationResult.rows?.[0]?.result;
+      const normalizedValidation =
+        normalizeValidationErrors(validationPayload);
+      const ok =
+        validationPayload &&
+        Object.prototype.hasOwnProperty.call(validationPayload, 'ok')
+          ? Boolean(validationPayload.ok)
+          : true;
+
+      if (!ok) {
+        return res.status(400).json({
+          error: 'Business rule violation',
+          details:
+            'User cannot be updated because this user is already linked.',
+          code: 'P0001',
+          validation_errors: normalizedValidation,
+          errors: normalizedValidation.errors,
+          warnings: normalizedValidation.warnings,
+        });
+      }
+    }
+
+    const parsedIsActive = hasField('is_active')
+      ? parseOptionalBoolean(is_active, 'is_active')
+      : undefined;
+    const sets = [
+      'empno = $1',
+      'user_name = $2',
+      'user_desc = $3',
+      'role_id = $4',
+      'staff_type_id = $5',
+      'email = $6',
+    ];
+    const values = [
+      nextEmpno,
+      nextUserName,
+      nextUserDesc,
+      nextRoleId,
+      nextStaffTypeId,
+      nextEmail,
+    ];
+
+
+
+    let nextIndex = 7;
+
+    if (parsedIsActive !== undefined) {
+      sets.push(`is_active = $${nextIndex}`);
+      values.push(parsedIsActive);
+      nextIndex += 1;
+    }
+
+    values.push(req.params.id);
+
     const query = `
       UPDATE shiftly_schema.users
-      SET empno = $1,
-          user_name = $2,
-          user_desc = $3,
-          role_id = $4,
-          		  staff_type_id = $5,
-          email = $6
-     WHERE id = $7
+      SET ${sets.join(', ')}
+     WHERE id = $${nextIndex}
       RETURNING id,
                 empno,
                 user_name,
                 user_desc,
                 role_id,
-				staff_type_id,
-         email,
-         must_change_password
+               staff_type_id,
+               email,
+               must_change_password,
+               is_active
     `;
-
-    const values = [
-         (empno ?? null),
-      user_name,
-      user_desc ?? null,
-      role_id ?? null,
-	  staff_type_id ?? null,
-      (email ?? null),
-      req.params.id,
-    ];
 
     const result = await pool.query(query, values);
 
-    console.log(`[${req.rid}] USERS UPDATE result rows=${result.rows.length} email=`,
-      result.rows[0]?.email);
+    console.log(
+      `[${req.rid}] USERS UPDATE result rows=${result.rows.length} email=`,
+      result.rows[0]?.email,
+    );
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Not found' });
@@ -308,6 +434,7 @@ router.put('/:id', async (req, res) => {
 
     res.json(result.rows[0]);
   } catch (err) {
+    if (sendActiveStatusError(res, err)) return;
     console.error('Error updating DB (USERS UPDATE):', err);
     res.status(500).json({ error: 'Database error' });
   }

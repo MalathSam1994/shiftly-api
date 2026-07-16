@@ -1,5 +1,12 @@
 const express = require('express');
 const pool = require('../db');
+const {
+  activeStatusSql,
+  parseActiveStatusQuery,
+  parseCreateIsActive,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 const router = express.Router();
 
 
@@ -36,22 +43,28 @@ router.get('/', async (req, res) => {
       return res.status(400).json({ error: 'holiday_year_id must be a positive integer' });
     }
 
+    const active = activeStatusSql(parseActiveStatusQuery(req.query), 'is_active', 2);
+    const activeClause = active.clause ? `AND ${active.clause}` : '';
+
     const sql = `
      SELECT
        id,
        holiday_year_id,
        to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
        occasion,
+       is_active,
        created_by,
        created_at
     FROM shiftly_schema.yearly_holidays
       WHERE holiday_year_id = $1
+      ${activeClause}
       ORDER BY holiday_date
     `;
 
-    const result = await queryWithTimeout(sql, [holidayYearId], 20000);
+    const result = await queryWithTimeout(sql, [holidayYearId, ...active.params], 20000);
     return res.json(result.rows);
   } catch (err) {
+    if (sendActiveStatusError(res, err)) return;
     console.error('Error querying DB (YEARLY HOLIDAYS LIST):', err);
     return res.status(500).json({ error: 'Database error' });
   }
@@ -71,6 +84,7 @@ router.get('/:id', async (req, res) => {
         holiday_year_id,
         to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
         occasion,
+        is_active,
         created_by,
         created_at
       FROM shiftly_schema.yearly_holidays
@@ -96,6 +110,7 @@ router.post('/', async (req, res) => {
     const holidayYearId = Number(req.body.holiday_year_id);
     const holidayDate = req.body.holiday_date;
     const occasion = req.body.occasion;
+    const isActive = parseCreateIsActive({ is_active: req.body.is_active });
     const createdBy = Number(req.body.created_by);
 
     if (!Number.isInteger(holidayYearId) || holidayYearId <= 0) {
@@ -114,26 +129,28 @@ router.post('/', async (req, res) => {
 
     const sql = `
       INSERT INTO shiftly_schema.yearly_holidays
-        (holiday_year_id, holiday_date, occasion, created_by)
+        (holiday_year_id, holiday_date, occasion, is_active, created_by)
       VALUES
-        ($1, $2::date, $3, $4)
+        ($1, $2::date, $3, $4, $5)
       RETURNING
         id,
         holiday_year_id,
         to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
         occasion,
+        is_active,
         created_by,
         created_at
     `;
 
     const result = await queryWithTimeout(
       sql,
-      [holidayYearId, holidayDate.trim(), occasion.trim(), createdBy],
+      [holidayYearId, holidayDate.trim(), occasion.trim(), isActive, createdBy],
       20000
     );
 
     return res.status(201).json(result.rows[0]);
   } catch (err) {
+    if (sendActiveStatusError(res, err)) return;
     console.error('Error inserting into DB (YEARLY HOLIDAYS CREATE):', err);
     return res.status(500).json({ error: 'Database error' });
   }
@@ -150,6 +167,7 @@ router.put('/:id', async (req, res) => {
 
     const holidayDate = req.body.holiday_date;
     const occasion = req.body.occasion;
+    const isActive = req.body.is_active;
 
     const sets = [];
     const values = [];
@@ -164,6 +182,14 @@ router.put('/:id', async (req, res) => {
     if (typeof occasion === 'string' && occasion.trim().length > 0) {
       sets.push(`occasion = $${i}`);
       values.push(occasion.trim());
+      i++;
+    }
+
+    const parsedIsActive = parseOptionalBoolean(isActive, 'is_active');
+
+    if (parsedIsActive !== undefined) {
+      sets.push(`is_active = $${i}`);
+      values.push(parsedIsActive);
       i++;
     }
 
@@ -182,6 +208,7 @@ router.put('/:id', async (req, res) => {
         holiday_year_id,
         to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
         occasion,
+        is_active,
         created_by,
         created_at   
          `;
@@ -193,6 +220,7 @@ router.put('/:id', async (req, res) => {
 
     return res.json(result.rows[0]);
   } catch (err) {
+    if (sendActiveStatusError(res, err)) return;
     console.error('Error updating DB (YEARLY HOLIDAYS UPDATE):', err);
     return res.status(500).json({ error: 'Database error' });
   }
@@ -214,6 +242,7 @@ router.delete('/:id', async (req, res) => {
         holiday_year_id,
         to_char(holiday_date, 'YYYY-MM-DD') AS holiday_date,
         occasion,
+        is_active,
         created_by,
         created_at    
         `;

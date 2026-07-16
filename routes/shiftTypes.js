@@ -1,6 +1,96 @@
 // routes/shiftTypes.js
 const createCrudRouter = require('../createCrudRouter');
 
+
+ 
+const SHIFT_TYPE_BUSINESS_COLUMNS = [
+  'shift_code',
+  'shift_label',
+  'start_time',
+  'end_time',
+  'duration_hours',
+  'day_type',
+  'notes',
+];
+
+function hasOwn(object, key) {
+  return Object.prototype.hasOwnProperty.call(object, key);
+}
+
+function normalizeTimeValue(value) {
+  if (value == null) return null;
+
+  const text = String(value).trim();
+  if (!text) return '';
+
+  const match = text.match(
+    /^(\d{1,2}):(\d{2})(?::(\d{2})(?:\.\d+)?)?$/,
+  );
+
+  if (!match) {
+    return text;
+  }
+
+  const hours = match[1].padStart(2, '0');
+  const minutes = match[2];
+  const seconds = match[3] || '00';
+
+  return `${hours}:${minutes}:${seconds}`;
+}
+
+function shiftTypeValuesEqual(column, incomingValue, currentValue) {
+  switch (column) {
+    case 'duration_hours': {
+      if (
+        incomingValue == null ||
+        String(incomingValue).trim() === ''
+      ) {
+        return currentValue == null;
+      }
+
+      return Number(incomingValue) === Number(currentValue);
+    }
+
+    case 'start_time':
+    case 'end_time':
+      return (
+        normalizeTimeValue(incomingValue) ===
+        normalizeTimeValue(currentValue)
+      );
+
+    case 'notes': {
+      const incoming =
+        incomingValue == null ? null : String(incomingValue);
+      const current =
+        currentValue == null ? null : String(currentValue);
+
+      return incoming === current;
+    }
+
+    default:
+      return String(incomingValue ?? '') === String(currentValue ?? '');
+  }
+}
+
+function isOnlyShiftTypeStatusChange(body, currentRow) {
+  if (!hasOwn(body, 'is_active')) {
+    return false;
+  }
+
+  return SHIFT_TYPE_BUSINESS_COLUMNS.every((column) => {
+    if (!hasOwn(body, column)) {
+      return true;
+    }
+
+    return shiftTypeValuesEqual(
+      column,
+      body[column],
+      currentRow[column],
+    );
+  });
+}
+
+
 function tryParseJson(text) {
   if (text == null) return null;
   const s = String(text).trim();
@@ -182,13 +272,45 @@ const shiftTypesConfig = {
     'duration_hours',
     'day_type',
     'notes',
+    'is_active',
   ],
+  activeFilter: true,
    beforeUpdate: async (req, res, { pool }) => {
     const id = parseInt(req.params.id, 10);
     if (Number.isNaN(id)) {
       res.status(400).json({ error: 'Invalid id.' });
       return false;
     }
+
+
+    const currentResult = await pool.query(
+      `
+      SELECT
+        shift_code,
+        shift_label,
+        start_time,
+        end_time,
+        duration_hours,
+        day_type,
+        notes,
+        is_active
+      FROM shiftly_schema.shift_types
+      WHERE id = $1
+      `,
+      [id],
+    );
+
+    if (!currentResult.rows || currentResult.rows.length === 0) {
+      res.status(404).json({ error: 'Not found' });
+      return false;
+    }
+
+    // Activation/deactivation must remain possible even when the shift type
+    // is referenced. Validation is still executed for every real data edit.
+    if (isOnlyShiftTypeStatusChange(req.body, currentResult.rows[0])) {
+      return true;
+    }
+
 
     const validation = await validateShiftTypeChange(pool, id, 'UPDATE');
     if (!validation.ok) {

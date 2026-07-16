@@ -78,7 +78,8 @@ function buildBusinessError(err, fallbackMessage) {
 const divisionsConfig = {
   table: 'shiftly_schema.divisions',
   idColumn: 'id',
-  columns: ['division_desc'],
+  columns: ['division_desc', 'is_active'],
+  activeFilter: true,
 
   createHandler: async (req, res, { pool, config, allColumns }) => {
     const divisionDesc =

@@ -1,4 +1,8 @@
 const createCrudRouter = require('../createCrudRouter');
+const {
+  parseCreateIsActive,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -71,12 +75,14 @@ function buildBusinessError(err, fallbackMessage) {
 const divisionDepartmentsConfig = {
   table: 'shiftly_schema.division_departments',
   idColumn: 'id',
-  columns: ['division_id', 'department_id', 'division_desc', 'department_desc'],
+  columns: ['division_id', 'department_id', 'division_desc', 'department_desc', 'is_active'],
+  activeFilter: true,
   createHandler: async (req, res, { pool, config, allColumns }) => {
     const divisionId = parseInt(req.body.division_id, 10);
     const departmentId = parseInt(req.body.department_id, 10);
     const divisionDesc = req.body.division_desc ?? null;
     const departmentDesc = req.body.department_desc ?? null;
+    const isActive = parseCreateIsActive({ is_active: req.body.is_active });
 
     if (Number.isNaN(divisionId) || Number.isNaN(departmentId)) {
       return res.status(400).json({
@@ -160,12 +166,13 @@ const divisionDepartmentsConfig = {
           division_id,
           department_id,
           division_desc,
-          department_desc
+          department_desc,
+          is_active
         )
-        VALUES ($1, $2, $3, $4)
+        VALUES ($1, $2, $3, $4, $5)
         RETURNING ${allColumns.join(', ')}
         `,
-        [divisionId, departmentId, divisionDesc, departmentDesc],
+        [divisionId, departmentId, divisionDesc, departmentDesc, isActive],
       );
 
       await client.query('COMMIT');
@@ -176,6 +183,7 @@ const divisionDepartmentsConfig = {
       } catch (_) {}
 
       console.error('Error creating/moving division department:', err);
+      if (sendActiveStatusError(res, err)) return;
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {

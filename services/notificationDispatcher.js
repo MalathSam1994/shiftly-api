@@ -30,8 +30,10 @@ async function _dispatchByNotificationId(notificationId) {
         body,
         payload,
         push_sent_at,
-        push_attempts
+        push_attempts,
+        u.is_active AS recipient_is_active
       FROM shiftly_schema.notifications
+      JOIN shiftly_schema.users u ON u.id = recipient_user_id
       WHERE id = $1
       FOR UPDATE
       `,
@@ -41,6 +43,24 @@ async function _dispatchByNotificationId(notificationId) {
     const n = rows[0];
     if (!n) {
       console.log('[dispatcher] notification not found', { notificationId });
+      await _client.query('COMMIT');
+      return;
+    }
+
+    if (n.recipient_is_active !== true) {
+      console.log('[dispatcher] recipient inactive, skipping push', {
+        notificationId: n.id,
+        recipientUserId: n.recipient_user_id,
+      });
+      await _client.query(
+        `
+        UPDATE shiftly_schema.notifications
+        SET push_attempts = push_attempts + 1,
+            last_push_error = 'RECIPIENT_INACTIVE'
+        WHERE id = $1
+        `,
+        [n.id],
+      );
       await _client.query('COMMIT');
       return;
     }

@@ -1,5 +1,10 @@
 // routes/userManagers.js
 const createCrudRouter = require('../createCrudRouter');
+const {
+  parseCreateIsActive,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -203,12 +208,14 @@ async function validateUserManagerChange(client, {
 const userManagersConfig = {
   table: 'shiftly_schema.user_managers',
   idColumn: 'id',
-  columns: ['user_id', 'manager_user_id', 'is_primary'],
+  columns: ['user_id', 'manager_user_id', 'is_primary', 'is_active'],
+  activeFilter: true,
 
   createHandler: async (req, res, { pool, config, allColumns }) => {
     const userId = req.body.user_id ?? null;
     const managerUserId = req.body.manager_user_id ?? null;
     const isPrimary = req.body.is_primary ?? true;
+    const isActive = parseCreateIsActive({ is_active: req.body.is_active });
 
     const client = await pool.connect();
     try {
@@ -235,12 +242,13 @@ const userManagersConfig = {
           INSERT INTO ${config.table} (
             user_id,
             manager_user_id,
-            is_primary
+            is_primary,
+            is_active
           )
-          VALUES ($1, $2, $3)
+          VALUES ($1, $2, $3, $4)
           RETURNING ${allColumns.join(', ')}
         `,
-        [userId, managerUserId, isPrimary],
+        [userId, managerUserId, isPrimary, isActive],
       );
 
       await client.query('COMMIT');
@@ -248,6 +256,7 @@ const userManagersConfig = {
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       console.error('Error creating user manager:', err);
+      if (sendActiveStatusError(res, err)) return;
 
       const constraintMapped = buildConstraintBusinessError(
         err,
@@ -311,11 +320,15 @@ const userManagersConfig = {
       const newIsPrimary = Object.prototype.hasOwnProperty.call(req.body, 'is_primary')
         ? req.body.is_primary
         : current.is_primary;
+      const newIsActive = Object.prototype.hasOwnProperty.call(req.body, 'is_active')
+        ? parseOptionalBoolean(req.body.is_active, 'is_active')
+        : current.is_active;
 
       const noChange =
         Number(newUserId) === Number(current.user_id) &&
         Number(newManagerUserId) === Number(current.manager_user_id) &&
-        Boolean(newIsPrimary) === Boolean(current.is_primary);
+        Boolean(newIsPrimary) === Boolean(current.is_primary) &&
+        Boolean(newIsActive) === Boolean(current.is_active);
 
       if (noChange) {
         await client.query('COMMIT');
@@ -358,11 +371,12 @@ const userManagersConfig = {
           UPDATE ${config.table}
           SET user_id = $1,
               manager_user_id = $2,
-              is_primary = $3
-          WHERE ${config.idColumn} = $4
+              is_primary = $3,
+              is_active = $4
+          WHERE ${config.idColumn} = $5
           RETURNING ${allColumns.join(', ')}
         `,
-        [newUserId, newManagerUserId, newIsPrimary, id],
+        [newUserId, newManagerUserId, newIsPrimary, newIsActive, id],
       );
 
       await client.query('COMMIT');
@@ -370,6 +384,7 @@ const userManagersConfig = {
     } catch (err) {
       try { await client.query('ROLLBACK'); } catch (_) {}
       console.error('Error updating user manager:', err);
+      if (sendActiveStatusError(res, err)) return;
 
       const constraintMapped = buildConstraintBusinessError(
         err,

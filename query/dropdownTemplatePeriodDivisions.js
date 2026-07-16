@@ -26,8 +26,9 @@ async function queryWithTimeout(sql, params, timeoutMs = 20000) {
 router.get('/', async (req, res) => {
   try {
     const sql = `
-      SELECT id, division_desc
+      SELECT id, division_desc, is_active
       FROM shiftly_schema.v_dropdown_template_period_div
+      WHERE is_active = true
       ORDER BY division_desc
     `;
 

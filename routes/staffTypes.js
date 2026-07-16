@@ -172,7 +172,8 @@ function buildForeignKeyViolationResponse(err, action) {
 const staffTypesConfig = {
   table: 'shiftly_schema.staff_types',
   idColumn: 'id',
-  columns: ['staff_type_name'],
+  columns: ['staff_type_name', 'is_active'],
+  activeFilter: true,
   beforeUpdate: async (req, res, { pool }) => {
     const id = parseInt(req.params.id, 10);
     if (Number.isNaN(id)) {

@@ -5,6 +5,13 @@
 const express = require('express');
 const pool = require('../db');
 const requirePermission = require('../middleware/requirePermission');
+const {
+  activeStatusSql,
+  parseActiveStatusQuery,
+  parseCreateIsActive,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 const router = express.Router();
 
@@ -38,15 +45,20 @@ const ADMIN_PERM = 'action:tree_menu:manage';
 // GET /tree-menu/admin/all -> full tree (includes sort_order + keys)
 router.get('/admin/all', requirePermission(ADMIN_PERM), async (req, res) => {
   try {
+    const active = activeStatusSql(parseActiveStatusQuery(req.query), 'is_active', 1);
+    const where = active.clause ? `WHERE ${active.clause}` : '';
+
     const { rows } = await pool.query(`
       SELECT
         screen_id, parent_id, screen_type, screen_file_name, menu_label,
-        screen_key, sort_order
+        screen_key, sort_order, is_active
       FROM shiftly_schema.tree_menu
+      ${where}
       ORDER BY parent_id NULLS FIRST, sort_order, screen_id
-    `);
+    `, active.params);
     res.json(rows);
   } catch (e) {
+    if (sendActiveStatusError(res, e)) return;
     console.error('TREE MENU ADMIN/all error:', e);
     res.status(500).json({ error: 'Database error' });
   }
@@ -60,6 +72,7 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
     menu_label,
     screen_file_name,     // for SCREEN
     screen_key,           // stable key for SCREEN (recommended)
+    is_active,
   } = req.body ?? {};
 
   try {
@@ -83,9 +96,9 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
 
     const { rows } = await pool.query(
       `INSERT INTO shiftly_schema.tree_menu
-        (parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order`,
+        (parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order, is_active)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order, is_active`,
       [
         parent_id ?? null,
         type,
@@ -93,11 +106,13 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
         menu_label,
         type === 'SCREEN' ? (screen_key ?? null) : null,
         nextOrder,
+        parseCreateIsActive({ is_active }),
       ]
     );
 
     res.status(201).json(rows[0]);
   } catch (e) {
+    if (sendActiveStatusError(res, e)) return;
     console.error('TREE MENU ADMIN/create error:', e);
     res.status(500).json({ error: 'Database error', detail: String(e.message ?? e) });
   }
@@ -110,6 +125,7 @@ router.put('/admin/:id', requirePermission(ADMIN_PERM), async (req, res) => {
     menu_label,
     screen_file_name,
     screen_key,          // only allowed if currently NULL/empty
+    is_active,
   } = req.body ?? {};
 
   try {
@@ -134,20 +150,28 @@ router.put('/admin/:id', requirePermission(ADMIN_PERM), async (req, res) => {
     const canSetKey = !cur.screen_key || String(cur.screen_key).trim() === '';
 
     const newScreenKey = (type === 'SCREEN' && canSetKey) ? (screen_key ?? null) : cur.screen_key;
+    const activeProvided = Object.prototype.hasOwnProperty.call(req.body ?? {}, 'is_active');
+    const parsedIsActive = activeProvided
+      ? parseOptionalBoolean(is_active, 'is_active')
+      : undefined;
 
     const { rows } = await pool.query(
       `UPDATE shiftly_schema.tree_menu
        SET menu_label=$2,
            screen_file_name=$3,
            screen_key=$4
+           ${activeProvided ? ', is_active=$5' : ''}
            
        WHERE screen_id=$1
-       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order`,
-      [id, menu_label, type === 'SCREEN' ? screen_file_name : null, newScreenKey]
+       RETURNING screen_id, parent_id, screen_type, screen_file_name, menu_label, screen_key, sort_order, is_active`,
+      activeProvided
+        ? [id, menu_label, type === 'SCREEN' ? screen_file_name : null, newScreenKey, parsedIsActive]
+        : [id, menu_label, type === 'SCREEN' ? screen_file_name : null, newScreenKey]
     );
 
     res.json(rows[0]);
   } catch (e) {
+    if (sendActiveStatusError(res, e)) return;
     console.error('TREE MENU ADMIN/update error:', e);
     res.status(500).json({ error: 'Database error', detail: String(e.message ?? e) });
   }

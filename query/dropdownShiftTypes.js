@@ -68,6 +68,7 @@ const divisionId = parseOptionalInt(divRaw);
           COALESCE(st.day_type, 'ANY'::character varying) AS day_type,
           st.notes
         FROM shiftly_schema.shift_types st
+        WHERE st.is_active = true
         ORDER BY st.shift_label, st.shift_code
       `;
 
@@ -216,6 +217,7 @@ const divisionId = parseOptionalInt(divRaw);
         (division_id IS NULL OR division_id = $1)
         AND department_id = $2
         AND staff_type_id = $3
+        AND is_active = true
       -- Prefer division-specific rule over division_id IS NULL (global) when both exist
       ORDER BY shift_type_id, (division_id IS NULL) ASC, shift_label, shift_code
     `;

@@ -105,6 +105,7 @@ router.get('/', async (req, res) => {
    SELECT department_id, id, empno, user_name, user_desc, role_id, staff_type_id
    FROM shiftly_schema.v_dropdown_dep_users
    WHERE department_id = $1
+   AND is_active = true
    ORDER BY user_name, empno
    `
    : `
@@ -112,6 +113,7 @@ router.get('/', async (req, res) => {
    FROM shiftly_schema.v_dropdown_dep_users
    WHERE department_id = $1
    AND staff_type_id = $2
+   AND is_active = true
    ORDER BY user_name, empno
    `;
 

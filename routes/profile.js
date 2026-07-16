@@ -112,13 +112,24 @@ router.get('/permissions', async (req, res) => {
       FROM shiftly_schema.permissions p
       JOIN shiftly_schema.role_permissions rp ON rp.permission_id = p.id
       JOIN shiftly_schema.user_roles ur ON ur.role_id = rp.role_id
+      JOIN shiftly_schema.roles r ON r.id = ur.role_id
       WHERE ur.user_id = $1
+        AND p.is_active = true
+        AND rp.is_active = true
+        AND ur.is_active = true
+        AND r.is_active = true
       UNION
       SELECT DISTINCT p.permission_key
       FROM shiftly_schema.permissions p
       JOIN shiftly_schema.role_permissions rp ON rp.permission_id = p.id
       JOIN shiftly_schema.users u ON u.role_id = rp.role_id
-      WHERE u.id = $1 AND u.role_id IS NOT NULL
+      JOIN shiftly_schema.roles r ON r.id = u.role_id
+      WHERE u.id = $1
+        AND u.role_id IS NOT NULL
+        AND u.is_active = true
+        AND p.is_active = true
+        AND rp.is_active = true
+        AND r.is_active = true
       ORDER BY permission_key
     `;
     const result = await pool.query(sql, [userId]);

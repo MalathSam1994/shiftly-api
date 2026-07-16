@@ -38,6 +38,7 @@ if (!usernameNorm || !password) {
              session_version,
              email,
               must_change_password,
+             is_active,
              password_hash
       FROM shiftly_schema.users
       WHERE regexp_replace(lower(trim(user_name)), '\\s+', ' ', 'g') = $1
@@ -49,6 +50,10 @@ if (!usernameNorm || !password) {
     }
 
     const user = result.rows[0];
+
+    if (user.is_active !== true) {
+      return res.status(401).json({ error: 'Invalid credentials.' });
+    }
 
     const passwordMatches = await bcrypt.compare(
       password,

@@ -1,4 +1,10 @@
 const createCrudRouter = require('../createCrudRouter');
+const {
+  activeStatusSql,
+  parseActiveStatusQuery,
+  parseOptionalBoolean,
+  sendActiveStatusError,
+} = require('../utils/activeStatus');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -76,17 +82,22 @@ const absenceTypesConfig = {
   columns: ['description', 'is_active', 'sort_order'],
   // Optional: keep list stable for UI
   listHandler: async (req, res, ctx) => {
-    const { config } = ctx;
-    const onlyActive = String(req.query.onlyActive ?? '').toLowerCase();
-    const where = onlyActive === 'true' ? 'WHERE is_active = TRUE' : '';
-    const q = `
-      SELECT code, description, is_active, sort_order, created_at, updated_at
-        FROM ${config.table}
-      ${where}
-       ORDER BY is_active DESC, sort_order ASC, code ASC
-    `;
-    const result = await ctx.pool.query(q);
-    res.json(result.rows);
+    try {
+      const { config } = ctx;
+      const active = activeStatusSql(parseActiveStatusQuery(req.query), 'is_active', 1);
+      const where = active.clause ? `WHERE ${active.clause}` : '';
+      const q = `
+        SELECT code, description, is_active, sort_order, created_at, updated_at
+          FROM ${config.table}
+        ${where}
+         ORDER BY is_active DESC, sort_order ASC, code ASC
+      `;
+      const result = await ctx.pool.query(q, active.params);
+      res.json(result.rows);
+    } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
+      throw err;
+    }
   },
   deleteHandler: async (req, res, { pool, config, allColumns }) => {
     try {
@@ -212,7 +223,11 @@ const absenceTypesConfig = {
       for (const col of config.columns) {
         if (Object.prototype.hasOwnProperty.call(req.body, col)) {
           sets.push(`${col} = $${i}`);
-          values.push(req.body[col]);
+          values.push(
+            col === 'is_active'
+              ? parseOptionalBoolean(req.body[col], 'is_active')
+              : req.body[col],
+          );
           i++;
         }
       }
@@ -239,6 +254,7 @@ const absenceTypesConfig = {
 
       return res.json(result.rows[0]);
     } catch (err) {
+      if (sendActiveStatusError(res, err)) return;
       console.error('Error updating absence type:', err);
 
       const isBusiness = err && err.code === 'P0001';

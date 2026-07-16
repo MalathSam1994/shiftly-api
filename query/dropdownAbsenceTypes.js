@@ -9,7 +9,7 @@ const router = express.Router();
 router.get('/', async (_req, res) => {
   try {
     const q = `
-      SELECT code, description
+      SELECT code, description, is_active
         FROM shiftly_schema.absence_types
        WHERE is_active = TRUE
        ORDER BY sort_order ASC, code ASC

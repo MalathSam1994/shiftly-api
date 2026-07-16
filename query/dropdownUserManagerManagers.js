@@ -35,8 +35,10 @@ router.get('/', async (req, res) => {
         role_id,
         staff_type_id,
         email,
-        COALESCE(must_change_password, false) AS must_change_password
+        COALESCE(must_change_password, false) AS must_change_password,
+        is_active
       FROM shiftly_schema.v_dropdown_user_manager_managers
+      WHERE is_active = true
       ORDER BY user_name, empno NULLS LAST
     `;
 

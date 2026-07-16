@@ -2,6 +2,7 @@
 const express = require('express');
 const pool = require('../db');
 const createCrudRouter = require('../createCrudRouter');
+const { parseOptionalBoolean } = require('../utils/activeStatus');
 
 
 
@@ -20,7 +21,6 @@ const shiftTemplateEntriesConfig = {
     'day_of_week',
     'week_of_cycle',
   ],
-  
 };
 
 const router = createCrudRouter(shiftTemplateEntriesConfig);
@@ -59,7 +59,25 @@ router.post('/copy-pattern', async (req, res) => {
       });
     }
 
-    const replaceFlag = replace === undefined ? true : !!replace;
+    const parsedReplace = parseOptionalBoolean(replace, 'replace');
+    const replaceFlag = parsedReplace === undefined ? true : parsedReplace;
+
+    const templateCheck = await pool.query(
+      `SELECT id, is_active
+       FROM shiftly_schema.shift_templates
+       WHERE id = $1`,
+      [template_id]
+    );
+
+    if (templateCheck.rows.length === 0) {
+      return res.status(404).json({ error: 'Shift template not found.' });
+    }
+
+    if (templateCheck.rows[0].is_active === false) {
+      return res.status(400).json({
+        error: 'Cannot copy entries from an inactive shift template.',
+      });
+    }
 
     const sql = `
       SELECT inserted_count, deleted_count
