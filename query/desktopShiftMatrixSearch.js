@@ -392,7 +392,7 @@ router.get('/excel', async (req, res) => {
     const { rows } = await pool.query(buildSearchSql(), buildSearchValues(params));
 
     const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'Shiftly';
+    workbook.creator = 'ShiftMix';
     workbook.created = new Date();
 
     const worksheet = workbook.addWorksheet(safeSheetName('Shift Matrix'));
@@ -558,7 +558,7 @@ router.get('/excel-matrix', async (req, res) => {
     const lines = buildMatrixLines(rows, params.groupBy);
 
     const workbook = new ExcelJS.Workbook();
-    workbook.creator = 'Shiftly';
+    workbook.creator = 'ShiftMix';
     workbook.created = new Date();
 
     const worksheet = workbook.addWorksheet(safeSheetName('Shift Matrix Layout'));

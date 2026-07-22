@@ -1947,7 +1947,7 @@ async function _dispatchByNotificationId(notificationId) {
     try {
       const resp = await sendToUsers({
         userIds: [n.recipient_user_id],
-        title: n.title || 'Shiftly',
+        title: n.title || 'ShiftMix',
         body: n.body || '',
         data,
       });

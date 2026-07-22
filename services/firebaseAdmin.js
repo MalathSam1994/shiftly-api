@@ -78,7 +78,7 @@ async function sendToUsers({ userIds, title, body, data }) {
     const resp = await admin.messaging().sendEachForMulticast({
       tokens: chunk,
       notification: {
-        title: String(title || 'Shiftly'),
+        title: String(title || 'ShiftMix'),
         body: String(body || ''),
       },
       data: dataStrings,

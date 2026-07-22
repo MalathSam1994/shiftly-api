@@ -20,25 +20,26 @@ async function _dispatchByNotificationId(notificationId) {
   // Keep transaction open while sending to avoid duplicates across concurrent notifies.
   await _client.query('BEGIN');
   try {
-    const { rows } = await _client.query(
-      `
-      SELECT
-        id,
-        recipient_user_id,
-        notification_type,
-        title,
-        body,
-        payload,
-        push_sent_at,
-        push_attempts,
-        u.is_active AS recipient_is_active
-      FROM shiftly_schema.notifications
-      JOIN shiftly_schema.users u ON u.id = recipient_user_id
-      WHERE id = $1
-      FOR UPDATE
-      `,
-      [notificationId],
-    );
+   const { rows } = await _client.query(
+  `
+  SELECT
+    n.id,
+    n.recipient_user_id,
+    n.notification_type,
+    n.title,
+    n.body,
+    n.payload,
+    n.push_sent_at,
+    n.push_attempts,
+    u.is_active AS recipient_is_active
+  FROM shiftly_schema.notifications AS n
+  JOIN shiftly_schema.users AS u
+    ON u.id = n.recipient_user_id
+  WHERE n.id = $1
+  FOR UPDATE OF n
+  `,
+  [notificationId],
+);
 
     const n = rows[0];
     if (!n) {
@@ -109,7 +110,7 @@ async function _dispatchByNotificationId(notificationId) {
      });
       const resp = await sendToUsers({
         userIds: [n.recipient_user_id],
-        title: n.title || 'Shiftly',
+        title: n.title || 'ShiftMix',
         body: n.body || '',
         data,
       });

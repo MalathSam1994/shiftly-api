@@ -1,6 +1,41 @@
 // services/mailer.js
 const nodemailer = require('nodemailer');
 
+
+
+const MAIL_LOGO_CID = 'shiftmix-logo';
+
+function getMailLogoPath() {
+  return (
+    process.env.MAIL_LOGO_PATH ||
+    '/opt/shiftly-api/img/idea2 transperant.png'
+  );
+}
+
+function getMailLogoAttachment() {
+  return {
+    filename: 'shiftmix-logo.png',
+    path: getMailLogoPath(),
+    cid: MAIL_LOGO_CID,
+    contentDisposition: 'inline',
+  };
+}
+
+function buildHtmlSignature(appName) {
+  return (
+    `<p style="margin-top:24px; margin-bottom:8px;">Regards,</p>` +
+    `<p style="margin-top:0; margin-bottom:10px;">` +
+    `${escapeHtml(appName)}` +
+    `</p>` +
+    `<img ` +
+    `src="cid:${MAIL_LOGO_CID}" ` +
+    `alt="${escapeHtml(appName)}" ` +
+    `width="160" ` +
+    `style="display:block; width:160px; max-width:100%; height:auto; border:0;"` +
+    `/>`
+  );
+}
+
 function assertEnv(name) {
   const v = process.env[name];
   if (!v || !String(v).trim()) {
@@ -24,7 +59,14 @@ function buildTransport() {
 }
 
 // Generic low-level sender (useful for tests and one-off emails)
-async function sendMail({ to, subject, text, html, from }) {
+async function sendMail({
+  to,
+  subject,
+  text,
+  html,
+  from,
+  attachments = [],
+}) {
   const transporter = buildTransport();
   const finalFrom = from || assertEnv('SMTP_FROM');
 
@@ -34,6 +76,7 @@ async function sendMail({ to, subject, text, html, from }) {
     subject,
     text,
     html,
+    attachments,
   });
 }
 
@@ -59,7 +102,7 @@ async function sendUserWelcomeEmail({ to, username, tempPassword }) {
     `<p><b>Username:</b> ${escapeHtml(username)}<br/>` +
     `<b>Temporary password:</b> ${escapeHtml(tempPassword)}</p>` +
     `<p><b>For security reasons, you will be required to change your password on first login.</b></p>` +
-    `<p>Regards,<br/>${escapeHtml(appName)}</p>`;
+    buildHtmlSignature(appName);
 
   await transporter.sendMail({
     from,
@@ -67,6 +110,7 @@ async function sendUserWelcomeEmail({ to, username, tempPassword }) {
     subject,
     text,
     html,
+    attachments: [getMailLogoAttachment()],
   });
 }
 
@@ -90,8 +134,8 @@ async function sendResetPasswordEmail({ to, username, tempPassword }) {
     `<p>A password reset was requested for your <b>${appName}</b> account.</p>` +
     `<p><b>Username:</b> ${escapeHtml(username)}<br/>` +
     `<b>Temporary password:</b> ${escapeHtml(tempPassword)}</p>` +
-    `<p><b>You will be required to change your password immediately after login.</b></p>` +
-    `<p>Regards,<br/>${escapeHtml(appName)}</p>`;
+   `<p><b>You will be required to change your password immediately after login.</b></p>` +
+   buildHtmlSignature(appName);
 
   await transporter.sendMail({
     from,
@@ -99,6 +143,7 @@ async function sendResetPasswordEmail({ to, username, tempPassword }) {
     subject,
     text,
     html,
+    attachments: [getMailLogoAttachment()],
   });
 }
 
