@@ -25,7 +25,10 @@ router.post('/login', async (req, res) => {
 if (!usernameNorm || !password) {
     return res
       .status(400)
-      .json({ error: 'Username and password are required.' });
+     .json({
+       error: 'Username and password are required.',
+       code: 'LOGIN_FIELDS_REQUIRED',
+     });
   }
 
   try {
@@ -46,13 +49,19 @@ if (!usernameNorm || !password) {
    const result = await pool.query(query, [usernameNorm]);
 
     if (result.rows.length === 0) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
+      return res.status(401).json({
+        error: 'Invalid credentials.',
+        code: 'INVALID_CREDENTIALS',
+      });
     }
 
     const user = result.rows[0];
 
     if (user.is_active !== true) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
+      return res.status(401).json({
+        error: 'Invalid credentials.',
+        code: 'INVALID_CREDENTIALS',
+      });
     }
 
     const passwordMatches = await bcrypt.compare(
@@ -61,7 +70,10 @@ if (!usernameNorm || !password) {
     );
 
     if (!passwordMatches) {
-      return res.status(401).json({ error: 'Invalid credentials.' });
+      return res.status(401).json({
+        error: 'Invalid credentials.',
+        code: 'INVALID_CREDENTIALS',
+      });
     }
 
          // ✅ Enforce "single active session" per user:
@@ -84,14 +96,17 @@ if (!usernameNorm || !password) {
     // Issue JWT
     if (!process.env.JWT_SECRET) {
       console.error('JWT_SECRET is missing in env');
-      return res.status(500).json({ error: 'Server misconfiguration' });
+      return res.status(500).json({
+        error: 'Unable to sign in right now.',
+        code: 'AUTH_SERVER_MISCONFIGURED',
+      });
     }
 
     const token = jwt.sign(
       {
         sub: safeUser.id,
         role_id: safeUser.role_id ?? null,
-         sv: sessionVersion, // session version claim
+        sv: sessionVersion,
       },
       process.env.JWT_SECRET,
       { expiresIn: process.env.JWT_EXPIRES_IN || '12h' },
@@ -100,7 +115,10 @@ if (!usernameNorm || !password) {
     return res.json({ ...safeUser, token });
   } catch (err) {
     console.error('Error during login:', err);
-    return res.status(500).json({ error: 'Database error' });
+    return res.status(500).json({
+      error: 'Unable to sign in right now.',
+      code: 'LOGIN_SERVER_ERROR',
+    });
   }
 });
 
