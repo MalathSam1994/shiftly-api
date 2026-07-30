@@ -1,6 +1,8 @@
 // shiftRequests.js
 const express = require('express');
 const pool = require('../db');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const router = express.Router();
 
@@ -20,41 +22,6 @@ function normalizeShiftRequestRows(rows) {
   if (!Array.isArray(rows)) return rows;
   return rows.map(normalizeShiftRequestRow);
 }
-
- function pgErrorToHttpStatus(err) {
-   const code = String(err?.code ?? '');
-   if (code === 'P0002') return 404;   // no_data_found (custom raise)
-   if (code === '28000') return 403;   // invalid authorization specification
- 
-   // Treat common SQLSTATE classes as client errors (validation/business rules)
-   // 22xxx = data exception (includes 22023 invalid_parameter_value)
-   // 23xxx = integrity constraint violation
-   if (/^(22|23)/.test(code)) return 400;
- 
-   // You can extend here if you use specific custom SQLSTATEs.
-   return 500;
- }
- 
- function sendDbError(res, err, context, httpStatus = 500) {
-  // Return rich PG error details so the Flutter client shows the REAL reason
-  // (your ShiftRequestRepository already parses: message/detail/code/constraint/table/column).
-  const payload = {
-    error: 'Database error',
-    context: context || undefined,
-    message: err?.message,
-    code: err?.code,
-    detail: err?.detail,
-    constraint: err?.constraint,
-    table: err?.table,
-    column: err?.column,
-    schema: err?.schema,
-    routine: err?.routine,
-    where: err?.where,
-  };
-  Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
- return res.status(httpStatus).json(payload);
-}
-
 
 // Small helper: normalize client input for absence types
 function normalizeAbsenceType(code) {
@@ -84,8 +51,10 @@ router.get('/', async (req, res) => {
       (requestedByUserId != null && String(requestedByUserId).trim() !== '');
 
     if (!hasAnyFilter) {
-      return res.status(400).json({
-        error: 'At least one of inboxUserId, managerUserId, requestedByUserId is required.',
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Choose a workflow inbox or requester before loading requests.',
+        code: 'INVALID_REQUEST',
       });
     }
 
@@ -120,7 +89,11 @@ router.get('/', async (req, res) => {
       // Only show items where THIS user is the current approver.
       const actorId = parseInt(String(inboxUserId), 10);
 	      if (Number.isNaN(actorId)) {
-        return res.status(400).json({ error: 'Invalid inboxUserId' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'The inbox user is invalid.',
+          code: 'INVALID_REQUEST',
+        });
       }
       values.push(actorId);
       const index = values.length;
@@ -130,7 +103,11 @@ router.get('/', async (req, res) => {
       // IMPORTANT: Do NOT leak SWITCH/OFFER/etc to manager unless inbox_user_id == manager.
       const actorId = parseInt(String(managerUserId), 10);
 	      if (Number.isNaN(actorId)) {
-       return res.status(400).json({ error: 'Invalid managerUserId' });
+       return sendApiError(req, res, {
+         status: 400,
+         error: 'The manager user is invalid.',
+         code: 'INVALID_REQUEST',
+       });
      }
       values.push(actorId);
       const index = values.length;
@@ -164,8 +141,10 @@ router.get('/', async (req, res) => {
 	
     // ✅ extra hard safety: never allow returning everything
     if (whereClauses.length === 0) {
-      return res.status(400).json({
-        error: 'No valid filters applied (would return everything).',
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Choose a workflow inbox or requester before loading requests.',
+        code: 'INVALID_REQUEST',
       });
     }
 
@@ -185,8 +164,10 @@ router.get('/', async (req, res) => {
     const result = await pool.query(query, values);
     res.json(normalizeShiftRequestRows(result.rows));
   } catch (err) {
-    console.error('Error querying DB (SHIFT REQUESTS LIST):', err);
-     return sendDbError(res, err, 'SHIFT REQUESTS LIST', pgErrorToHttpStatus(err));
+    return sendPostgresError(req, res, err, {
+      action: 'LIST',
+      label: 'Error querying DB (SHIFT REQUESTS LIST)',
+    });
   }
 });
 
@@ -212,7 +193,11 @@ router.delete('/:id', async (req, res) => {
     const { id } = req.params;
     const requestId = parseInt(String(id), 10);
     if (Number.isNaN(requestId)) {
-      return res.status(400).json({ error: 'Invalid request id' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The request id is invalid.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     const actorRaw =
@@ -224,7 +209,11 @@ router.delete('/:id', async (req, res) => {
 
     const actorUserId = parseInt(String(actorRaw ?? ''), 10);
     if (Number.isNaN(actorUserId)) {
-      return res.status(400).json({ error: 'actorUserId is required.' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The acting user is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     // Call stored function (single statement; DB handles locking/validation)
@@ -234,9 +223,10 @@ router.delete('/:id', async (req, res) => {
     );
     return res.json(result.rows[0].payload);
   } catch (err) {
-    console.error('Error retracting shift request:', err);
-   const http = pgErrorToHttpStatus(err);
- return sendDbError(res, err, 'RETRACT SHIFT REQUEST', http);
+    return sendPostgresError(req, res, err, {
+      action: 'DELETE',
+      label: 'Error retracting shift request',
+    });
   }
 });
 
@@ -281,9 +271,10 @@ router.post('/', async (req, res) => {
     return res.status(201).json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
 
-    console.error('Error inserting into DB (SHIFT REQUESTS CREATE):', err);
-      const http = pgErrorToHttpStatus(err);
-  return sendDbError(res, err, 'SHIFT REQUESTS CREATE', http);
+    return sendPostgresError(req, res, err, {
+      action: 'CREATE',
+      label: 'Error inserting into DB (SHIFT REQUESTS CREATE)',
+    });
   }
 });
 
@@ -299,20 +290,21 @@ router.post('/:id/approve', async (req, res) => {
    try {
     const rid = parseInt(String(req.params.id), 10);
     if (Number.isNaN(rid)) {
-      return res.status(400).json({ error: 'Invalid request id' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The request id is invalid.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     const { decision_by_user_id, decision_comment } = req.body ?? {};
     if (!decision_by_user_id) {
-      return res.status(400).json({
-        error: 'decision_by_user_id is required to approve a request.',
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The decision user is required to approve a request.',
+        code: 'INVALID_REQUEST',
       });
     }
-
-    const who = await pool.query(
-  `select current_database(), current_user, inet_server_addr(), inet_server_port()`
-);
-console.log('DB INFO', who.rows[0]);
 
     // Thin wrapper around DB function
     const result = await pool.query(
@@ -321,9 +313,10 @@ console.log('DB INFO', who.rows[0]);
     );
      return res.json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
-    console.error('Error approving shift request:', err);
-    const http = pgErrorToHttpStatus(err);
-    return sendDbError(res, err, 'APPROVE SHIFT REQUEST', http);
+    return sendPostgresError(req, res, err, {
+      action: 'APPROVE',
+      label: 'Error approving shift request',
+    });
   }
 });
 
@@ -348,7 +341,11 @@ router.post('/:id/attach-assignment', async (req, res) => {
     const { shift_assignment_id } = req.body;
 
     if (shift_assignment_id == null) {
-      return res.status(400).json({ error: 'shift_assignment_id is required' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A shift assignment is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     client = await pool.connect();
@@ -365,14 +362,22 @@ router.post('/:id/attach-assignment', async (req, res) => {
     );
     if (!reqRes.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Not found' });
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'The requested record could not be found.',
+        code: 'RESOURCE_NOT_FOUND',
+      });
     }
     const r = reqRes.rows[0];
 
     // Optional safety: attach only after approval (prevents history for unapproved requests)
     if (String(r.request_status).toUpperCase() !== 'APPROVED') {
       await client.query('ROLLBACK');
-      return res.status(400).json({ error: 'Cannot attach assignment unless request is APPROVED.' });
+      return sendApiError(req, res, {
+        status: 422,
+        error: 'The assignment can only be attached after the request is approved.',
+        code: 'INVALID_OPERATION',
+      });
     }
 
     // Lock assignment row
@@ -385,7 +390,11 @@ router.post('/:id/attach-assignment', async (req, res) => {
     );
     if (!asgRes.rows.length) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'shift_assignment_id not found' });
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'The shift assignment could not be found.',
+        code: 'RESOURCE_NOT_FOUND',
+      });
     }
     const a = asgRes.rows[0];
 
@@ -480,8 +489,10 @@ router.post('/:id/attach-assignment', async (req, res) => {
     if (client) {
       try { await client.query('ROLLBACK'); } catch (_) {}
     }
-    console.error('Error attaching assignment to shift request:', err);
-    return sendDbError(res, err, 'ATTACH ASSIGNMENT', pgErrorToHttpStatus(err));
+    return sendPostgresError(req, res, err, {
+      action: 'UPDATE',
+      label: 'Error attaching assignment to shift request',
+    });
   } finally {
     if (client) client.release();
   }
@@ -502,13 +513,19 @@ router.post('/:id/reject', async (req, res) => {
     try {
     const rid = parseInt(String(req.params.id), 10);
     if (Number.isNaN(rid)) {
-      return res.status(400).json({ error: 'Invalid request id' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The request id is invalid.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     const { decision_by_user_id, decision_comment } = req.body ?? {};
     if (!decision_by_user_id) {
-      return res.status(400).json({
-        error: 'decision_by_user_id is required to reject a request.',
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The decision user is required to reject a request.',
+        code: 'INVALID_REQUEST',
       });
     }
 
@@ -518,9 +535,10 @@ router.post('/:id/reject', async (req, res) => {
     );
     return res.json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
-    console.error('Error rejecting shift request:', err);
-   const http = pgErrorToHttpStatus(err);
-    return sendDbError(res, err, 'REJECT SHIFT REQUEST', http);
+    return sendPostgresError(req, res, err, {
+      action: 'REJECT',
+      label: 'Error rejecting shift request',
+    });
   }
 });
 

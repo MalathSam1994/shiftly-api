@@ -2,6 +2,8 @@
 const express = require('express');
 const pool = require('../db');
 const createCrudRouter = require('../createCrudRouter');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 
 
@@ -170,11 +172,9 @@ const shiftPeriodsConfig = {
       return res.json(result.rows);
     } catch (err) {
       console.error('Error listing shift periods:', err);
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'LIST',
+        label: 'Error listing shift periods',
       });
     }
   },
@@ -201,52 +201,58 @@ const shiftPeriodsConfig = {
 
       // If either date is present but invalid, return a clean 400.
       if (body.start_date !== undefined && start == null) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'The request contains invalid fields.',
           details: 'Invalid start_date. Expected an ISO date like YYYY-MM-DD.',
-          code: 'P0001',
+          code: 'INVALID_REQUEST',
         });
       }
       if (body.end_date !== undefined && end == null) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'The request contains invalid fields.',
           details: 'Invalid end_date. Expected an ISO date like YYYY-MM-DD.',
-          code: 'P0001',
+          code: 'INVALID_REQUEST',
         });
       }
 
       // Only validate when dates are provided (they should be for CREATE).
       if (start != null && start < today) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 422,
+          error: 'The request could not be completed.',
           details: 'Start date cannot be in the past.',
-          code: 'P0001',
+          code: 'INVALID_OPERATION',
         });
       }
       if (end != null && end < today) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 422,
+          error: 'The request could not be completed.',
           details: 'End date cannot be in the past.',
-          code: 'P0001',
+          code: 'INVALID_OPERATION',
         });
       }
 
       const validationError = await validatePeriodOrgAndRange(pool, body);
       if (validationError) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 422,
+          error: 'The request could not be completed.',
           details: validationError,
-          code: 'P0001',
+          code: 'INVALID_OPERATION',
         });
       }
 
       // Only allow configured columns that were provided
       const cols = config.columns.filter((c) => body[c] !== undefined);
       if (!cols.length) {
-        return res.status(400).json({
+        return sendApiError(req, res, {
+          status: 400,
           error: 'Invalid payload',
           details: 'No valid columns were provided.',
-          code: 'P0001',
+          code: 'INVALID_REQUEST',
         });
       }
 
@@ -273,13 +279,9 @@ const shiftPeriodsConfig = {
       if (mapped) {
         return res.status(mapped.http).json(mapped.body);
       }
-      const isBusiness = err && err.code === 'P0001';
-      return res.status(isBusiness ? 400 : 500).json({
-        error: isBusiness ? 'Business rule violation' : 'Database error',
-        details: err.message,
-        code: err.code,
-        constraint: err.constraint,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'CREATE',
+        label: 'Error creating shift period',
       });
     }
   },
@@ -321,19 +323,21 @@ const shiftPeriodsConfig = {
         current: currentResult.rows[0],
       });
       if (validationError) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 422,
+          error: 'The request could not be completed.',
           details: validationError,
-          code: 'P0001',
+          code: 'INVALID_OPERATION',
         });
       }
 
       const cols = config.columns.filter((c) => body[c] !== undefined);
       if (!cols.length) {
-        return res.status(400).json({
+        return sendApiError(req, res, {
+          status: 400,
           error: 'Invalid payload',
           details: 'No valid columns were provided.',
-          code: 'P0001',
+          code: 'INVALID_REQUEST',
         });
       }
 
@@ -364,13 +368,9 @@ const shiftPeriodsConfig = {
       if (mapped) {
         return res.status(mapped.http).json(mapped.body);
       }
-      const isBusiness = err && err.code === 'P0001';
-      return res.status(isBusiness ? 400 : 500).json({
-        error: isBusiness ? 'Business rule violation' : 'Database error',
-        details: err.message,
-        code: err.code,
-        constraint: err.constraint,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'UPDATE',
+        label: 'Error updating shift period',
       });
     }
   },
@@ -393,10 +393,11 @@ const shiftPeriodsConfig = {
       }
       const status = (meta.rows[0].status || '').toString().trim();
       if (status === 'APPROVED') {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 409,
+          error: 'The request could not be completed.',
+          code: 'INVALID_OPERATION',
           details: 'Cannot delete an APPROVED period.',
-          code: 'P0001',
         });
       }
 
@@ -425,12 +426,9 @@ const shiftPeriodsConfig = {
       return res.json({ deleted: result.rows[0] });
     } catch (err) {
       console.error('Error deleting period:', err);
-      const isBusiness = err && err.code === 'P0001';
-      return res.status(isBusiness ? 400 : 500).json({
-        error: isBusiness ? 'Business rule violation' : 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'DELETE',
+        label: 'Error deleting shift period',
       });
     }
   },
@@ -456,14 +454,13 @@ function mapShiftPeriodsDbError(err, payload) {
         : 'A shift period with the same key already exists.';
 
     return {
-      http: 400,
+      http: 409,
       body: {
-        error: 'Business rule violation',
+        error: 'The shift period conflicts with an existing period.',
         details: friendly,
-        code: err.code,
-        constraint: err.constraint,
-        // keep the technical hint for troubleshooting without exposing a full stack
-        db_detail: err.detail,
+        code: err.code === '23P01'
+          ? 'SHIFT_PERIOD_OVERLAP'
+          : 'DUPLICATE_RECORD',
       },
     };
   }
@@ -472,16 +469,14 @@ function mapShiftPeriodsDbError(err, payload) {
   if (err && err.code === '23514') {
     const msg = (err.constraint || err.message || '').toString();
     return {
-      http: 400,
+      http: 422,
       body: {
-        error: 'Business rule violation',
+        error: 'The request did not pass validation.',
         details:
           msg.includes('shift_periods_monthly_dates_check')
             ? 'For MONTHLY periods: start_date must be the 1st day of the month, and end_date must be the last day of the same month.'
             : 'A validation rule was violated while creating/updating the period.',
-        code: err.code,
-        constraint: err.constraint,
-        db_detail: err.detail,
+        code: 'VALIDATION_FAILED',
       },
     };
   }
@@ -542,12 +537,11 @@ function buildBusinessError(err, fallbackMessage) {
   const normalized = normalizeValidationErrors(parsedDetail);
 
   return {
-    http: 400,
+    http: 422,
     body: {
-      error: 'Business rule violation',
-      details: (err && err.message) ? err.message : (fallbackMessage || 'Business rule violation.'),
-      code: (err && err.code) ? err.code : 'P0001',
-      routine: err && err.routine,
+      error: 'The request could not be completed.',
+      details: fallbackMessage || 'Business rule violation.',
+      code: 'VALIDATION_FAILED',
       // IMPORTANT:
       // If the DB raised DETAIL as JSON (e.g. validation errors array),
       // expose it as structured data so the UI can show real details.
@@ -556,8 +550,6 @@ function buildBusinessError(err, fallbackMessage) {
        (normalized.errors.length || normalized.warnings.length)
          ? normalized
          : undefined,
-      // Keep the raw detail too (helps troubleshooting when JSON parsing fails)
-      db_detail: err && err.detail,
     },
   };
 }
@@ -616,16 +608,12 @@ router.post('/:id/generate-from-template', async (req, res) => {
  `SELECT shiftly_api.generate_assignments_from_template($1) AS result`,
  [periodId],
  );
- return res.json(result.rows[0].result);
- } catch (err) {
-      console.error('Error generating assignments from template:', err);
-    // Stored function throws a controlled exception (ERRCODE P0001) for known business errors.
-    const isBusiness = err && err.code === 'P0001';
-    return res.status(isBusiness ? 400 : 500).json({
-      error: isBusiness ? 'Business rule violation' : 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+  return res.json(result.rows[0].result);
+  } catch (err) {
+       console.error('Error generating assignments from template:', err);
+    return sendPostgresError(req, res, err, {
+      action: 'CREATE',
+      label: 'Error generating assignments from template',
     });
   }
 });
@@ -673,10 +661,11 @@ router.post('/:id/approve', async (req, res) => {
       },
     ];
 
-    return res.status(400).json({
-      error: 'Business rule violation',
+    return sendApiError(req, res, {
+      status: 422,
+      error: 'The request could not be completed.',
       details: 'DEBUG: synthetic coverage validation payload (warnings + errors).',
-      code: 'P0001',
+      code: 'VALIDATION_FAILED',
       validation_errors: { errors, warnings },
       // keep top-level too (Flutter parser supports both)
       errors,
@@ -710,11 +699,9 @@ router.post('/:id/approve', async (req, res) => {
        return res.status(built.http).json(built.body);
      }
 
-     return res.status(500).json({
-       error: 'Database error',
-       details: err.message,
-       code: err.code,
-       routine: err.routine,
+     return sendPostgresError(req, res, err, {
+       action: 'UPDATE',
+       label: 'Error approving period',
      });
  
 
@@ -754,11 +741,9 @@ router.get('/:id/validate-approval', async (req, res) => {
       const built = buildBusinessError(err, 'Coverage validation failed.');
       return res.status(built.http).json(built.body);
     }
-    return res.status(500).json({
-      error: 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'GET',
+      label: 'Error validating period coverage',
     });
   }
 });

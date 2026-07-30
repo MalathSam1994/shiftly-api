@@ -1,5 +1,7 @@
 const express = require('express');
 const pool = require('../db');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const router = express.Router();
 
@@ -46,9 +48,11 @@ router.get('/', async (req, res) => {
     const hasShift = shiftRaw != null && `${shiftRaw}`.trim() !== '';
 
     if (!hasDep || !hasStaff || !hasShift) {
-      return res.status(400).json({
+      return sendApiError(req, res, {
+        status: 400,
         error:
-          'Missing/invalid query params. Required: department_id, staff_type_id, shift_type_id. Optional: division_id',
+          'Department, staff type, and shift type are required.',
+        code: 'INVALID_REQUEST',
       });
     }
 
@@ -64,9 +68,11 @@ router.get('/', async (req, res) => {
       !Number.isInteger(shiftTypeId) ||
       (divisionId != null && !Number.isInteger(divisionId))
     ) {
-      return res.status(400).json({
+      return sendApiError(req, res, {
+        status: 400,
         error:
-          'Missing/invalid query params. Required: department_id, staff_type_id, shift_type_id. Optional: division_id',
+          'Department, staff type, and shift type must be valid numbers.',
+        code: 'INVALID_REQUEST',
       });
     }
 
@@ -104,13 +110,9 @@ router.get('/', async (req, res) => {
 
     return res.json(row);
   } catch (err) {
-    console.error(`[${req.rid}] Error querying DB (RULE LOOKUP):`, err);
-    // Include a little more detail to help the client show meaningful info.
-    // (If you consider this too verbose for prod, guard it behind an env flag.)
-    return res.status(500).json({
-      error: 'Database error',
-      details: err?.message ? String(err.message) : String(err),
-      rid: req.rid,
+    return sendPostgresError(req, res, err, {
+      action: 'LIST',
+      label: 'Error querying DB (RULE LOOKUP)',
     });
   }
 });

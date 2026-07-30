@@ -1,5 +1,6 @@
 // routes/staffTypes.js
 const createCrudRouter = require('../createCrudRouter');
+const { mapPostgresError } = require('../utils/postgresErrorMapper');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -51,19 +52,14 @@ function buildBusinessError(err, fallbackMessage) {
     http: 400,
     body: {
       error: 'Business rule violation',
-      details:
-        (err && err.message)
-          ? err.message
-          : (fallbackMessage || 'Business rule violation.'),
-      code: (err && err.code) ? err.code : 'P0001',
-      routine: err && err.routine,
+      details: fallbackMessage || 'Business rule violation.',
+      code: 'BUSINESS_RULE_VIOLATION',
       validation_errors:
         (normalized.errors.length || normalized.warnings.length)
           ? normalized
           : undefined,
       errors: normalized.errors,
       warnings: normalized.warnings,
-      db_detail: err && err.detail,
     },
   };
 }
@@ -105,11 +101,11 @@ async function validateStaffTypeChange(pool, staffTypeId, action) {
 function buildValidationResponse(validationResult, action) {
   const actionLower = String(action || 'UPDATE').toLowerCase();
   return {
-    http: 400,
+    http: 409,
     body: {
-      error: 'Business rule violation',
+      error: 'The record cannot be changed because it is referenced.',
       details: `Staff type cannot be ${actionLower}d because it is already linked.`,
-      code: 'P0001',
+      code: 'RECORD_IN_USE',
       validation_errors: {
         errors: Array.isArray(validationResult?.errors)
           ? validationResult.errors
@@ -137,36 +133,38 @@ function buildForeignKeyViolationResponse(err, action) {
   const actionLower = String(action || 'UPDATE').toLowerCase();
 
   return {
-    http: 400,
+    http: 409,
     body: {
-      error: 'Business rule violation',
+      error: 'The record cannot be changed because it is referenced.',
       details: `Staff type cannot be ${actionLower}d because it is already linked.`,
-      code: 'P0001',
+      code: 'RECORD_IN_USE',
       validation_errors: {
         errors: [
           {
             code: 'STAFF_TYPE_LINKED',
             message: `Staff type cannot be ${actionLower}d because this staff type is already linked in ${linkedEntity}.`,
-            linked_table: err.table,
             linked_entity: linkedEntity,
-            constraint: err.constraint,
           },
         ],
         warnings: [],
       },
       errors: [
-        {
-          code: 'STAFF_TYPE_LINKED',
-          message: `Staff type cannot be ${actionLower}d because this staff type is already linked in ${linkedEntity}.`,
-          linked_table: err.table,
-          linked_entity: linkedEntity,
-          constraint: err.constraint,
-        },
-      ],
+          {
+            code: 'STAFF_TYPE_LINKED',
+            message: `Staff type cannot be ${actionLower}d because this staff type is already linked in ${linkedEntity}.`,
+            linked_entity: linkedEntity,
+          },
+        ],
       warnings: [],
-      db_detail: err.detail,
     },
   };
+}
+
+function buildMappedError(err, action) {
+  const mapped = mapPostgresError(err, { action });
+  if (!mapped) return null;
+  const { status, ...body } = mapped;
+  return { http: status, body };
 }
 
 const staffTypesConfig = {
@@ -214,21 +212,10 @@ const staffTypesConfig = {
 
     const isBusiness = err && err.code === 'P0001';
     if (isBusiness) {
-      return buildBusinessError(
-        err,
-        `Staff type cannot be ${String(action || 'UPDATE').toLowerCase()}d because it is already linked.`,
-      );
+      return buildMappedError(err, action);
     }
 
-    return {
-      http: 500,
-      body: {
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
-      },
-    };
+    return null;
   },
 };
 

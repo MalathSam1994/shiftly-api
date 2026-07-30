@@ -3,6 +3,8 @@ const express = require('express');
 const pool = require('../db');
 const createCrudRouter = require('../createCrudRouter');
 const { parseOptionalBoolean } = require('../utils/activeStatus');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 
 
@@ -53,9 +55,12 @@ router.post('/copy-pattern', async (req, res) => {
       dst_day_of_week == null ||
       dst_week_of_cycle == null
     ) {
-      return res.status(400).json({
-        error:
-          'Missing required fields: template_id, src_day_of_week, src_week_of_cycle, dst_day_of_week, dst_week_of_cycle',
+      return sendApiError(req, res, {
+        status: 400,
+        code: 'VALIDATION_FAILED',
+        error: 'Required shift template copy fields are missing.',
+        details:
+          'Provide template_id, src_day_of_week, src_week_of_cycle, dst_day_of_week, and dst_week_of_cycle.',
       });
     }
 
@@ -70,11 +75,17 @@ router.post('/copy-pattern', async (req, res) => {
     );
 
     if (templateCheck.rows.length === 0) {
-      return res.status(404).json({ error: 'Shift template not found.' });
+      return sendApiError(req, res, {
+        status: 404,
+        code: 'RESOURCE_NOT_FOUND',
+        error: 'Shift template not found.',
+      });
     }
 
     if (templateCheck.rows[0].is_active === false) {
-      return res.status(400).json({
+      return sendApiError(req, res, {
+        status: 422,
+        code: 'INACTIVE_REFERENCE',
         error: 'Cannot copy entries from an inactive shift template.',
       });
     }
@@ -95,8 +106,9 @@ router.post('/copy-pattern', async (req, res) => {
 
     return res.status(200).json(r.rows[0] || { inserted_count: 0, deleted_count: 0 });
   } catch (e) {
-    console.error('copy-pattern failed:', e);
-    return res.status(500).json({ error: String(e.message || e) });
+    return sendPostgresError(req, res, e, {
+      operation: 'copy shift template day pattern',
+    });
   }
 });
 

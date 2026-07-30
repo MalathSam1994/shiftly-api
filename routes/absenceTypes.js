@@ -5,6 +5,8 @@ const {
   parseOptionalBoolean,
   sendActiveStatusError,
 } = require('../utils/activeStatus');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -56,19 +58,14 @@ function buildBusinessError(err, fallbackMessage) {
     http: 400,
     body: {
       error: 'Business rule violation',
-      details:
-        (err && err.message)
-          ? err.message
-          : (fallbackMessage || 'Business rule violation.'),
-      code: (err && err.code) ? err.code : 'P0001',
-      routine: err && err.routine,
+      details: fallbackMessage || 'Business rule violation.',
+      code: 'BUSINESS_RULE_VIOLATION',
       validation_errors:
         (normalized.errors.length || normalized.warnings.length)
           ? normalized
           : undefined,
       errors: normalized.errors,
       warnings: normalized.warnings,
-      db_detail: err && err.detail,
     },
   };
 }
@@ -119,10 +116,11 @@ const absenceTypesConfig = {
           : true;
 
       if (!ok) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 409,
+          error: 'The record cannot be deleted because it is referenced.',
+          code: 'RECORD_IN_USE',
           details: 'Absence type cannot be deleted because it is already linked.',
-          code: 'P0001',
           validation_errors: {
             errors: Array.isArray(validationResult?.errors)
               ? validationResult.errors
@@ -159,18 +157,15 @@ const absenceTypesConfig = {
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {
-        const built = buildBusinessError(
-          err,
-          'Absence type cannot be deleted because it is already linked.',
-        );
-        return res.status(built.http).json(built.body);
+        return sendPostgresError(req, res, err, {
+          action: 'DELETE',
+          label: 'Error deleting absence type',
+        });
       }
 
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'DELETE',
+        label: 'Error deleting absence type',
       });
     }
   },
@@ -194,11 +189,12 @@ const absenceTypesConfig = {
           : true;
 
       if (!ok) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 409,
+          error: 'The record cannot be changed because it is referenced.',
+          code: 'RECORD_IN_USE',
           details:
             'Absence type cannot be updated because the derived code change would affect linked data.',
-          code: 'P0001',
           validation_errors: {
             errors: Array.isArray(validationResult?.errors)
               ? validationResult.errors
@@ -259,18 +255,15 @@ const absenceTypesConfig = {
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {
-        const built = buildBusinessError(
-          err,
-          'Absence type cannot be updated because the derived code change would affect linked data.',
-        );
-        return res.status(built.http).json(built.body);
+        return sendPostgresError(req, res, err, {
+          action: 'UPDATE',
+          label: 'Error updating absence type',
+        });
       }
 
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'UPDATE',
+        label: 'Error updating absence type',
       });
     }
   },

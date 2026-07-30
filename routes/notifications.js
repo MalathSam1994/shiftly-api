@@ -3,6 +3,8 @@ const router = express.Router();
 
 // Adjust these imports to your project structure:
 const pool = require('../db'); // <- your pg Pool export
+const { sendApiError, sendInternalError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 
 // GET /notifications?recipientUserId=1&unreadOnly=true
@@ -12,7 +14,11 @@ router.get('/', async (req, res) => {
     const unreadOnly = String(req.query.unreadOnly || 'false') === 'true';
 
     if (!recipientUserId) {
-      return res.status(400).json({ error: 'recipientUserId is required' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A recipient user is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     const params = [recipientUserId];
@@ -33,7 +39,10 @@ router.get('/', async (req, res) => {
     const { rows } = await pool.query(sql, params);
     res.json(rows);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return sendPostgresError(req, res, e, {
+      action: 'LIST',
+      label: 'Error loading notifications',
+    });
   }
 });
 
@@ -41,7 +50,13 @@ router.get('/', async (req, res) => {
 router.post('/:id/read', async (req, res) => {
   try {
     const id = Number(req.params.id);
-    if (!id) return res.status(400).json({ error: 'invalid id' });
+    if (!id) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The notification id is invalid.',
+        code: 'INVALID_REQUEST',
+      });
+    }
 
     const sql = `
       UPDATE shiftly_schema.notifications
@@ -52,7 +67,10 @@ router.post('/:id/read', async (req, res) => {
     const { rows } = await pool.query(sql, [id]);
     res.json(rows[0] || null);
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return sendPostgresError(req, res, e, {
+      action: 'UPDATE',
+      label: 'Error marking notification read',
+    });
   }
 });
 
@@ -61,7 +79,11 @@ router.post('/mark-all-read', async (req, res) => {
   try {
     const recipientUserId = Number(req.body.recipientUserId);
     if (!recipientUserId) {
-      return res.status(400).json({ error: 'recipientUserId is required' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A recipient user is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
     const sql = `
       UPDATE shiftly_schema.notifications
@@ -71,7 +93,10 @@ router.post('/mark-all-read', async (req, res) => {
     await pool.query(sql, [recipientUserId]);
     res.json({ ok: true });
   } catch (e) {
-    res.status(500).json({ error: e.message });
+    return sendPostgresError(req, res, e, {
+      action: 'UPDATE',
+      label: 'Error marking notifications read',
+    });
   }
 });
 
@@ -99,9 +124,19 @@ router.post('/push', async (req, res) => {
      payload,
    });
 
-    if (!title) return res.status(400).json({ error: 'title is required' });
+    if (!title) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A notification title is required.',
+        code: 'INVALID_REQUEST',
+      });
+    }
     if (!recipientUserId && !departmentId) {
-      return res.status(400).json({ error: 'recipientUserId or departmentId is required' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Choose a recipient user or department.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     let userIds = [];
@@ -150,8 +185,7 @@ router.post('/push', async (req, res) => {
     res.json({ ok: true, inserted: userIds.length });
 
   } catch (e) {
-     console.error('[NOTIFICATIONS PUSH] failed', e);
-    res.status(500).json({ error: e.message });
+     return sendInternalError(req, res, e, 'Notification push failed');
   }
 });
 

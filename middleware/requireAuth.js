@@ -1,10 +1,18 @@
 const jwt = require('jsonwebtoken');
 const pool = require('../db');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 async function requireAuth(req, res, next) {
   const h = req.headers.authorization || '';
   const m = h.match(/^Bearer\s+(.+)$/i);
-  if (!m) return res.status(401).json({ error: 'Missing Bearer token' });
+  if (!m) {
+    return sendApiError(req, res, {
+      status: 401,
+      error: 'Please sign in to continue.',
+      code: 'AUTH_TOKEN_MISSING',
+    });
+  }
 
   try {
     const payload = jwt.verify(m[1], process.env.JWT_SECRET);
@@ -13,7 +21,11 @@ async function requireAuth(req, res, next) {
    const userId = Number(payload?.sub);
    const tokenSv = Number(payload?.sv);
    if (!userId || !Number.isFinite(tokenSv)) {
-     return res.status(401).json({ error: 'Invalid or expired token' });
+     return sendApiError(req, res, {
+       status: 401,
+       error: 'Your session has expired. Please sign in again.',
+       code: 'AUTH_TOKEN_INVALID',
+     });
    }
    const db = await pool.query(
    `SELECT COALESCE(session_version, 0) AS session_version,
@@ -23,20 +35,41 @@ async function requireAuth(req, res, next) {
      [userId],
    );
    if (db.rows.length === 0) {
-     return res.status(401).json({ error: 'Invalid or expired token' });
+     return sendApiError(req, res, {
+       status: 401,
+       error: 'Your session has expired. Please sign in again.',
+       code: 'AUTH_TOKEN_INVALID',
+     });
    }
    const currentSv = Number(db.rows[0].session_version ?? 0);
    if (db.rows[0].is_active !== true) {
-     return res.status(401).json({ error: 'Invalid or expired token' });
+     return sendApiError(req, res, {
+       status: 401,
+       error: 'Your session has expired. Please sign in again.',
+       code: 'AUTH_TOKEN_INVALID',
+     });
    }
    if (tokenSv !== currentSv) {
      // Token belongs to an older session (user logged in elsewhere).
-     return res.status(401).json({ error: 'Session replaced by another login' });
+     return sendApiError(req, res, {
+       status: 401,
+       error: 'Your session was replaced by another sign-in.',
+       code: 'SESSION_REPLACED',
+     });
    }
 req.user = { ...payload, id: userId };// { sub, role_id, user_type, sv, ... }
    return next();
-  } catch (_) {
-    return res.status(401).json({ error: 'Invalid or expired token' });
+  } catch (err) {
+    if (err && (err.name === 'JsonWebTokenError' || err.name === 'TokenExpiredError')) {
+      return sendApiError(req, res, {
+        status: 401,
+        error: 'Your session has expired. Please sign in again.',
+        code: 'AUTH_TOKEN_INVALID',
+      });
+    }
+    return sendPostgresError(req, res, err, {
+      label: 'Authentication check failed',
+    });
   }
 }
 

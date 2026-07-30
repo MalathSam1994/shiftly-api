@@ -1,29 +1,12 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
 const pool = require('../db');
+const { sendInternalError } = require('../utils/apiError');
 
 const router = express.Router();
 
-function sendDbError(res, err, context) {
-  const payload = {
-    error: 'Database error',
-    context: context || undefined,
-    message: err?.message,
-    code: err?.code,
-    detail: err?.detail,
-    constraint: err?.constraint,
-    table: err?.table,
-    column: err?.column,
-    schema: err?.schema,
-    routine: err?.routine,
-    where: err?.where,
-  };
-
-  Object.keys(payload).forEach((key) => {
-    if (payload[key] == null) delete payload[key];
-  });
-
-  return res.status(500).json(payload);
+function sendDbError(req, res, err, context) {
+  return sendInternalError(req, res, err, context || 'Database error');
 }
 
 function asIntOrNull(value) {
@@ -542,7 +525,7 @@ router.get('/excel', async (req, res) => {
 
     return res.send(Buffer.from(buffer));
   } catch (err) {
-    return sendDbError(res, err, 'desktopShiftMatrixSearchExcel');
+    return sendDbError(req, res, err, 'desktopShiftMatrixSearchExcel');
   }
 });
 
@@ -795,7 +778,7 @@ router.get('/excel-matrix', async (req, res) => {
 
     return res.send(Buffer.from(buffer));
   } catch (err) {
-    return sendDbError(res, err, 'desktopShiftMatrixSearchExcelMatrix');
+    return sendDbError(req, res, err, 'desktopShiftMatrixSearchExcelMatrix');
   }
 });
 
@@ -811,7 +794,7 @@ router.get('/', async (req, res) => {
    const { rows } = await pool.query(buildSearchSql(), buildSearchValues(params));
     return res.json(rows);
   } catch (err) {
-    return sendDbError(res, err, 'desktopShiftMatrixSearch');
+    return sendDbError(req, res, err, 'desktopShiftMatrixSearch');
   }
 });
 

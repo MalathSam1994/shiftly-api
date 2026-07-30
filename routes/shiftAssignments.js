@@ -2,6 +2,8 @@
 const express = require('express');
 const createCrudRouter = require('../createCrudRouter');
 const pool = require('../db');
+const { sendApiError, sendInternalError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const EDIT_APPROVED_ASSIGNMENTS_PERMISSION =
   'action:shift_periods:edit_approved_assignments';
@@ -149,16 +151,32 @@ const shiftAssignmentsConfig = {
       const endTime = parseNullableTime(b.end_time ?? b.endTime ?? null);
 
       if (!Number.isFinite(shiftPeriodId) || !Number.isFinite(departmentId) || !Number.isFinite(userId) || !Number.isFinite(shiftTypeId)) {
-        return res.status(400).json({ error: 'Invalid numeric fields.' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'Required numeric fields are invalid.',
+          code: 'INVALID_REQUEST',
+        });
       }
       if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
-        return res.status(400).json({ error: 'Invalid shiftDate (expected YYYY-MM-DD).' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'A valid shift date is required.',
+          code: 'INVALID_REQUEST',
+        });
       }
       if (!status) {
-        return res.status(400).json({ error: 'status is required.' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'Status is required.',
+          code: 'INVALID_REQUEST',
+        });
       }
       if (startTime === undefined || endTime === undefined) {
-        return res.status(400).json({ error: 'Invalid time format (expected HH:MM or HH:MM:SS).' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'Use a valid time format.',
+          code: 'INVALID_REQUEST',
+        });
       }
 
       const scopeError = await validateAssignmentPeriodScope({
@@ -167,10 +185,11 @@ const shiftAssignmentsConfig = {
         departmentId,
       });
       if (scopeError) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 422,
+          error: 'The request could not be completed.',
           details: scopeError,
-          code: 'P0001',
+          code: 'DEPARTMENT_DIVISION_MISMATCH',
         });
       }
 
@@ -179,10 +198,12 @@ const shiftAssignmentsConfig = {
         shiftPeriodId,
       });
       if (approvedEditError) {
-        return res.status(403).json({
-          error: 'Forbidden',
+        return sendApiError(req, res, {
+          status: 403,
+          error: 'You do not have permission to perform this action.',
           details: approvedEditError,
-          permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION,
+          code: 'PERMISSION_DENIED',
+          extra: { permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION },
         });
       }
 
@@ -242,18 +263,19 @@ const shiftAssignmentsConfig = {
       );
 
       if (!result.rows || result.rows.length === 0) {
-        return res.status(500).json({ error: 'No row returned from create_shift_assignment.' });
+        return sendInternalError(
+          req,
+          res,
+          new Error('No row returned from create_shift_assignment.'),
+          'create_shift_assignment returned no row',
+        );
       }
 
       return res.status(201).json(result.rows[0]);
     } catch (err) {
-      console.error('Error creating assignment (DB function):', err);
-      const isBusiness = err && err.code === 'P0001';
-      return res.status(isBusiness ? 400 : 500).json({
-        error: isBusiness ? 'Business rule violation' : 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'CREATE',
+        label: 'Error creating assignment (DB function)',
       });
     }
   },
@@ -475,18 +497,19 @@ const shiftAssignmentsConfig = {
       );
 
       if (!result.rows || result.rows.length === 0) {
-        return res.status(500).json({ error: 'No row returned from update_shift_assignment.' });
+        return sendInternalError(
+          req,
+          res,
+          new Error('No row returned from update_shift_assignment.'),
+          'update_shift_assignment returned no row',
+        );
       }
 
       return res.json(result.rows[0]);
     } catch (err) {
-      console.error('Error updating assignment (DB function):', err);
-      const isBusiness = err && err.code === 'P0001';
-      return res.status(isBusiness ? 400 : 500).json({
-        error: isBusiness ? 'Business rule violation' : 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'UPDATE',
+        label: 'Error updating assignment (DB function)',
       });
     }
   },
@@ -512,10 +535,18 @@ router.get('/mobile-day-details', async (req, res) => {
 
     const userId = Number(rawUserId);
     if (!Number.isFinite(userId)) {
-      return res.status(400).json({ error: 'Invalid user_id.' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A valid user is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (!rawDate || !/^\d{4}-\d{2}-\d{2}$/.test(rawDate)) {
-      return res.status(400).json({ error: 'Invalid date (expected YYYY-MM-DD).' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A valid date is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     const result = await pool.query(
@@ -526,17 +557,18 @@ router.get('/mobile-day-details', async (req, res) => {
     );
 
     if (!result.rows || result.rows.length === 0) {
-      return res.status(404).json({ error: 'No payload returned.' });
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'No day details were found.',
+        code: 'RESOURCE_NOT_FOUND',
+      });
     }
 
     return res.json(result.rows[0].payload);
   } catch (err) {
-    console.error('Error loading mobile day details:', err);
-    return res.status(500).json({
-      error: 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'LIST',
+      label: 'Error loading mobile day details',
     });
   }
 });
@@ -576,7 +608,11 @@ router.delete('/:id/hard', async (req, res) => {
       [id],
     );
     if (!meta.rows || meta.rows.length === 0) {
-      return res.status(404).json({ error: 'Not found' });
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'The requested record could not be found.',
+        code: 'RESOURCE_NOT_FOUND',
+      });
     }
     const approvedEditError = await ensureApprovedPeriodAssignmentEditAllowed({
       req,
@@ -624,13 +660,9 @@ router.delete('/:id/hard', async (req, res) => {
 
     return res.json({ deleted: result.rows[0] });
   } catch (err) {
-    console.error('Error hard deleting assignment:', err);
-    const isBusiness = err && err.code === 'P0001';
-    return res.status(isBusiness ? 400 : 500).json({
-      error: isBusiness ? 'Business rule violation' : 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'DELETE',
+      label: 'Error hard deleting assignment',
     });
   }
 });
@@ -666,16 +698,32 @@ router.post('/create-smart', async (req, res) => {
 
 
     if (!Number.isFinite(shiftPeriodId) || !Number.isFinite(departmentId) || !Number.isFinite(userId) || !Number.isFinite(shiftTypeId)) {
-      return res.status(400).json({ error: 'Invalid numeric fields.' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Required numeric fields are invalid.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (!shiftDate || !/^\d{4}-\d{2}-\d{2}$/.test(shiftDate)) {
-      return res.status(400).json({ error: 'Invalid shiftDate (expected YYYY-MM-DD).' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A valid shift date is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (!status) {
-      return res.status(400).json({ error: 'status is required.' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Status is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (startTime === undefined || endTime === undefined) {
-      return res.status(400).json({ error: 'Invalid time format (expected HH:MM or HH:MM:SS).' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Use a valid time format.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     const scopeError = await validateAssignmentPeriodScope({
@@ -684,10 +732,11 @@ router.post('/create-smart', async (req, res) => {
       departmentId,
     });
     if (scopeError) {
-      return res.status(400).json({
-        error: 'Business rule violation',
+      return sendApiError(req, res, {
+        status: 422,
+        error: 'The request could not be completed.',
         details: scopeError,
-        code: 'P0001',
+        code: 'DEPARTMENT_DIVISION_MISMATCH',
       });
     }
 
@@ -696,10 +745,12 @@ router.post('/create-smart', async (req, res) => {
       shiftPeriodId,
     });
     if (approvedEditError) {
-      return res.status(403).json({
-        error: 'Forbidden',
+      return sendApiError(req, res, {
+        status: 403,
+        error: 'You do not have permission to perform this action.',
         details: approvedEditError,
-        permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION,
+        code: 'PERMISSION_DENIED',
+        extra: { permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION },
       });
     }
 
@@ -759,18 +810,19 @@ router.post('/create-smart', async (req, res) => {
     );
 
     if (!result.rows || result.rows.length === 0) {
-      return res.status(500).json({ error: 'No row returned from create_shift_assignment.' });
+      return sendInternalError(
+        req,
+        res,
+        new Error('No row returned from create_shift_assignment.'),
+        'create-smart returned no row',
+      );
     }
 
     return res.status(201).json(result.rows[0]);
   } catch (err) {
-    console.error('Error creating assignment (create-smart):', err);
-    const isBusiness = err && err.code === 'P0001';
-    return res.status(isBusiness ? 400 : 500).json({
-      error: isBusiness ? 'Business rule violation' : 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'CREATE',
+      label: 'Error creating assignment (create-smart)',
     });
   }
 });

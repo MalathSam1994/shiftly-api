@@ -48,7 +48,7 @@ class LicenseLimitError extends Error {
 
     this.name = 'LicenseLimitError';
     this.code = 'LICENSE_LIMIT_EXCEEDED';
-    this.http = 400;
+    this.http = 429;
     this.moduleKey = moduleKey;
 
     // Keep these for backend logs/debugging only.
@@ -97,13 +97,13 @@ function isLicenseLimitError(err) {
 
 function buildLicenseLimitResponse(err) {
   return {
-    http: err.http || 400,
+    http: err.http || 429,
     body: {
       error: 'Business rule violation',
       details:
         err.message ||
         'License limit reached. Please contact the administrator.',
-      code: err.code || 'LICENSE_LIMIT_EXCEEDED',
+      code: 'LICENSE_LIMIT_EXCEEDED',
       module: err.moduleKey,
     },
   };

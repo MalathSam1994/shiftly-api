@@ -12,6 +12,8 @@ const {
   parseOptionalBoolean,
   sendActiveStatusError,
 } = require('../utils/activeStatus');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const router = express.Router();
 
@@ -19,7 +21,13 @@ const router = express.Router();
 router.get('/', async (req, res) => {
   try {
     const userId = Number(req.user?.sub ?? req.user?.id);
-    if (!userId) return res.status(401).json({ error: 'Unauthorized' });
+    if (!userId) {
+      return sendApiError(req, res, {
+        status: 401,
+        error: 'Please sign in to continue.',
+        code: 'AUTH_REQUIRED',
+      });
+    }
 
     // Ensure stable ordering for UI consumption (also ordered inside the function).
     const sql = `
@@ -30,8 +38,10 @@ router.get('/', async (req, res) => {
     const result = await pool.query(sql, [userId]);
     res.json(result.rows);
   } catch (e) {
-    console.error('TREE MENU error:', e);
-    res.status(500).json({ error: 'Database error' });
+    return sendPostgresError(req, res, e, {
+      action: 'LIST',
+      label: 'TREE MENU error',
+    });
   }
 });
 
@@ -59,8 +69,10 @@ router.get('/admin/all', requirePermission(ADMIN_PERM), async (req, res) => {
     res.json(rows);
   } catch (e) {
     if (sendActiveStatusError(res, e)) return;
-    console.error('TREE MENU ADMIN/all error:', e);
-    res.status(500).json({ error: 'Database error' });
+    return sendPostgresError(req, res, e, {
+      action: 'LIST',
+      label: 'TREE MENU ADMIN/all error',
+    });
   }
 });
 
@@ -78,13 +90,25 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
   try {
     const type = String(screen_type ?? '').toUpperCase();
     if (!['MENU', 'SCREEN'].includes(type)) {
-      return res.status(400).json({ error: 'screen_type must be MENU or SCREEN' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Screen type must be MENU or SCREEN.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (!menu_label || String(menu_label).trim() === '') {
-      return res.status(400).json({ error: 'menu_label is required' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Menu label is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (type === 'SCREEN' && (!screen_file_name || String(screen_file_name).trim() === '')) {
-      return res.status(400).json({ error: 'screen_file_name is required for SCREEN' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Screen file name is required for screen entries.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     // Put new item at end of its siblings (max(sort_order)+10)
@@ -113,8 +137,10 @@ router.post('/admin', requirePermission(ADMIN_PERM), async (req, res) => {
     res.status(201).json(rows[0]);
   } catch (e) {
     if (sendActiveStatusError(res, e)) return;
-    console.error('TREE MENU ADMIN/create error:', e);
-    res.status(500).json({ error: 'Database error', detail: String(e.message ?? e) });
+    return sendPostgresError(req, res, e, {
+      action: 'CREATE',
+      label: 'TREE MENU ADMIN/create error',
+    });
   }
 });
 
@@ -134,16 +160,30 @@ router.put('/admin/:id', requirePermission(ADMIN_PERM), async (req, res) => {
        FROM shiftly_schema.tree_menu WHERE screen_id=$1`,
       [id]
     );
-    if (curRows.length === 0) return res.status(404).json({ error: 'Not found' });
+    if (curRows.length === 0) {
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'The requested record could not be found.',
+        code: 'RESOURCE_NOT_FOUND',
+      });
+    }
 
     const cur = curRows[0];
     const type = String(cur.screen_type).toUpperCase();
 
     if (!menu_label || String(menu_label).trim() === '') {
-      return res.status(400).json({ error: 'menu_label is required' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Menu label is required.',
+        code: 'INVALID_REQUEST',
+      });
     }
     if (type === 'SCREEN' && (!screen_file_name || String(screen_file_name).trim() === '')) {
-      return res.status(400).json({ error: 'screen_file_name is required for SCREEN' });
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'Screen file name is required for screen entries.',
+        code: 'INVALID_REQUEST',
+      });
     }
 
     // Lock screen_key  once set to avoid breaking RBAC mappings.
@@ -172,8 +212,10 @@ router.put('/admin/:id', requirePermission(ADMIN_PERM), async (req, res) => {
     res.json(rows[0]);
   } catch (e) {
     if (sendActiveStatusError(res, e)) return;
-    console.error('TREE MENU ADMIN/update error:', e);
-    res.status(500).json({ error: 'Database error', detail: String(e.message ?? e) });
+    return sendPostgresError(req, res, e, {
+      action: 'UPDATE',
+      label: 'TREE MENU ADMIN/update error',
+    });
   }
 });
 
@@ -198,7 +240,11 @@ router.patch('/admin/:id/move', requirePermission(ADMIN_PERM), async (req, res) 
     );
     if (curRows.length === 0) {
       await client.query('ROLLBACK');
-      return res.status(404).json({ error: 'Not found' });
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'The requested record could not be found.',
+        code: 'RESOURCE_NOT_FOUND',
+      });
     }
     const cur = curRows[0];
 
@@ -262,8 +308,10 @@ router.patch('/admin/:id/move', requirePermission(ADMIN_PERM), async (req, res) 
     res.json(outRows[0]);
   } catch (e) {
     await client.query('ROLLBACK');
-    console.error('TREE MENU ADMIN/move error:', e);
-    res.status(500).json({ error: 'Database error', detail: String(e.message ?? e) });
+    return sendPostgresError(req, res, e, {
+      action: 'UPDATE',
+      label: 'TREE MENU ADMIN/move error',
+    });
   } finally {
     client.release();
   }

@@ -1,6 +1,8 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 function normalizeBoolean(value, fieldName) {
   if (typeof value === 'boolean') {
@@ -82,11 +84,9 @@ router.get('/', async (req, res) => {
     return res.status(200).json(result.rows[0]);
   } catch (err) {
     console.error('Error loading system configuration:', err);
-    return res.status(500).json({
-      error: 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'GET',
+      label: 'Error loading system configuration',
     });
   }
 });
@@ -114,7 +114,8 @@ router.put('/', async (req, res) => {
     );
     if (!Number.isFinite(mobileDashboardDefaultDays) || mobileDashboardDefaultDays < 0) {
       return res.status(400).json({
-        error: 'Validation error',
+        error: 'The request contains invalid fields.',
+        code: 'INVALID_REQUEST',
         details: 'Invalid value for "mobile_dashboard_default_days". Expected integer >= 0.',
       });
     }
@@ -125,7 +126,8 @@ router.put('/', async (req, res) => {
     );
     if (!Number.isFinite(desktopDashboardDefaultDays) || desktopDashboardDefaultDays < 0) {
       return res.status(400).json({
-        error: 'Validation error',
+        error: 'The request contains invalid fields.',
+        code: 'INVALID_REQUEST',
         details: 'Invalid value for "desktop_dashboard_default_days". Expected integer >= 0.',
       });
     }
@@ -137,7 +139,8 @@ router.put('/', async (req, res) => {
     );
     if (!Number.isFinite(breakDurationMinutes) || breakDurationMinutes < 0) {
       return res.status(400).json({
-        error: 'Validation error',
+        error: 'The request contains invalid fields.',
+        code: 'INVALID_REQUEST',
         details: 'Invalid value for "break_duration_minutes". Expected integer >= 0.',
       });
     }
@@ -148,7 +151,8 @@ router.put('/', async (req, res) => {
     );
     if (!Number.isFinite(shiftHandoverMinutes) || shiftHandoverMinutes < 0) {
       return res.status(400).json({
-        error: 'Validation error',
+        error: 'The request contains invalid fields.',
+        code: 'INVALID_REQUEST',
         details: 'Invalid value for "shift_handover_minutes". Expected integer >= 0.',
       });
     }
@@ -226,17 +230,20 @@ router.put('/', async (req, res) => {
     console.error('Error updating system configuration:', err);
 
     if (err && err.status) {
-      return res.status(err.status).json({
-        error: 'Validation error',
-        details: err.message,
+      return sendApiError(req, res, {
+        status: err.status,
+        error: 'The request contains invalid fields.',
+        code: 'INVALID_REQUEST',
+        details: typeof err.message === 'string' &&
+          err.message.startsWith('Invalid value')
+          ? err.message
+          : 'Invalid configuration value.',
       });
     }
 
-    return res.status(500).json({
-      error: 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'UPDATE',
+      label: 'Error updating system configuration',
     });
   }
 });

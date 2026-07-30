@@ -98,7 +98,17 @@ function parseCreateIsActive(body = {}) {
 
 function sendActiveStatusError(res, err) {
   if (err && err.statusCode === 400) {
-    res.status(400).json({ error: err.message });
+    const details =
+      err.message === 'onlyActive must be true or false.' ||
+      err.message === 'active_status must be active, inactive, or all.' ||
+      err.message.endsWith(' must be a Boolean.')
+        ? err.message
+        : 'Invalid active-status value.';
+    res.status(400).json({
+      error: 'The request contains invalid fields.',
+      code: 'INVALID_REQUEST',
+      details,
+    });
     return true;
   }
 

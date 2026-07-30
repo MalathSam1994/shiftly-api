@@ -7,25 +7,12 @@
 //
 const express = require('express');
 const pool = require('../db');
+const { sendInternalError } = require('../utils/apiError');
 
 const router = express.Router();
 
-function sendDbError(res, err, context) {
-  const payload = {
-    error: 'Database error',
-    context: context || undefined,
-    message: err?.message,
-    code: err?.code,
-    detail: err?.detail,
-    constraint: err?.constraint,
-    table: err?.table,
-    column: err?.column,
-    schema: err?.schema,
-    routine: err?.routine,
-    where: err?.where,
-  };
-  Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
-  return res.status(500).json(payload);
+function sendDbError(req, res, err, context) {
+  return sendInternalError(req, res, err, context || 'Database error');
 }
 
 function asIntOrNull(v) {
@@ -183,7 +170,7 @@ router.get('/', async (req, res) => {
     }
  return res.json(rows.rows[0]);
   } catch (err) {
-    return sendDbError(res, err, 'mobileDashboard');
+    return sendDbError(req, res, err, 'mobileDashboard');
   }
 });
 

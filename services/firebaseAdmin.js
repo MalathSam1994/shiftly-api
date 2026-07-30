@@ -1,25 +1,67 @@
-const admin = require('firebase-admin');
+const {
+  applicationDefault,
+  cert,
+  getApps,
+  initializeApp,
+} = require('firebase-admin/app');
+const { getMessaging } = require('firebase-admin/messaging');
 const pool = require('../db');
 const fs = require('fs');
-let _inited = false;
+let _firebaseApp = null;
 
 function initFirebase() {
-  if (_inited) return;
+ if (_firebaseApp) {
+   return _firebaseApp;
+ }
+
+ // Reuse an already initialized default app when this module is loaded
+ // more than once during tests, reloads, or application startup.
+ const existingApps = getApps();
+ if (existingApps.length > 0) {
+   _firebaseApp = existingApps[0];
+   return _firebaseApp;
+ }
 
   // Option A: Use GOOGLE_APPLICATION_CREDENTIALS=/path/serviceAccount.json
   // Option B: Use FIREBASE_SERVICE_ACCOUNT_JSON='{"type":"service_account",...}'
+  let credential;
   if (process.env.FIREBASE_SERVICE_ACCOUNT_JSON) {
-    const json = JSON.parse(process.env.FIREBASE_SERVICE_ACCOUNT_JSON);
-    admin.initializeApp({ credential: admin.credential.cert(json) });
+    let serviceAccount;
+
+    try {
+      serviceAccount = JSON.parse(
+        process.env.FIREBASE_SERVICE_ACCOUNT_JSON,
+      );
+    } catch (error) {
+      throw new Error(
+        'FIREBASE_SERVICE_ACCOUNT_JSON contains invalid JSON.',
+        { cause: error },
+      );
+    }
+
+    credential = cert(serviceAccount);
   } else {
-	  const p = process.env.GOOGLE_APPLICATION_CREDENTIALS;
-   if (p && !fs.existsSync(p)) {
-     throw new Error(`GOOGLE_APPLICATION_CREDENTIALS file not found: ${p}`);
-   }
-    admin.initializeApp({ credential: admin.credential.applicationDefault() });
+    const credentialsPath = process.env.GOOGLE_APPLICATION_CREDENTIALS;
+
+    if (credentialsPath && !fs.existsSync(credentialsPath)) {
+      throw new Error(
+        `GOOGLE_APPLICATION_CREDENTIALS file not found: ${credentialsPath}`,
+      );
+    }
+
+    credential = applicationDefault();
   }
 
-  _inited = true;
+  _firebaseApp = initializeApp({ credential });
+
+  console.log('[firebaseAdmin] initialized', {
+    projectId: _firebaseApp.options.projectId || null,
+    credentialMode: process.env.FIREBASE_SERVICE_ACCOUNT_JSON
+      ? 'FIREBASE_SERVICE_ACCOUNT_JSON'
+      : 'APPLICATION_DEFAULT',
+  });
+
+  return _firebaseApp;
 }
 
 async function getTokensForUsers(userIds) {
@@ -32,7 +74,6 @@ async function getTokensForUsers(userIds) {
   console.log('[firebaseAdmin] tokens fetched', {
     userIds,
     tokenCount: tokens.length,
-    tokenPrefixes: tokens.map(t => t.substring(0, t.length > 18 ? 18 : t.length)),
   });
   return tokens;
 }
@@ -46,13 +87,14 @@ async function removeBadTokens(tokens) {
 }
 
 async function sendToUsers({ userIds, title, body, data }) {
-  initFirebase();
+  const firebaseApp = initFirebase();
+  const messaging = getMessaging(firebaseApp);
 
   const tokens = await getTokensForUsers(userIds);
- if (tokens.length === 0) {
-   console.log('[firebaseAdmin] no tokens for users', { userIds });
-   return { ok: true, sent: 0 };
- }
+  if (tokens.length === 0) {
+    console.log('[firebaseAdmin] no tokens for users', { userIds });
+    return { ok: true, sent: 0 };
+  }
 
   // FCM data values must be strings.
   const dataStrings = {};
@@ -74,8 +116,9 @@ async function sendToUsers({ userIds, title, body, data }) {
       title,
       body,
       data: dataStrings,
-    });    
-    const resp = await admin.messaging().sendEachForMulticast({
+    });
+
+    const resp = await messaging.sendEachForMulticast({
       tokens: chunk,
       notification: {
         title: String(title || 'ShiftMix'),
@@ -85,39 +128,39 @@ async function sendToUsers({ userIds, title, body, data }) {
       android: {
         priority: 'high',
       },
- apns: {
-   headers: {
-     'apns-priority': '10',
-     'apns-push-type': 'alert',
-   },
-   payload: {
-     aps: {
-       sound: 'default',
-       badge: 1,
+       apns: {
+       headers: {
+         'apns-priority': '10',
+         'apns-push-type': 'alert',
+       },
+       payload: {
+         aps: {
+           sound: 'default',
+           badge: 1,
+         },
+       },
      },
-   },
- },
     });
 
     sent += resp.successCount;
-   console.log('[firebaseAdmin] multicast result', {
-     successCount: resp.successCount,
-     failureCount: resp.failureCount,
-   });
+    console.log('[firebaseAdmin] multicast result', {
+      successCount: resp.successCount,
+      failureCount: resp.failureCount,
+    });
 
     resp.responses.forEach((r, idx) => {
- console.log('[firebaseAdmin] token result', {
-   success: r.success,
-   code: r.error?.code || null,
-   message: r.error?.message || null,
-   tokenPrefix: chunk[idx].substring(0, chunk[idx].length > 18 ? 18 : chunk[idx].length),
- });      
+      console.log('[firebaseAdmin] token result', {
+        success: r.success,
+        code: r.error?.code || null,
+        message: r.error?.message || null,
+      });
+  
       if (!r.success) {
         const code = r.error?.code || '';
-       console.log('[firebaseAdmin] token failure', {
-         code,
-         tokenPrefix: chunk[idx].substring(0, chunk[idx].length > 18 ? 18 : chunk[idx].length),
-       });
+        console.log('[firebaseAdmin] token failure', {
+          code,
+        });
+
         if (
           code.includes('registration-token-not-registered') ||
           code.includes('invalid-registration-token')
@@ -129,7 +172,11 @@ async function sendToUsers({ userIds, title, body, data }) {
   }
 
   await removeBadTokens(badTokens);
-console.log('[firebaseAdmin] sendToUsers end', { sent, removedBadTokens: badTokens.length });
+  console.log('[firebaseAdmin] sendToUsers end', {
+    sent,
+    removedBadTokens: badTokens.length,
+  });
+
   return { ok: true, sent };
 }
 

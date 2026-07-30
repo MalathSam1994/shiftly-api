@@ -5,6 +5,8 @@ const {
   parseOptionalBoolean,
   sendActiveStatusError,
 } = require('../utils/activeStatus');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 function tryParseJson(text) {
   if (text == null) return null;
@@ -56,28 +58,23 @@ function buildBusinessError(err, fallbackMessage) {
     http: 400,
     body: {
       error: 'Business rule violation',
-      details:
-        (err && err.message)
-          ? err.message
-          : (fallbackMessage || 'Business rule violation.'),
-      code: (err && err.code) ? err.code : 'P0001',
-      routine: err && err.routine,
+      details: fallbackMessage || 'Business rule violation.',
+      code: 'BUSINESS_RULE_VIOLATION',
       validation_errors:
         (normalized.errors.length || normalized.warnings.length)
           ? normalized
           : undefined,
       errors: normalized.errors,
       warnings: normalized.warnings,
-      db_detail: err && err.detail,
     },
   };
 }
 
 function buildValidationResponse(result, fallbackDetails) {
   return {
-    error: 'Business rule violation',
+    error: 'The request could not be completed.',
     details: fallbackDetails,
-    code: 'P0001',
+    code: 'VALIDATION_FAILED',
     validation_errors: {
       errors: Array.isArray(result?.errors) ? result.errors : [],
       warnings: Array.isArray(result?.warnings) ? result.warnings : [],
@@ -98,8 +95,6 @@ function buildConstraintBusinessError(err, fallbackDetails) {
     errors.push({
       code: 'USER_MANAGER_DUPLICATE',
       message: 'This user-manager relation already exists.',
-      constraint: err.constraint,
-      detail: err.detail,
     });
   } else if (
     err?.code === '23503' &&
@@ -109,8 +104,6 @@ function buildConstraintBusinessError(err, fallbackDetails) {
     errors.push({
       code: 'USER_MANAGER_USER_NOT_FOUND',
       message: 'Selected user does not exist.',
-      constraint: err.constraint,
-      detail: err.detail,
     });
   } else if (
     err?.code === '23503' &&
@@ -120,31 +113,29 @@ function buildConstraintBusinessError(err, fallbackDetails) {
     errors.push({
       code: 'USER_MANAGER_MANAGER_NOT_FOUND',
       message: 'Selected manager does not exist.',
-      constraint: err.constraint,
-      detail: err.detail,
     });
   } else if (err?.code === '23514') {
     errors.push({
       code: 'USER_MANAGER_CHECK_VIOLATION',
       message: fallbackDetails || 'User-manager data violates a database rule.',
-      constraint: err.constraint,
-      detail: err.detail,
     });
   } else {
     return null;
   }
 
   return {
-    http: 400,
+    http: err?.code === '23505' ? 409 : 422,
     body: {
-      error: 'Business rule violation',
+      error: 'The request could not be completed.',
       details: fallbackDetails || 'User-manager operation failed validation.',
-      code: err?.code || 'P0001',
-      routine: err?.routine,
+      code: err?.code === '23505'
+        ? 'DUPLICATE_MAPPING'
+        : err?.code === '23503'
+          ? 'INVALID_REFERENCE'
+          : 'VALIDATION_FAILED',
       validation_errors: { errors, warnings },
       errors,
       warnings,
-      db_detail: err?.detail,
     },
   };
 }
@@ -229,12 +220,13 @@ const userManagersConfig = {
 
       if (!validation.ok) {
         await client.query('ROLLBACK');
-        return res.status(400).json(
-          buildValidationResponse(
+        return sendApiError(req, res, {
+          status: 422,
+          ...buildValidationResponse(
             validation.result,
             'User-manager relation cannot be created.',
           ),
-        );
+        });
       }
 
       const inserted = await client.query(
@@ -268,18 +260,15 @@ const userManagersConfig = {
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {
-        const built = buildBusinessError(
-          err,
-          'User-manager relation cannot be created.',
-        );
-        return res.status(built.http).json(built.body);
+        return sendPostgresError(req, res, err, {
+          action: 'CREATE',
+          label: 'Error creating user manager',
+        });
       }
 
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'CREATE',
+        label: 'Error creating user manager',
       });
     } finally {
       client.release();
@@ -345,12 +334,14 @@ const userManagersConfig = {
 
       if (!validation.ok) {
         await client.query('ROLLBACK');
-        return res.status(400).json(
-          buildValidationResponse(
+        return sendApiError(req, res, {
+          status: 409,
+          ...buildValidationResponse(
             validation.result,
             'User-manager relation cannot be updated because it is still linked to open shift requests.',
           ),
-        );
+          code: 'RECORD_IN_USE',
+        });
       }
 
       await client.query(
@@ -396,18 +387,15 @@ const userManagersConfig = {
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {
-        const built = buildBusinessError(
-          err,
-          'User-manager relation cannot be updated.',
-        );
-        return res.status(built.http).json(built.body);
+        return sendPostgresError(req, res, err, {
+          action: 'UPDATE',
+          label: 'Error updating user manager',
+        });
       }
 
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'UPDATE',
+        label: 'Error updating user manager',
       });
     } finally {
       client.release();
@@ -445,12 +433,14 @@ const userManagersConfig = {
 
       if (!validation.ok) {
         await client.query('ROLLBACK');
-        return res.status(400).json(
-          buildValidationResponse(
+        return sendApiError(req, res, {
+          status: 409,
+          ...buildValidationResponse(
             validation.result,
             'User-manager relation cannot be deleted because it is still linked to open shift requests.',
           ),
-        );
+          code: 'RECORD_IN_USE',
+        });
       }
 
       await client.query(
@@ -491,18 +481,15 @@ const userManagersConfig = {
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {
-        const built = buildBusinessError(
-          err,
-          'User-manager relation cannot be deleted.',
-        );
-        return res.status(built.http).json(built.body);
+        return sendPostgresError(req, res, err, {
+          action: 'DELETE',
+          label: 'Error deleting user manager',
+        });
       }
 
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'DELETE',
+        label: 'Error deleting user manager',
       });
     } finally {
       client.release();

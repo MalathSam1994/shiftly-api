@@ -12,6 +12,8 @@ const {
   parseOptionalBoolean,
   sendActiveStatusError,
 } = require('../utils/activeStatus');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 
 const {
@@ -238,10 +240,9 @@ if (!user_name  || !email) {
 
 
     console.error('Error inserting into DB (USERS CREATE):', err);
-    res.status(500).json({
-      error: 'Database error',
-      details: err.message,
-      code: err.code,
+    return sendPostgresError(req, res, err, {
+      action: 'CREATE',
+      label: 'Error inserting into DB (USERS CREATE)',
     });
       } finally {
     client.release();
@@ -261,12 +262,7 @@ router.put('/:id', async (req, res) => {
     is_active,
     } = req.body;
 
-    console.log(
-      `[${req.rid}] USERS UPDATE id=${req.params.id} email=`,
-      email,
-      'body=',
-      req.body,
-    );
+    console.log(`[${req.rid}] USERS UPDATE id=${req.params.id} entered`);
 
 
 
@@ -362,11 +358,12 @@ router.put('/:id', async (req, res) => {
           : true;
 
       if (!ok) {
-        return res.status(400).json({
-          error: 'Business rule violation',
+        return sendApiError(req, res, {
+          status: 409,
+          error: 'The record cannot be changed because it is referenced.',
           details:
             'User cannot be updated because this user is already linked.',
-          code: 'P0001',
+          code: 'RECORD_IN_USE',
           validation_errors: normalizedValidation,
           errors: normalizedValidation.errors,
           warnings: normalizedValidation.warnings,
@@ -423,10 +420,7 @@ router.put('/:id', async (req, res) => {
 
     const result = await pool.query(query, values);
 
-    console.log(
-      `[${req.rid}] USERS UPDATE result rows=${result.rows.length} email=`,
-      result.rows[0]?.email,
-    );
+    console.log(`[${req.rid}] USERS UPDATE result rows=${result.rows.length}`);
 
     if (result.rows.length === 0) {
       return res.status(404).json({ error: 'Not found' });
@@ -436,7 +430,10 @@ router.put('/:id', async (req, res) => {
   } catch (err) {
     if (sendActiveStatusError(res, err)) return;
     console.error('Error updating DB (USERS UPDATE):', err);
-    res.status(500).json({ error: 'Database error' });
+    return sendPostgresError(req, res, err, {
+      action: 'UPDATE',
+      label: 'Error updating DB (USERS UPDATE)',
+    });
   }
 });
 
@@ -458,10 +455,11 @@ router.delete('/:id', async (req, res) => {
         : true;
 
     if (!ok) {
-      return res.status(400).json({
-        error: 'Business rule violation',
+      return sendApiError(req, res, {
+        status: 409,
+        error: 'The record cannot be deleted because it is referenced.',
         details: `User cannot be deleted because this user is already linked.`,
-        code: 'P0001',
+        code: 'RECORD_IN_USE',
         validation_errors: normalizedValidation,
         errors: normalizedValidation.errors,
         warnings: normalizedValidation.warnings,
@@ -488,7 +486,10 @@ router.delete('/:id', async (req, res) => {
     res.json({ deleted: result.rows[0] });
   } catch (err) {
     console.error('Error deleting from DB (USERS DELETE):', err);
-    res.status(500).json({ error: 'Database error' });
+    return sendPostgresError(req, res, err, {
+      action: 'DELETE',
+      label: 'Error deleting from DB (USERS DELETE)',
+    });
   }
 });
 

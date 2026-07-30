@@ -1,25 +1,12 @@
 // shiftOffers.js
 const express = require('express');
 const pool = require('../db');
+const { sendInternalError } = require('../utils/apiError');
 
 const router = express.Router();
 
-function sendDbError(res, err, context) {
-  const payload = {
-    error: 'Database error',
-    context: context || undefined,
-    message: err?.message,
-    code: err?.code,
-    detail: err?.detail,
-    constraint: err?.constraint,
-    table: err?.table,
-    column: err?.column,
-    schema: err?.schema,
-    routine: err?.routine,
-    where: err?.where,
-  };
-  Object.keys(payload).forEach((k) => payload[k] == null && delete payload[k]);
-  return res.status(500).json(payload);
+function sendDbError(req, res, err, context) {
+  return sendInternalError(req, res, err, context || 'Database error');
 }
 
 
@@ -92,7 +79,7 @@ router.get('/', async (req, res) => {
     return res.json(r.rows);
   } catch (err) {
     console.error('Error querying DB (SHIFT OFFERS LIST):', err);
-    return sendDbError(res, err, 'SHIFT OFFERS LIST');
+    return sendDbError(req, res, err, 'SHIFT OFFERS LIST');
   }
 });
 
@@ -132,7 +119,7 @@ router.get('/target-users', async (req, res) => {
     return res.json(rows);
   } catch (err) {
     console.error('Error querying DB (SHIFT OFFERS TARGET USERS):', err);
-    return sendDbError(res, err, 'SHIFT OFFERS TARGET USERS');
+    return sendDbError(req, res, err, 'SHIFT OFFERS TARGET USERS');
   }
 });
 
@@ -162,7 +149,7 @@ router.get('/any-eligible-exists', async (req, res) => {
     return res.json({ anyEligible: r.rows?.[0]?.any_eligible === true });
   } catch (err) {
     console.error('Error querying DB (SHIFT OFFERS ANY ELIGIBLE):', err);
-    return sendDbError(res, err, 'SHIFT OFFERS ANY ELIGIBLE');
+    return sendDbError(req, res, err, 'SHIFT OFFERS ANY ELIGIBLE');
   }
 });
 
@@ -216,7 +203,7 @@ router.post('/', async (req, res) => {
   } catch (err) {
   
     console.error('Error creating/updating shift offer:', err);
-    return sendDbError(res, err, 'SHIFT OFFERS CREATE');
+    return sendDbError(req, res, err, 'SHIFT OFFERS CREATE');
 
   }
 });
@@ -246,7 +233,7 @@ router.post('/:id/cancel', async (req, res) => {
     return res.json(r.rows[0]);
   } catch (err) {
     console.error('Error cancelling shift offer:', err);
-    return sendDbError(res, err, 'SHIFT OFFERS CANCEL');
+    return sendDbError(req, res, err, 'SHIFT OFFERS CANCEL');
   }
 });
 

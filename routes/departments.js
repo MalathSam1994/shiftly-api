@@ -4,6 +4,8 @@ const {
   parseOptionalBoolean,
   sendActiveStatusError,
 } = require('../utils/activeStatus');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 function hasOwn(object, key) {
   return Object.prototype.hasOwnProperty.call(object, key);
@@ -76,19 +78,14 @@ function buildBusinessError(err, fallbackMessage) {
     http: 400,
     body: {
       error: 'Business rule violation',
-      details:
-        (err && err.message)
-          ? err.message
-          : (fallbackMessage || 'Business rule violation.'),
-      code: (err && err.code) ? err.code : 'P0001',
-      routine: err && err.routine,
+      details: fallbackMessage || 'Business rule violation.',
+      code: 'BUSINESS_RULE_VIOLATION',
       validation_errors:
         (normalized.errors.length || normalized.warnings.length)
           ? normalized
           : undefined,
       errors: normalized.errors,
       warnings: normalized.warnings,
-      db_detail: err && err.detail,
     },
   };
 }
@@ -205,18 +202,15 @@ const departmentsConfig = {
 
       const isBusiness = err && err.code === 'P0001';
       if (isBusiness) {
-        const built = buildBusinessError(
-          err,
-          'Department cannot be updated because it is already linked.',
-        );
-        return res.status(built.http).json(built.body);
+        return sendPostgresError(req, res, err, {
+          action: 'UPDATE',
+          label: 'Error updating department',
+        });
       }
 
-      return res.status(500).json({
-        error: 'Database error',
-        details: err.message,
-        code: err.code,
-        routine: err.routine,
+      return sendPostgresError(req, res, err, {
+        action: 'UPDATE',
+        label: 'Error updating department',
       });
     }
   },
@@ -237,10 +231,11 @@ const departmentsConfig = {
          ? Boolean(validationResult.ok)
          : true;
      if (!ok) {
-       return res.status(400).json({
-         error: 'Business rule violation',
+       return sendApiError(req, res, {
+         status: 409,
+         error: 'The record cannot be deleted because it is referenced.',
+         code: 'RECORD_IN_USE',
          details: 'Department cannot be deleted because it is already linked.',
-         code: 'P0001',
          validation_errors: {
            errors: Array.isArray(validationResult?.errors)
              ? validationResult.errors
@@ -273,17 +268,14 @@ const departmentsConfig = {
      console.error('Error deleting department:', err);
      const isBusiness = err && err.code === 'P0001';
      if (isBusiness) {
-       const built = buildBusinessError(
-         err,
-         'Department cannot be deleted because it is already linked.',
-       );
-       return res.status(built.http).json(built.body);
+       return sendPostgresError(req, res, err, {
+         action: 'DELETE',
+         label: 'Error deleting department',
+       });
      }
-     return res.status(500).json({
-       error: 'Database error',
-       details: err.message,
-       code: err.code,
-       routine: err.routine,
+     return sendPostgresError(req, res, err, {
+       action: 'DELETE',
+       label: 'Error deleting department',
      });
    }
  },

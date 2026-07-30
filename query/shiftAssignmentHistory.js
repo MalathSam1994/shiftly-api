@@ -18,31 +18,12 @@
 
 const express = require('express');
 const pool = require('../db');
+const { sendInternalError } = require('../utils/apiError');
 
 const router = express.Router();
 
-function sendDbError(res, err, context) {
-  const payload = {
-    error: 'Database error',
-    context: context || undefined,
-    message: err && err.message,
-    code: err && err.code,
-    detail: err && err.detail,
-    constraint: err && err.constraint,
-    table: err && err.table,
-    column: err && err.column,
-    schema: err && err.schema,
-    routine: err && err.routine,
-    where: err && err.where,
-  };
-
-  Object.keys(payload).forEach((key) => {
-    if (payload[key] == null) {
-      delete payload[key];
-    }
-  });
-
-  return res.status(500).json(payload);
+function sendDbError(req, res, err, context) {
+  return sendInternalError(req, res, err, context || 'Database error');
 }
 
 function asTextOrNull(value) {
@@ -215,7 +196,7 @@ router.get('/', async (req, res) => {
       rows: result.rows,
     });
   } catch (err) {
-    return sendDbError(res, err, 'shiftAssignmentHistory');
+    return sendDbError(req, res, err, 'shiftAssignmentHistory');
   }
 });
 

@@ -4,6 +4,8 @@
 	const cors = require('cors');
 	require('dotenv').config();
 	const requireAuth = require('./middleware/requireAuth');
+	const errorHandler = require('./middleware/errorHandler');
+	const { normalizeErrorResponses, sendApiError } = require('./utils/apiError');
 
 	const systemConfigurationRouter = require('./routes/systemConfiguration');
 	const treeMenuRouter = require('./routes/treeMenu');
@@ -104,7 +106,6 @@ app.use(cors({
  methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
  allowedHeaders: ['Content-Type', 'Authorization'],
 }));
-	app.use(express.json());
 	
 	function ts() {
   // ISO 8601, sortable, timezone-safe
@@ -141,6 +142,9 @@ app.use((req, res, next) => {
 
   next();
 });
+
+app.use(normalizeErrorResponses);
+app.use(express.json());
  
 	
 
@@ -251,6 +255,14 @@ app.use(
   dropdownShiftAssignmentHistoryUsersQuery
 );
 app.use('/desktop-search/shift-matrix', desktopShiftMatrixSearchQuery);
+app.use((req, res) => {
+  return sendApiError(req, res, {
+    status: 404,
+    error: 'The requested endpoint was not found.',
+    code: 'RESOURCE_NOT_FOUND',
+  });
+});
+app.use(errorHandler);
 	app.listen(port, host, () => {
 	   console.log(`API listening on ${host}:${port}`);
 		// ✅ Start push dispatcher once API is up.

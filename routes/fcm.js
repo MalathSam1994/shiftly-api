@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { sendApiError, sendInternalError } = require('../utils/apiError');
 
 // POST /fcm/register
 // { userId: 1, token: "...", platform: "android" }
@@ -15,14 +16,25 @@ router.post('/register', async (req, res) => {
       userId,
       platform,
       tokenLength: token.length,
-      tokenPrefix: token.substring(0, token.length > 18 ? 18 : token.length),
       authUserId: req.user?.id ?? req.user?.sub ?? null,
     });
 
 
 
-    if (!userId) return res.status(400).json({ error: 'userId is required' });
-    if (!token) return res.status(400).json({ error: 'token is required' });
+    if (!userId) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A user is required.',
+        code: 'INVALID_REQUEST',
+      });
+    }
+    if (!token) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A notification token is required.',
+        code: 'INVALID_REQUEST',
+      });
+    }
 
     // Upsert by token (token must be unique).
     const sql = `
@@ -38,8 +50,7 @@ router.post('/register', async (req, res) => {
     console.log('[FCM REGISTER] saved', { userId, platform });
     res.json({ ok: true });
   } catch (e) {
-    console.error('[FCM REGISTER] failed', e);
-    res.status(500).json({ error: e.message });
+    return sendInternalError(req, res, e, 'FCM registration failed');
   }
 });
 

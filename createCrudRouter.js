@@ -9,6 +9,8 @@ const {
   parseOptionalBoolean,
   sendActiveStatusError,
 } = require('./utils/activeStatus');
+const { sendApiError } = require('./utils/apiError');
+const { sendPostgresError } = require('./utils/postgresErrorMapper');
 
 // Run a single query with a per-request statement_timeout that does NOT leak to pooled sessions.
 async function queryWithTimeout(sql, params = [], timeoutMs = 20000) {
@@ -81,8 +83,10 @@ function createCrudRouter(config) {
       res.json(result.rows);
     } catch (err) {
       if (sendActiveStatusError(res, err)) return;
-      console.error('Error querying DB (LIST):', err);
-      res.status(500).json({ error: 'Database error' });
+      sendPostgresError(req, res, err, {
+        action: 'LIST',
+        label: 'Error querying DB (LIST)',
+      });
     }
   });
 
@@ -97,13 +101,19 @@ function createCrudRouter(config) {
         const result = await queryWithTimeout(query, [req.params.id], timeoutMs);
 
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Not found' });
+        return sendApiError(req, res, {
+          status: 404,
+          error: 'The requested record could not be found.',
+          code: 'RESOURCE_NOT_FOUND',
+        });
       }
 
       res.json(result.rows[0]);
     } catch (err) {
-      console.error('Error querying DB (GET BY ID):', err);
-      res.status(500).json({ error: 'Database error' });
+      sendPostgresError(req, res, err, {
+        action: 'GET',
+        label: 'Error querying DB (GET BY ID)',
+      });
     }
   });
 
@@ -135,9 +145,11 @@ function createCrudRouter(config) {
       }
 
       if (cols.length === 0) {
-        return res
-          .status(400)
-          .json({ error: 'No valid columns provided for insert' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'No valid fields were provided.',
+          code: 'INVALID_REQUEST',
+        });
       }
 
      // Support string IDs (e.g., code tables) by allowing the caller to provide idColumn in body too
@@ -162,8 +174,10 @@ function createCrudRouter(config) {
       res.status(201).json(result.rows[0]);
     } catch (err) {
       if (sendActiveStatusError(res, err)) return;
-      console.error('Error inserting into DB (CREATE):', err);
-      res.status(500).json({ error: 'Database error' });
+      sendPostgresError(req, res, err, {
+        action: 'CREATE',
+        label: 'Error inserting into DB (CREATE)',
+      });
     }
   });
 
@@ -207,9 +221,11 @@ function createCrudRouter(config) {
       }
 
       if (sets.length === 0) {
-        return res
-          .status(400)
-          .json({ error: 'No valid columns provided for update' });
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'No valid fields were provided.',
+          code: 'INVALID_REQUEST',
+        });
       }
 
       values.push(req.params.id);
@@ -223,15 +239,16 @@ function createCrudRouter(config) {
        const result = await queryWithTimeout(query, values, timeoutMs);
 
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Not found' });
+        return sendApiError(req, res, {
+          status: 404,
+          error: 'The requested record could not be found.',
+          code: 'RESOURCE_NOT_FOUND',
+        });
       }
 
       res.json(result.rows[0]);
     } catch (err) {
       if (sendActiveStatusError(res, err)) return;
-      console.error('Error updating DB (UPDATE):', err);
-
-
       if (typeof config.mapDbError === 'function') {
         const mapped = config.mapDbError(err, {
           action: 'UPDATE',
@@ -247,7 +264,10 @@ function createCrudRouter(config) {
       }
 
 
-      res.status(500).json({ error: 'Database error' });
+      sendPostgresError(req, res, err, {
+        action: 'UPDATE',
+        label: 'Error updating DB (UPDATE)',
+      });
     }
   });
 
@@ -278,13 +298,15 @@ function createCrudRouter(config) {
        const result = await queryWithTimeout(query, [req.params.id], timeoutMs);
 
       if (result.rows.length === 0) {
-        return res.status(404).json({ error: 'Not found' });
+        return sendApiError(req, res, {
+          status: 404,
+          error: 'The requested record could not be found.',
+          code: 'RESOURCE_NOT_FOUND',
+        });
       }
 
       res.json({ deleted: result.rows[0] });
     } catch (err) {
-      console.error('Error deleting from DB (DELETE):', err);
-
       if (typeof config.mapDbError === 'function') {
         const mapped = config.mapDbError(err, {
           action: 'DELETE',
@@ -299,7 +321,10 @@ function createCrudRouter(config) {
         }
       }
 
-      res.status(500).json({ error: 'Database error' });
+      sendPostgresError(req, res, err, {
+        action: 'DELETE',
+        label: 'Error deleting from DB (DELETE)',
+      });
     }
   });
 

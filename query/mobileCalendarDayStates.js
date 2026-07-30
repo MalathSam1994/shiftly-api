@@ -1,6 +1,7 @@
 const express = require('express');
 const router = express.Router();
 const pool = require('../db');
+const { sendInternalError } = require('../utils/apiError');
 
 router.get('/', async (req, res) => {
   try {
@@ -90,12 +91,7 @@ router.get('/', async (req, res) => {
     return res.json(result.rows);
   } catch (err) {
     console.error('GET /mobile-calendar/day-states failed:', err);
-    return res.status(500).json({
-      error: 'Internal server error',
-      message: err?.message,
-      code: err?.code,
-      detail: err?.detail,
-    });
+    return sendInternalError(req, res, err, 'GET /mobile-calendar/day-states failed');
   }
 });
 

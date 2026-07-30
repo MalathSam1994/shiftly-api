@@ -1,5 +1,6 @@
 const express = require('express');
 const pool = require('../db');
+const { sendInternalError } = require('../utils/apiError');
 const router = express.Router();
 
 function parseOptionalInt(value) {
@@ -140,18 +141,7 @@ router.get('/', async (req, res) => {
  stack: err?.stack,
  });
 
- // Optional: return DB error details only when explicitly enabled
- if (process.env.DEBUG_DB_ERRORS === '1') {
- return res.status(500).json({
- error: 'Database error',
- code: err?.code ?? null,
- message: err?.message ?? null,
- detail: err?.detail ?? null,
- hint: err?.hint ?? null,
- });
- }
-
- res.status(500).json({ error: 'Database error' });
+ return sendInternalError(req, res, err, 'Error querying DB (DROPDOWN USERS)');
  
  }
 });

@@ -1,5 +1,7 @@
 const express = require('express');
 const pool = require('../db');
+const { sendApiError } = require('../utils/apiError');
+const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const router = express.Router();
 
@@ -72,8 +74,10 @@ router.get('/', async (req, res) => {
         : `${rawShiftDate}`.trim();
 
     if (!Number.isFinite(departmentId)) {
-      return res.status(400).json({
-        error: 'department_id is required and must be numeric.',
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'A valid department is required.',
+        code: 'INVALID_REQUEST',
       });
     }
 
@@ -89,9 +93,11 @@ router.get('/', async (req, res) => {
 
     if (isPeriodAwareMode) {
       if (shiftPeriodId == null || shiftDate == null) {
-        return res.status(400).json({
+        return sendApiError(req, res, {
+          status: 400,
           error:
-            'period-aware mode requires shift_period_id and shift_date.',
+            'A shift period and shift date are required.',
+          code: 'INVALID_REQUEST',
         });
       }
 
@@ -153,12 +159,9 @@ router.get('/', async (req, res) => {
     const result = await queryWithTimeout(sql, params, 20000);
     return res.json(result.rows);
   } catch (err) {
-    console.error('Error loading shift-period users dropdown:', err);
-    return res.status(500).json({
-      error: 'Database error',
-      details: err.message,
-      code: err.code,
-      routine: err.routine,
+    return sendPostgresError(req, res, err, {
+      action: 'LIST',
+      label: 'Error loading shift-period users dropdown',
     });
   }
 });
