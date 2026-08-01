@@ -3,6 +3,9 @@ const express = require('express');
 const pool = require('../db');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
+const {
+  runInTransactionWithBusinessTimezone,
+} = require('../utils/shiftlyRuntimeConfig');
 
 const router = express.Router();
 
@@ -16,6 +19,24 @@ function normalizeShiftRequestRow(row) {
         ? row.requested_shift_date
         : String(row.requested_shift_date).slice(0, 10),
   };
+}
+
+function decorateShiftRequestWorkflowOutcome(row) {
+  const normalized = normalizeShiftRequestRow(row);
+  if (!normalized || typeof normalized !== 'object') return normalized;
+
+  const status = String(normalized.request_status || '').toUpperCase();
+  const comment = String(normalized.decision_comment || '').trim();
+
+  if (status === 'REJECTED' && /^\[SYSTEM\]/i.test(comment)) {
+    return {
+      ...normalized,
+      workflow_action: 'AUTO_REJECTED',
+      workflow_message: comment.replace(/^\[SYSTEM\]\s*/i, '').trim(),
+    };
+  }
+
+  return normalized;
 }
 
 function normalizeShiftRequestRows(rows) {
@@ -306,12 +327,14 @@ router.post('/:id/approve', async (req, res) => {
       });
     }
 
-    // Thin wrapper around DB function
-    const result = await pool.query(
-      `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,
-      [rid, decision_by_user_id, decision_comment ?? null]
+    const result = await runInTransactionWithBusinessTimezone(
+      pool,
+      (client) => client.query(
+        `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,
+        [rid, decision_by_user_id, decision_comment ?? null],
+      ),
     );
-     return res.json(normalizeShiftRequestRow(result.rows[0]));
+     return res.json(decorateShiftRequestWorkflowOutcome(result.rows[0]));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'APPROVE',

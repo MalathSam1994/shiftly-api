@@ -37,6 +37,7 @@
 	const notifications = require('./routes/notifications');
 	const fcm = require('./routes/fcm');
 	const { startNotificationDispatcher } = require('./services/notificationDispatcher');
+	const { startShiftRequestMaintenance } = require('./services/shiftRequestMaintenance');
 	const shiftOffersRouter = require('./routes/shiftOffers');
 	const holidayYearsRouter = require('./routes/holidayYears');
 	const yearlyHolidaysRouter = require('./routes/yearlyHolidays');
@@ -268,6 +269,9 @@ app.use(errorHandler);
 		// ✅ Start push dispatcher once API is up.
 	  startNotificationDispatcher().catch((e) => {
 		console.error('Failed to start notification dispatcher:', e);
+	  });
+	  startShiftRequestMaintenance().catch((e) => {
+		console.error('Failed to start shift request maintenance:', e);
 	  });
 	});
 
