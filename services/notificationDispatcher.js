@@ -7,6 +7,14 @@ const CHANNEL = 'shiftly_notification_inserted';
 let _started = false;
 let _client = null;
 
+// A department/all-users notification can insert many rows at once.
+// PostgreSQL will consequently emit many NOTIFY events.
+//
+// Queue them so BEGIN/COMMIT blocks never overlap on the single LISTEN client.
+const _pendingDispatchIds = new Set();
+let _dispatchQueueRunning = false;
+
+
 function _safeJsonParse(s) {
   try {
     return JSON.parse(s);
@@ -14,6 +22,48 @@ function _safeJsonParse(s) {
     return null;
   }
 }
+
+function _enqueueNotificationId(notificationId) {
+  if (!Number.isInteger(notificationId) || notificationId <= 0) return;
+
+  _pendingDispatchIds.add(notificationId);
+
+  if (!_dispatchQueueRunning) {
+    void _runDispatchQueue();
+  }
+}
+
+async function _runDispatchQueue() {
+  if (_dispatchQueueRunning) return;
+  _dispatchQueueRunning = true;
+
+  try {
+    while (_pendingDispatchIds.size > 0) {
+      const notificationId = _pendingDispatchIds.values().next().value;
+
+      try {
+        await _dispatchByNotificationId(notificationId);
+      } catch (e) {
+        console.error('[dispatcher] queued dispatch error:', {
+          notificationId,
+          error: e,
+        });
+      } finally {
+        // Keep the id in the Set while it is being processed so a periodic
+        // drain or duplicate NOTIFY cannot enqueue it a second time.
+        _pendingDispatchIds.delete(notificationId);
+      }
+    }
+  } finally {
+    _dispatchQueueRunning = false;
+
+    // Cover an id added between the final loop check and the flag reset.
+    if (_pendingDispatchIds.size > 0) {
+      void _runDispatchQueue();
+    }
+  }
+}
+
 
 async function _dispatchByNotificationId(notificationId) {
   console.log('[dispatcher] dispatch start', { notificationId });
@@ -181,7 +231,7 @@ async function _drainPending(limit = 100) {
 
 
   for (const r of rows) {
-    await _dispatchByNotificationId(Number(r.id));
+    _enqueueNotificationId(Number(r.id));
   }
 }
 
@@ -213,10 +263,7 @@ async function startNotificationDispatcher() {
     const id = Number(p?.notificationId);
     if (!id) return;
 
-    // fire-and-forget (serialized by awaiting inside _dispatch)
-    _dispatchByNotificationId(id).catch((e) =>
-      console.error('[dispatcher] dispatch error:', e),
-    );
+ _enqueueNotificationId(id);
   });
 
   _client.on('error', (err) => {

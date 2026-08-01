@@ -1,11 +1,45 @@
 const express = require('express');
 const router = express.Router();
 
-// Adjust these imports to your project structure:
-const pool = require('../db'); // <- your pg Pool export
-const { sendApiError, sendInternalError } = require('../utils/apiError');
+const pool = require('../db');
+const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
+// GET /notifications/department-targets
+//
+// Returns one selectable entry per division/department combination.
+// This prevents ambiguity when two divisions contain departments with
+// the same description.
+router.get('/department-targets', async (req, res) => {
+  try {
+    const { rows } = await pool.query(`
+      SELECT DISTINCT
+        dd.division_id,
+        dd.department_id,
+        v.division_desc,
+        d.department_desc
+      FROM shiftly_schema.division_departments AS dd
+      JOIN shiftly_schema.divisions AS v
+        ON v.id = dd.division_id
+      JOIN shiftly_schema.departments AS d
+        ON d.id = dd.department_id
+      WHERE v.is_active = true
+        AND d.is_active = true
+      ORDER BY
+        v.division_desc,
+        d.department_desc,
+        dd.division_id,
+        dd.department_id
+    `);
+
+    return res.json(rows);
+  } catch (e) {
+    return sendPostgresError(req, res, e, {
+      action: 'LIST',
+      label: 'Error loading notification department targets',
+    });
+  }
+});
 
 // GET /notifications?recipientUserId=1&unreadOnly=true
 router.get('/', async (req, res) => {
@@ -106,23 +140,74 @@ router.post('/mark-all-read', async (req, res) => {
 //  - body (optional)
 //  - recipientUserId (optional)
 //  - departmentId (optional)
+//  - divisionId (required together with departmentId)
+//  - allUsers (optional boolean)
 //  - payload (optional JSON)
-// Creates MANUAL notifications for a specific user or all users in a department.
+//
+// Exactly one target must be supplied:
+//  - one active user
+//  - one division/department combination
+//  - all active users
 router.post('/push', async (req, res) => {
   try {
 
     const title = String(req.body.title || '').trim();
     const body = (req.body.body == null) ? null : String(req.body.body);
-    const recipientUserId = req.body.recipientUserId == null ? null : Number(req.body.recipientUserId);
-    const departmentId = req.body.departmentId == null ? null : Number(req.body.departmentId);
-    const payload = req.body.payload == null ? null : req.body.payload;
 
-       console.log('[NOTIFICATIONS PUSH] incoming', {
-     title,
-     recipientUserId,
-     departmentId,
-     payload,
-   });
+    const rawRecipientUserId =
+      req.body.recipientUserId ??
+      req.body.recipient_user_id ??
+      req.body.user_id ??
+      null;
+
+    const rawDepartmentId =
+      req.body.departmentId ??
+      req.body.department_id ??
+      null;
+
+    const rawDivisionId =
+      req.body.divisionId ??
+      req.body.division_id ??
+      null;
+
+    const rawAllUsers =
+      req.body.allUsers ??
+      req.body.all_users ??
+      false;
+
+    const recipientUserId =
+      rawRecipientUserId == null || rawRecipientUserId === ''
+        ? null
+        : Number(rawRecipientUserId);
+
+    const departmentId =
+      rawDepartmentId == null || rawDepartmentId === ''
+        ? null
+        : Number(rawDepartmentId);
+
+    const divisionId =
+      rawDivisionId == null || rawDivisionId === ''
+        ? null
+        : Number(rawDivisionId);
+
+    const allUsers =
+      rawAllUsers === true ||
+      String(rawAllUsers).trim().toLowerCase() === 'true';
+
+    const payload =
+      req.body.payload ??
+      req.body.data ??
+      null;
+
+    console.log('[NOTIFICATIONS PUSH] incoming', {
+      title,
+      recipientUserId,
+      departmentId,
+      divisionId,
+      allUsers,
+      payload,
+    });
+ 
 
     if (!title) {
       return sendApiError(req, res, {
@@ -131,16 +216,75 @@ router.post('/push', async (req, res) => {
         code: 'INVALID_REQUEST',
       });
     }
-    if (!recipientUserId && !departmentId) {
+
+    if (
+      recipientUserId != null &&
+      (!Number.isInteger(recipientUserId) || recipientUserId <= 0)
+    ) {
       return sendApiError(req, res, {
         status: 400,
-        error: 'Choose a recipient user or department.',
+      error: 'The recipient user is invalid.',
         code: 'INVALID_REQUEST',
       });
     }
 
+
+    if (
+      departmentId != null &&
+      (!Number.isInteger(departmentId) || departmentId <= 0)
+    ) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The department is invalid.',
+        code: 'INVALID_REQUEST',
+      });
+    }
+
+    if (
+      divisionId != null &&
+      (!Number.isInteger(divisionId) || divisionId <= 0)
+    ) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'The division is invalid.',
+        code: 'INVALID_REQUEST',
+      });
+    }
+
+    const hasUserTarget = recipientUserId != null;
+    const hasDepartmentTarget =
+      departmentId != null || divisionId != null;
+
+    if (
+      hasDepartmentTarget &&
+      (departmentId == null || divisionId == null)
+    ) {
+      return sendApiError(req, res, {
+        status: 400,
+        error:
+          'Both a department and its division are required for a department notification.',
+        code: 'INVALID_REQUEST',
+      });
+    }
+
+    const selectedTargetCount = [
+      hasUserTarget,
+      hasDepartmentTarget,
+      allUsers,
+    ].filter(Boolean).length;
+
+    if (selectedTargetCount !== 1) {
+      return sendApiError(req, res, {
+        status: 400,
+        error:
+          'Choose exactly one notification target: user, department, or all users.',
+        code: 'INVALID_REQUEST',
+      });
+    }
+
+
     let userIds = [];
-    if (recipientUserId) {
+    if (hasUserTarget) {
       const { rows } = await pool.query(
         `SELECT id
          FROM shiftly_schema.users
@@ -148,44 +292,91 @@ router.post('/push', async (req, res) => {
         [recipientUserId]
       );
       userIds = rows.map(r => r.id);
-    } else {
+    } else if (hasDepartmentTarget) {
       const { rows } = await pool.query(
-        `SELECT DISTINCT ud.user_id
-         FROM shiftly_schema.user_departments ud
-         JOIN shiftly_schema.users u ON u.id = ud.user_id
-         JOIN shiftly_schema.departments d ON d.id = ud.department_id
-         WHERE ud.department_id = $1
-           AND ud.is_active = true
-           AND u.is_active = true
-           AND d.is_active = true`,
-        [departmentId]
+        `
+        SELECT DISTINCT u.id
+        FROM shiftly_schema.users AS u
+        JOIN shiftly_schema.user_department AS ud
+          ON ud.user_id = u.id
+         AND ud.department_id = $1
+        JOIN shiftly_schema.user_divisions AS uv
+          ON uv.user_id = u.id
+         AND uv.division_id = $2
+        JOIN shiftly_schema.division_departments AS dd
+          ON dd.department_id = ud.department_id
+         AND dd.division_id = uv.division_id
+        JOIN shiftly_schema.departments AS d
+          ON d.id = ud.department_id
+        JOIN shiftly_schema.divisions AS v
+          ON v.id = uv.division_id
+        WHERE u.is_active = true
+          AND ud.is_active = true
+          AND uv.is_active = true
+          AND d.is_active = true
+          AND v.is_active = true
+        ORDER BY u.id
+        `,
+        [departmentId, divisionId],
       );
-      userIds = rows.map(r => r.user_id);
+
+      userIds = rows.map(r => r.id);
+    } else {
+      const { rows } = await pool.query(`
+        SELECT id
+        FROM shiftly_schema.users
+        WHERE is_active = true
+        ORDER BY id
+      `);
+
+      userIds = rows.map(r => r.id);
     }
 
-    if (userIds.length === 0) return res.json({ ok: true, inserted: 0 });
+    if (userIds.length === 0) {
+      return res.json({
+        ok: true,
+        inserted: 0,
+      });
+    }
 
     const insertSql = `
       INSERT INTO shiftly_schema.notifications
         (recipient_user_id, notification_type, title, body, payload)
-      VALUES ($1, 'MANUAL', $2, $3, $4)
+      SELECT
+        target.user_id,
+        'MANUAL',
+        $2,
+        $3,
+        $4::jsonb
+      FROM unnest($1::int[]) AS target(user_id)
     `;
 
-    for (const uid of userIds) {
-      console.log('[NOTIFICATIONS PUSH] inserting row', {
-        recipientUserId: uid,
-        title,
-      });
-      await pool.query(insertSql, [uid, title, body, payload]);
-    }
-	
-    // ✅ NO direct FCM here anymore.
+    const insertResult = await pool.query(insertSql, [
+      userIds,
+      title,
+      body,
+      payload == null ? null : JSON.stringify(payload),
+    ]);
+
+    console.log('[NOTIFICATIONS PUSH] rows inserted', {
+      requestedRecipients: userIds.length,
+      inserted: insertResult.rowCount,
+      title,
+    });
+
+    // No direct FCM call here.
     // ALL pushes (manual + trigger-generated) are sent by notificationDispatcher
     // when rows are inserted into shiftly_schema.notifications.
-    res.json({ ok: true, inserted: userIds.length });
+    return res.json({
+      ok: true,
+      inserted: insertResult.rowCount,
+    });
 
   } catch (e) {
-     return sendInternalError(req, res, e, 'Notification push failed');
+    return sendPostgresError(req, res, e, {
+      action: 'CREATE',
+      label: 'Notification push failed',
+    });
   }
 });
 
