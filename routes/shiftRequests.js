@@ -44,6 +44,56 @@ function normalizeShiftRequestRows(rows) {
   return rows.map(normalizeShiftRequestRow);
 }
 
+const SHIFT_REQUEST_RESPONSE_SELECT = `
+  sr.*,
+  to_char(
+    sr.requested_shift_date,
+    'YYYY-MM-DD'
+  ) AS requested_shift_date,
+  requested_by_user.user_name AS requested_by_user_name,
+  requested_by_user.user_desc AS requested_by_user_desc,
+  target_user.user_name AS target_user_name,
+  target_user.user_desc AS target_user_desc,
+  manager_user.user_name AS manager_user_name,
+  manager_user.user_desc AS manager_user_desc,
+  inbox_user.user_name AS inbox_user_name,
+  inbox_user.user_desc AS inbox_user_desc,
+  COALESCE(sr.inbox_user_id, sr.manager_user_id) AS workflow_owner_user_id,
+  workflow_owner_user.user_name AS workflow_owner_user_name,
+  COALESCE(
+    NULLIF(BTRIM(workflow_owner_user.user_desc), ''),
+    workflow_owner_user.user_name
+  ) AS workflow_owner_user_desc
+`;
+
+const SHIFT_REQUEST_RESPONSE_JOINS = `
+  LEFT JOIN shiftly_schema.users requested_by_user
+    ON requested_by_user.id = sr.requested_by_user_id
+  LEFT JOIN shiftly_schema.users target_user
+    ON target_user.id = sr.target_user_id
+  LEFT JOIN shiftly_schema.users manager_user
+    ON manager_user.id = sr.manager_user_id
+  LEFT JOIN shiftly_schema.users inbox_user
+    ON inbox_user.id = sr.inbox_user_id
+  LEFT JOIN shiftly_schema.users workflow_owner_user
+    ON workflow_owner_user.id = COALESCE(sr.inbox_user_id, sr.manager_user_id)
+`;
+
+async function fetchShiftRequestResponse(queryable, requestId) {
+  if (requestId == null) return null;
+  const result = await queryable.query(
+    `
+    SELECT
+      ${SHIFT_REQUEST_RESPONSE_SELECT}
+    FROM shiftly_api.v_shift_requests sr
+    ${SHIFT_REQUEST_RESPONSE_JOINS}
+    WHERE sr.id = $1
+    `,
+    [requestId],
+  );
+  return result.rows[0] ? normalizeShiftRequestRow(result.rows[0]) : null;
+}
+
 // Small helper: normalize client input for absence types
 function normalizeAbsenceType(code) {
   const v = String(code ?? '').trim();
@@ -247,20 +297,9 @@ router.get('/', async (req, res) => {
     // client lookup cache may not yet contain a newly created user.
     const query = `
       SELECT
-        sr.*,
-        to_char(
-          sr.requested_shift_date,
-          'YYYY-MM-DD'
-        ) AS requested_shift_date,
-        requested_by_user.user_name AS requested_by_user_name,
-        requested_by_user.user_desc AS requested_by_user_desc,
-        target_user.user_name AS target_user_name,
-        target_user.user_desc AS target_user_desc
+        ${SHIFT_REQUEST_RESPONSE_SELECT}
       FROM shiftly_api.v_shift_requests sr
-      LEFT JOIN shiftly_schema.users requested_by_user
-        ON requested_by_user.id = sr.requested_by_user_id
-      LEFT JOIN shiftly_schema.users target_user
-        ON target_user.id = sr.target_user_id
+      ${SHIFT_REQUEST_RESPONSE_JOINS}
       ${whereSql}
       ORDER BY sr.created_at DESC
     `;
@@ -381,7 +420,10 @@ router.post('/', async (req, res) => {
         );
       },
     );
-    return res.status(201).json(normalizeShiftRequestRow(result.rows[0]));
+    const created = await fetchShiftRequestResponse(pool, result.rows[0]?.id);
+    return res
+      .status(201)
+      .json(created ?? normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
 
     return sendPostgresError(req, res, err, {
@@ -432,7 +474,13 @@ router.post('/:id/approve', async (req, res) => {
         );
       },
     );
-     return res.json(decorateShiftRequestWorkflowOutcome(result.rows[0]));
+     const updated = await fetchShiftRequestResponse(
+       pool,
+       result.rows[0]?.id ?? rid,
+     );
+     return res.json(
+       decorateShiftRequestWorkflowOutcome(updated ?? result.rows[0]),
+     );
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'APPROVE',
@@ -605,7 +653,11 @@ router.post('/:id/attach-assignment', async (req, res) => {
     }
 
     await client.query('COMMIT');
-     return res.json(normalizeShiftRequestRow(updRes.rows[0]));
+    const updated = await fetchShiftRequestResponse(
+      pool,
+      updRes.rows[0]?.id ?? id,
+    );
+     return res.json(updated ?? normalizeShiftRequestRow(updRes.rows[0]));
   } catch (err) {
     if (client) {
       try { await client.query('ROLLBACK'); } catch (_) {}
@@ -654,7 +706,11 @@ router.post('/:id/reject', async (req, res) => {
       `SELECT * FROM shiftly_api.shift_request_reject($1::int, $2::int, $3::text)`,
       [rid, decision_by_user_id, decision_comment ?? null]
     );
-    return res.json(normalizeShiftRequestRow(result.rows[0]));
+    const updated = await fetchShiftRequestResponse(
+      pool,
+      result.rows[0]?.id ?? rid,
+    );
+    return res.json(updated ?? normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'REJECT',
