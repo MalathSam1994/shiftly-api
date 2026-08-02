@@ -50,6 +50,70 @@ function normalizeAbsenceType(code) {
   return v ? v.toUpperCase() : '';
 }
 
+function asIntOrNull(value) {
+  if (value == null || String(value).trim() === '') return null;
+  const parsed = Number.parseInt(String(value), 10);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+async function setWorkflowScopeForCreate(client, body) {
+  const requestType = String(body?.request_type || '').trim().toUpperCase();
+  let divisionId = null;
+  let departmentId = null;
+
+  if (requestType === 'NEW_SHIFT') {
+    divisionId = asIntOrNull(body?.division_id ?? body?.divisionId);
+    departmentId = asIntOrNull(
+      body?.requested_department_id ?? body?.requestedDepartmentId,
+    );
+  } else if (requestType === 'OFF_REQUEST') {
+    const assignmentId = asIntOrNull(
+      body?.shift_assignment_id ?? body?.shiftAssignmentId,
+    );
+    if (assignmentId != null) {
+      const result = await client.query(
+        `
+        SELECT division_id, department_id
+        FROM shiftly_schema.shift_assignments
+        WHERE id = $1
+        LIMIT 1
+        `,
+        [assignmentId],
+      );
+      divisionId = result.rows?.[0]?.division_id ?? null;
+      departmentId = result.rows?.[0]?.department_id ?? null;
+    }
+  } else if (requestType === 'OFFER') {
+    const offerId = asIntOrNull(body?.shift_offer_id ?? body?.shiftOfferId);
+    const assignmentId = asIntOrNull(
+      body?.shift_assignment_id ?? body?.shiftAssignmentId,
+    );
+    const result = await client.query(
+      `
+      SELECT sa.division_id, sa.department_id
+      FROM shiftly_schema.shift_assignments sa
+      LEFT JOIN shiftly_schema.shift_offers so
+        ON so.shift_assignment_id = sa.id
+      WHERE ($1::int IS NOT NULL AND so.id = $1::int)
+         OR ($2::int IS NOT NULL AND sa.id = $2::int)
+      ORDER BY sa.id
+      LIMIT 1
+      `,
+      [offerId, assignmentId],
+    );
+    divisionId = result.rows?.[0]?.division_id ?? null;
+    departmentId = result.rows?.[0]?.department_id ?? null;
+  }
+
+  if (divisionId != null && departmentId != null) {
+    await client.query(
+      `SELECT set_config('shiftly.request_division_id', $1, true),
+              set_config('shiftly.request_department_id', $2, true)`,
+      [String(divisionId), String(departmentId)],
+    );
+  }
+}
+
 
 
 /**
@@ -152,6 +216,9 @@ router.get('/', async (req, res) => {
                  WHERE um.user_id = sr.requested_by_user_id
                    AND um.manager_user_id = $${index}
                    AND um.is_primary = TRUE
+                   AND um.is_active = TRUE
+                   AND um.division_id = sr.division_id
+                   AND um.department_id = sr.requested_department_id
               )
             )
           )
@@ -284,10 +351,19 @@ router.post('/', async (req, res) => {
       req.body.absence_type = normalizeAbsenceType(req.body.absence_type);
     }
 
-       // One call: DB validates + inserts + returns row
-    const result = await pool.query(
-      `SELECT * FROM shiftly_api.shift_request_create($1::jsonb)`,
-      [JSON.stringify(req.body ?? {})]
+    const requestBody = { ...(req.body ?? {}) };
+    delete requestBody.manager_user_id;
+    delete requestBody.managerUserId;
+
+    const result = await runInTransactionWithBusinessTimezone(
+      pool,
+      async (client) => {
+        await setWorkflowScopeForCreate(client, requestBody);
+        return client.query(
+          `SELECT * FROM shiftly_api.shift_request_create($1::jsonb)`,
+          [JSON.stringify(requestBody)],
+        );
+      },
     );
     return res.status(201).json(normalizeShiftRequestRow(result.rows[0]));
   } catch (err) {
@@ -329,10 +405,16 @@ router.post('/:id/approve', async (req, res) => {
 
     const result = await runInTransactionWithBusinessTimezone(
       pool,
-      (client) => client.query(
-        `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,
-        [rid, decision_by_user_id, decision_comment ?? null],
-      ),
+      async (client) => {
+        await client.query(
+          `SELECT set_config('shiftly.workflow_request_id', $1, true)`,
+          [String(rid)],
+        );
+        return client.query(
+          `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,
+          [rid, decision_by_user_id, decision_comment ?? null],
+        );
+      },
     );
      return res.json(decorateShiftRequestWorkflowOutcome(result.rows[0]));
   } catch (err) {

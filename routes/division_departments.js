@@ -77,8 +77,6 @@ const divisionDepartmentsConfig = {
   createHandler: async (req, res, { pool, config, allColumns }) => {
     const divisionId = parseInt(req.body.division_id, 10);
     const departmentId = parseInt(req.body.department_id, 10);
-    const divisionDesc = req.body.division_desc ?? null;
-    const departmentDesc = req.body.department_desc ?? null;
     const isActive = parseCreateIsActive({ is_active: req.body.is_active });
 
     if (Number.isNaN(divisionId) || Number.isNaN(departmentId)) {
@@ -163,15 +161,27 @@ const divisionDepartmentsConfig = {
         INSERT INTO ${config.table} (
           division_id,
           department_id,
-          division_desc,
-          department_desc,
           is_active
         )
-        VALUES ($1, $2, $3, $4, $5)
+        SELECT
+          d.id,
+          dep.id,
+          $3
+        FROM shiftly_schema.divisions d
+        JOIN shiftly_schema.departments dep ON dep.id = $2
+        WHERE d.id = $1
         RETURNING ${allColumns.join(', ')}
         `,
-        [divisionId, departmentId, divisionDesc, departmentDesc, isActive],
+        [divisionId, departmentId, isActive],
       );
+
+      if (!insertResult.rows.length) {
+        await client.query('ROLLBACK');
+        return res.status(400).json({
+          error: 'Invalid payload.',
+          details: 'Selected division or department does not exist.',
+        });
+      }
 
       await client.query('COMMIT');
       return res.status(201).json(insertResult.rows[0]);

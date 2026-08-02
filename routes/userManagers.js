@@ -90,7 +90,10 @@ function buildConstraintBusinessError(err, fallbackDetails) {
 
   if (
     err?.code === '23505' &&
-    err?.constraint === 'uq_user_manager'
+    (
+      err?.constraint === 'uq_user_manager' ||
+      err?.constraint === 'uq_user_manager_scope'
+    )
   ) {
     errors.push({
       code: 'USER_MANAGER_DUPLICATE',
@@ -143,6 +146,8 @@ function buildConstraintBusinessError(err, fallbackDetails) {
 async function validateUserManagerCreate(client, {
   userId = null,
   managerUserId = null,
+  divisionId = null,
+  departmentId = null,
   isPrimary = null,
 }) {
   const validation = await client.query(
@@ -150,10 +155,12 @@ async function validateUserManagerCreate(client, {
       SELECT shiftly_api.validate_user_manager_create(
         $1,
         $2,
-        $3
+        $3,
+        $4,
+        $5
       ) AS result
     `,
-    [userId, managerUserId, isPrimary],
+    [userId, managerUserId, divisionId, departmentId, isPrimary],
   );
 
   const result = validation.rows?.[0]?.result ?? null;
@@ -171,6 +178,9 @@ async function validateUserManagerChange(client, {
   action,
   userId = null,
   managerUserId = null,
+  divisionId = null,
+  departmentId = null,
+  isActive = null,
   isPrimary = null,
 }) {
   const validation = await client.query(
@@ -180,10 +190,22 @@ async function validateUserManagerChange(client, {
         $2,
         $3,
         $4,
-        $5
+        $5,
+        $6,
+        $7,
+        $8
       ) AS result
     `,
-    [id, action, userId, managerUserId, isPrimary],
+    [
+      id,
+      action,
+      userId,
+      managerUserId,
+      divisionId,
+      departmentId,
+      isActive,
+      isPrimary,
+    ],
   );
 
   const result = validation.rows?.[0]?.result ?? null;
@@ -199,12 +221,21 @@ async function validateUserManagerChange(client, {
 const userManagersConfig = {
   table: 'shiftly_schema.user_managers',
   idColumn: 'id',
-  columns: ['user_id', 'manager_user_id', 'is_primary', 'is_active'],
+  columns: [
+    'user_id',
+    'manager_user_id',
+    'division_id',
+    'department_id',
+    'is_primary',
+    'is_active',
+  ],
   activeFilter: true,
 
   createHandler: async (req, res, { pool, config, allColumns }) => {
     const userId = req.body.user_id ?? null;
     const managerUserId = req.body.manager_user_id ?? null;
+    const divisionId = req.body.division_id ?? null;
+    const departmentId = req.body.department_id ?? null;
     const isPrimary = req.body.is_primary ?? true;
     const isActive = parseCreateIsActive({ is_active: req.body.is_active });
 
@@ -215,6 +246,8 @@ const userManagersConfig = {
       const validation = await validateUserManagerCreate(client, {
         userId,
         managerUserId,
+        divisionId,
+        departmentId,
         isPrimary,
       });
 
@@ -234,13 +267,15 @@ const userManagersConfig = {
           INSERT INTO ${config.table} (
             user_id,
             manager_user_id,
+            division_id,
+            department_id,
             is_primary,
             is_active
           )
-          VALUES ($1, $2, $3, $4)
+          VALUES ($1, $2, $3, $4, $5, $6)
           RETURNING ${allColumns.join(', ')}
         `,
-        [userId, managerUserId, isPrimary, isActive],
+        [userId, managerUserId, divisionId, departmentId, isPrimary, isActive],
       );
 
       await client.query('COMMIT');
@@ -306,6 +341,12 @@ const userManagersConfig = {
       const newManagerUserId = Object.prototype.hasOwnProperty.call(req.body, 'manager_user_id')
         ? req.body.manager_user_id
         : current.manager_user_id;
+      const newDivisionId = Object.prototype.hasOwnProperty.call(req.body, 'division_id')
+        ? req.body.division_id
+        : current.division_id;
+      const newDepartmentId = Object.prototype.hasOwnProperty.call(req.body, 'department_id')
+        ? req.body.department_id
+        : current.department_id;
       const newIsPrimary = Object.prototype.hasOwnProperty.call(req.body, 'is_primary')
         ? req.body.is_primary
         : current.is_primary;
@@ -316,6 +357,8 @@ const userManagersConfig = {
       const noChange =
         Number(newUserId) === Number(current.user_id) &&
         Number(newManagerUserId) === Number(current.manager_user_id) &&
+        Number(newDivisionId) === Number(current.division_id) &&
+        Number(newDepartmentId) === Number(current.department_id) &&
         Boolean(newIsPrimary) === Boolean(current.is_primary) &&
         Boolean(newIsActive) === Boolean(current.is_active);
 
@@ -329,6 +372,9 @@ const userManagersConfig = {
         action: 'UPDATE',
         userId: newUserId,
         managerUserId: newManagerUserId,
+        divisionId: newDivisionId,
+        departmentId: newDepartmentId,
+        isActive: newIsActive,
         isPrimary: newIsPrimary,
       });
 
@@ -351,10 +397,20 @@ const userManagersConfig = {
             $2,
             $3,
             $4,
-            $5
+            $5,
+            $6,
+            $7
           )
         `,
-        [id, 'UPDATE', newUserId, newManagerUserId, newIsPrimary],
+        [
+          id,
+          'UPDATE',
+          newUserId,
+          newManagerUserId,
+          newDivisionId,
+          newDepartmentId,
+          newIsPrimary,
+        ],
       );
 
       const updatedResult = await client.query(
@@ -362,12 +418,22 @@ const userManagersConfig = {
           UPDATE ${config.table}
           SET user_id = $1,
               manager_user_id = $2,
-              is_primary = $3,
-              is_active = $4
-          WHERE ${config.idColumn} = $5
+              division_id = $3,
+              department_id = $4,
+              is_primary = $5,
+              is_active = $6
+          WHERE ${config.idColumn} = $7
           RETURNING ${allColumns.join(', ')}
         `,
-        [newUserId, newManagerUserId, newIsPrimary, newIsActive, id],
+        [
+          newUserId,
+          newManagerUserId,
+          newDivisionId,
+          newDepartmentId,
+          newIsPrimary,
+          newIsActive,
+          id,
+        ],
       );
 
       await client.query('COMMIT');
@@ -450,10 +516,12 @@ const userManagersConfig = {
             $2,
             $3,
             $4,
-            $5
+            $5,
+            $6,
+            $7
           )
         `,
-        [id, 'DELETE', null, null, null],
+        [id, 'DELETE', null, null, null, null, null],
       );
 
       const deletedResult = await client.query(
