@@ -4,6 +4,11 @@ const pool = require('../db');
 const createCrudRouter = require('../createCrudRouter');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
+const {
+  actorUserId,
+  requireDivisionDepartmentAccess,
+  scopedPeriodsWhere,
+} = require('../utils/shiftPeriodScope');
 
 
 
@@ -164,10 +169,20 @@ const shiftPeriodsConfig = {
   //    like DB 2026-05-01 appearing in UI as 30/04/2026.
   listHandler: async (req, res, { pool, config }) => {
     try {
+      const userId = actorUserId(req);
+      if (!userId) {
+        return sendApiError(req, res, {
+          status: 401,
+          error: 'Please sign in to continue.',
+          code: 'AUTH_REQUIRED',
+        });
+      }
+      const scope = scopedPeriodsWhere('sp', 1);
       const result = await pool.query(`
         ${buildPeriodSelect(config.table)}
+        WHERE ${scope.sql}
         ORDER BY sp.start_date DESC, sp.division_id ASC, sp.department_id ASC, sp.id DESC
-      `);
+      `, [userId]);
 
       return res.json(result.rows);
     } catch (err) {
@@ -175,6 +190,52 @@ const shiftPeriodsConfig = {
       return sendPostgresError(req, res, err, {
         action: 'LIST',
         label: 'Error listing shift periods',
+      });
+    }
+  },
+
+  getHandler: async (req, res, { pool, config }) => {
+    try {
+      const id = parseInt(req.params.id, 10);
+      const userId = actorUserId(req);
+      if (Number.isNaN(id)) {
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'Invalid id.',
+          code: 'INVALID_REQUEST',
+        });
+      }
+      if (!userId) {
+        return sendApiError(req, res, {
+          status: 401,
+          error: 'Please sign in to continue.',
+          code: 'AUTH_REQUIRED',
+        });
+      }
+
+      const scope = scopedPeriodsWhere('sp', 2);
+      const result = await pool.query(
+        `
+        ${buildPeriodSelect(config.table)}
+        WHERE sp.id = $1
+          AND ${scope.sql}
+        `,
+        [id, userId],
+      );
+
+      if (!result.rows.length) {
+        return sendApiError(req, res, {
+          status: 404,
+          error: 'The requested record could not be found.',
+          code: 'RESOURCE_NOT_FOUND',
+        });
+      }
+
+      return res.json(result.rows[0]);
+    } catch (err) {
+      return sendPostgresError(req, res, err, {
+        action: 'GET',
+        label: 'Error querying shift period',
       });
     }
   },
@@ -244,6 +305,11 @@ const shiftPeriodsConfig = {
           code: 'INVALID_OPERATION',
         });
       }
+      const allowed = await requireDivisionDepartmentAccess(req, res, {
+        divisionId: body.division_id,
+        departmentId: body.department_id,
+      });
+      if (!allowed) return;
 
       // Only allow configured columns that were provided
       const cols = config.columns.filter((c) => body[c] !== undefined);
@@ -330,6 +396,13 @@ const shiftPeriodsConfig = {
           code: 'INVALID_OPERATION',
         });
       }
+      const targetDivisionId = body.division_id ?? currentResult.rows[0].division_id;
+      const targetDepartmentId = body.department_id ?? currentResult.rows[0].department_id;
+      const allowed = await requireDivisionDepartmentAccess(req, res, {
+        divisionId: targetDivisionId,
+        departmentId: targetDepartmentId,
+      });
+      if (!allowed) return;
 
       const cols = config.columns.filter((c) => body[c] !== undefined);
       if (!cols.length) {
@@ -385,7 +458,7 @@ const shiftPeriodsConfig = {
       }
 
       const meta = await pool.query(
-        `SELECT status FROM ${config.table} WHERE ${config.idColumn} = $1`,
+        `SELECT status, division_id, department_id FROM ${config.table} WHERE ${config.idColumn} = $1`,
         [id],
       );
       if (!meta.rows || meta.rows.length === 0) {
@@ -400,6 +473,11 @@ const shiftPeriodsConfig = {
           details: 'Cannot delete an APPROVED period.',
         });
       }
+      const allowed = await requireDivisionDepartmentAccess(req, res, {
+        divisionId: meta.rows[0].division_id,
+        departmentId: meta.rows[0].department_id,
+      });
+      if (!allowed) return;
 
       const result = await pool.query(
         `
@@ -589,6 +667,8 @@ router.post('/:id/generate-from-template', async (req, res) => {
  try {
  const precheck = await pool.query(
    `SELECT sp.template_id,
+           sp.division_id,
+           sp.department_id,
            st.is_active AS template_is_active
     FROM shiftly_schema.shift_periods sp
     LEFT JOIN shiftly_schema.shift_templates st ON st.id = sp.template_id
@@ -603,6 +683,11 @@ router.post('/:id/generate-from-template', async (req, res) => {
  if (guard.template_is_active !== true) {
    return res.status(400).json({ error: 'Cannot generate assignments from an inactive template.' });
  }
+ const allowed = await requireDivisionDepartmentAccess(req, res, {
+   divisionId: guard.division_id,
+   departmentId: guard.department_id,
+ });
+ if (!allowed) return;
 
  const result = await pool.query(
  `SELECT shiftly_api.generate_assignments_from_template($1) AS result`,
@@ -675,6 +760,22 @@ router.post('/:id/approve', async (req, res) => {
 
 
    try {
+ const meta = await pool.query(
+   `SELECT division_id, department_id
+    FROM shiftly_schema.shift_periods
+    WHERE id = $1
+    LIMIT 1`,
+   [periodId],
+ );
+ if (!meta.rows.length) {
+   return res.status(404).json({ error: 'Not found' });
+ }
+ const allowed = await requireDivisionDepartmentAccess(req, res, {
+   divisionId: meta.rows[0].division_id,
+   departmentId: meta.rows[0].department_id,
+ });
+ if (!allowed) return;
+
  const result = await pool.query(
  `SELECT shiftly_api.approve_period_with_assignments($1) AS result`,
  [periodId],
@@ -729,6 +830,22 @@ router.get('/:id/validate-approval', async (req, res) => {
     return res.status(400).json({ error: 'Invalid period id.' });
   }
   try {
+    const meta = await pool.query(
+      `SELECT division_id, department_id
+       FROM shiftly_schema.shift_periods
+       WHERE id = $1
+       LIMIT 1`,
+      [periodId],
+    );
+    if (!meta.rows.length) {
+      return res.status(404).json({ error: 'Not found' });
+    }
+    const allowed = await requireDivisionDepartmentAccess(req, res, {
+      divisionId: meta.rows[0].division_id,
+      departmentId: meta.rows[0].department_id,
+    });
+    if (!allowed) return;
+
     const result = await pool.query(
       `SELECT shiftly_api.validate_period_coverage($1) AS result`,
       [periodId],

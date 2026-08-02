@@ -93,6 +93,11 @@ function createCrudRouter(config) {
   // GET /:id -> single row
   router.get('/:id', async (req, res) => {
     try {
+      if (typeof config.getHandler === 'function') {
+        await config.getHandler(req, res, { pool, config, allColumns });
+        return;
+      }
+
       const query = `
         SELECT ${allColumns.join(', ')}
         FROM ${config.table}
