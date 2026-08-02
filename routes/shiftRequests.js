@@ -239,15 +239,31 @@ router.get('/', async (req, res) => {
     const whereSql =
       whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
 
-       // Read from VIEW (centralized projection)
-   const query = `
-     SELECT
-       sr.*,
-       to_char(sr.requested_shift_date, 'YYYY-MM-DD') AS requested_shift_date
-       FROM shiftly_api.v_shift_requests sr
-     ${whereSql}
-     ORDER BY created_at DESC
-   `;
+    // Read the workflow projection and resolve actor labels directly from
+    // shiftly_schema.users.
+    //
+    // Do not depend only on the Flutter active-user lookup here:
+    // historical/pending requests may reference an inactive user, and the
+    // client lookup cache may not yet contain a newly created user.
+    const query = `
+      SELECT
+        sr.*,
+        to_char(
+          sr.requested_shift_date,
+          'YYYY-MM-DD'
+        ) AS requested_shift_date,
+        requested_by_user.user_name AS requested_by_user_name,
+        requested_by_user.user_desc AS requested_by_user_desc,
+        target_user.user_name AS target_user_name,
+        target_user.user_desc AS target_user_desc
+      FROM shiftly_api.v_shift_requests sr
+      LEFT JOIN shiftly_schema.users requested_by_user
+        ON requested_by_user.id = sr.requested_by_user_id
+      LEFT JOIN shiftly_schema.users target_user
+        ON target_user.id = sr.target_user_id
+      ${whereSql}
+      ORDER BY sr.created_at DESC
+    `;
 
     const result = await pool.query(query, values);
     res.json(normalizeShiftRequestRows(result.rows));
