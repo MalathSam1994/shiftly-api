@@ -5,6 +5,27 @@
 // Optional:
 //   &from=2026-01-01&to=2026-02-01
 //
+// The response also contains:
+//   managers: [
+//     {
+//       manager_user_id,
+//       manager_user_name,
+//       manager_user_desc,
+//       manager_name,
+//       is_primary,
+//       scopes: [
+//         {
+//           relation_id,
+//           division_id,
+//           division_desc,
+//           department_id,
+//           department_desc,
+//           is_primary
+//         }
+//       ]
+//     }
+//   ]
+//
 const express = require('express');
 const pool = require('../db');
 const { sendInternalError } = require('../utils/apiError');
@@ -49,31 +70,51 @@ router.get('/', async (req, res) => {
   let values = [];
 
   if (from && to) {
-    sql = `SELECT * FROM shiftly_api.fn_mobile_dashboard($1::int, $2::date, $3::date);`;
+    sql = `
+      SELECT
+        dashboard.*,
+        shiftly_api.fn_mobile_dashboard_managers($1::int) AS managers
+      FROM shiftly_api.fn_mobile_dashboard(
+        $1::int,
+        $2::date,
+        $3::date
+      ) AS dashboard;
+    `;
     values = [userId, from, to];
   } else if (from && !to) {
     // If caller provides only "from", assume "to" = from + 1 month
     sql = `
-      SELECT * FROM shiftly_api.fn_mobile_dashboard(
-        $1::int,
-        $2::date,
-        (date_trunc('month', $2::date) + interval '1 month')::date
-      );
+      SELECT
+        dashboard.*,
+        shiftly_api.fn_mobile_dashboard_managers($1::int) AS managers
+      FROM shiftly_api.fn_mobile_dashboard(
+          $1::int,
+          $2::date,
+          (date_trunc('month', $2::date) + interval '1 month')::date
+      ) AS dashboard;
     `;
     values = [userId, from];
   } else if (!from && to) {
     // If caller provides only "to", infer "from" from the month of (to - 1 day)
     sql = `
-      SELECT * FROM shiftly_api.fn_mobile_dashboard(
-        $1::int,
-        date_trunc('month', ($2::date - interval '1 day'))::date,
-        $2::date
-      );
+      SELECT
+        dashboard.*,
+        shiftly_api.fn_mobile_dashboard_managers($1::int) AS managers
+      FROM shiftly_api.fn_mobile_dashboard(
+          $1::int,
+          date_trunc('month', ($2::date - interval '1 day'))::date,
+          $2::date
+      ) AS dashboard;
     `;
     values = [userId, to];
   } else {
     // No dates => function defaults to current month
-    sql = `SELECT * FROM shiftly_api.fn_mobile_dashboard($1::int);`;
+    sql = `
+      SELECT
+        dashboard.*,
+        shiftly_api.fn_mobile_dashboard_managers($1::int) AS managers
+      FROM shiftly_api.fn_mobile_dashboard($1::int) AS dashboard;
+    `;
     values = [userId];
   }
 
@@ -97,33 +138,37 @@ router.get('/', async (req, res) => {
         $5::text AS staff_type_name,
         $6::int AS manager_user_id,
         $7::text AS manager_name,
-        $8::int[] AS linked_division_ids,
-        $9::text[] AS linked_divisions,
-        $10::int[] AS linked_department_ids,
-        $11::text[] AS linked_departments,
-        $12::text[] AS worked_divisions_this_month,
-        $13::text[] AS worked_departments_this_month,
-        $14::int AS approved_shifts_this_month,
-        $15::int AS canceled_shifts_this_month,
-        $16::int AS pending_shifts_this_month,
-        $17::int AS total_shifts_this_month,
-        $18::int AS absence_shifts_this_month,
-        $19::int AS days_worked_this_month,
-        $20::numeric AS worked_hours_this_month,
-        $21::numeric AS worked_effective_hours_this_month,
-        $22::numeric AS approved_hours_this_month,
-        $23::numeric AS approved_effective_hours_this_month,
-        to_char($24::date, 'YYYY-MM-DD') AS month_from,
-        to_char($25::date, 'YYYY-MM-DD') AS month_to_inclusive,
-        $26::int AS next_shift_assignment_id,
-        CASE WHEN $27::date IS NULL THEN NULL ELSE to_char($27::date, 'YYYY-MM-DD') END AS next_shift_date,
-        $28::text AS next_shift_department_desc,
-        $29::text AS next_shift_division_desc,
-        $30::text AS next_shift_label,
-        $31::time AS next_shift_start_time,
-        $32::time AS next_shift_end_time,
-        $33::numeric AS next_shift_duration_hours,
-        $34::numeric AS next_shift_effective_duration_hours
+        $8::jsonb AS managers,
+        $9::int[] AS linked_division_ids,
+        $10::text[] AS linked_divisions,
+        $11::int[] AS linked_department_ids,
+        $12::text[] AS linked_departments,
+        $13::text[] AS worked_divisions_this_month,
+        $14::text[] AS worked_departments_this_month,
+        $15::int AS approved_shifts_this_month,
+        $16::int AS canceled_shifts_this_month,
+        $17::int AS pending_shifts_this_month,
+        $18::int AS total_shifts_this_month,
+        $19::int AS absence_shifts_this_month,
+        $20::int AS days_worked_this_month,
+        $21::numeric AS worked_hours_this_month,
+        $22::numeric AS worked_effective_hours_this_month,
+        $23::numeric AS approved_hours_this_month,
+        $24::numeric AS approved_effective_hours_this_month,
+        to_char($25::date, 'YYYY-MM-DD') AS month_from,
+        to_char($26::date, 'YYYY-MM-DD') AS month_to_inclusive,
+        $27::int AS next_shift_assignment_id,
+        CASE
+          WHEN $28::date IS NULL THEN NULL
+          ELSE to_char($28::date, 'YYYY-MM-DD')
+        END AS next_shift_date,
+        $29::text AS next_shift_department_desc,
+        $30::text AS next_shift_division_desc,
+        $31::text AS next_shift_label,
+        $32::time AS next_shift_start_time,
+        $33::time AS next_shift_end_time,
+        $34::numeric AS next_shift_duration_hours,
+        $35::numeric AS next_shift_effective_duration_hours
       `,
       [
         baseRow.user_id,
@@ -133,6 +178,7 @@ router.get('/', async (req, res) => {
         baseRow.staff_type_name,
         baseRow.manager_user_id,
         baseRow.manager_name,
+        JSON.stringify(baseRow.managers ?? []),
         baseRow.linked_division_ids,
         baseRow.linked_divisions,
         baseRow.linked_department_ids,
@@ -168,7 +214,8 @@ router.get('/', async (req, res) => {
         message: `User ${userId} not found or no dashboard row returned.`,
       });
     }
- return res.json(rows.rows[0]);
+
+    return res.json(rows.rows[0]);
   } catch (err) {
     return sendDbError(req, res, err, 'mobileDashboard');
   }
