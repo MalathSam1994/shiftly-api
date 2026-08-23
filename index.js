@@ -36,8 +36,10 @@
 	const userAbsencesRouter = require('./routes/userAbsences');
 	const notifications = require('./routes/notifications');
 	const fcm = require('./routes/fcm');
+	const clinicalRouter = require('./routes/clinical');
 	const { startNotificationDispatcher } = require('./services/notificationDispatcher');
 	const { startShiftRequestMaintenance } = require('./services/shiftRequestMaintenance');
+	const { startClinicalAssignmentMaintenance } = require('./services/clinicalAssignmentMaintenance');
 	const shiftOffersRouter = require('./routes/shiftOffers');
 	const holidayYearsRouter = require('./routes/holidayYears');
 	const yearlyHolidaysRouter = require('./routes/yearlyHolidays');
@@ -216,6 +218,7 @@ app.use(requireAuth);
 	app.use('/holiday-years', holidayYearsRouter);
 	app.use('/yearly-holidays', yearlyHolidaysRouter);
 	app.use('/absence-types', absenceTypesRouter);
+	app.use('/clinical', clinicalRouter);
 
 	app.use('/colleague-shifts', colleagueShiftsQuery);
 	app.use('/switch-candidates', switchCandidatesQuery);
@@ -272,6 +275,9 @@ app.use(errorHandler);
 	  });
 	  startShiftRequestMaintenance().catch((e) => {
 		console.error('Failed to start shift request maintenance:', e);
+	  });
+	  startClinicalAssignmentMaintenance().catch((e) => {
+		console.error('Failed to start clinical assignment maintenance:', e);
 	  });
 	});
 
