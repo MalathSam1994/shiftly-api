@@ -128,6 +128,14 @@ router.get('/', async (req, res) => {
       });
     }
 
+    const clinicalCountResult = await pool.query(
+      `SELECT COUNT(*)::int AS published_patient_assignment_count
+       FROM shiftly_api.fn_clinical_mobile_my_patients($1::int, 'CURRENT')`,
+      [userId],
+    );
+    const publishedPatientAssignmentCount =
+      clinicalCountResult.rows?.[0]?.published_patient_assignment_count || 0;
+
     const rows = await pool.query(
       `
       SELECT
@@ -168,7 +176,8 @@ router.get('/', async (req, res) => {
         $32::time AS next_shift_start_time,
         $33::time AS next_shift_end_time,
         $34::numeric AS next_shift_duration_hours,
-        $35::numeric AS next_shift_effective_duration_hours
+        $35::numeric AS next_shift_effective_duration_hours,
+        $36::int AS published_patient_assignment_count
       `,
       [
         baseRow.user_id,
@@ -206,6 +215,7 @@ router.get('/', async (req, res) => {
         baseRow.next_shift_end_time,
         baseRow.next_shift_duration_hours,
         baseRow.next_shift_effective_duration_hours,
+        publishedPatientAssignmentCount,
       ]
     );
     if (!rows.rows || rows.rows.length === 0) {
