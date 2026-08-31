@@ -1812,16 +1812,16 @@ router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), asyn
           p.display_name AS patient_name,
           p.patient_public_id,
           cu.unit_name,
-          COALESCE(nsa.shift_date, psa.shift_date, r.shift_date) AS shift_date,
+          to_char(COALESCE(nsa.shift_date, psa.shift_date, r.shift_date), 'YYYY-MM-DD') AS shift_date,
           COALESCE(nst.shift_label, pst.shift_label, rst.shift_label) AS shift_label,
-          COALESCE(nsa.start_time, psa.start_time) AS shift_start_time,
-          COALESCE(nsa.end_time, psa.end_time) AS shift_end_time,
+          to_char(COALESCE(nsa.start_time, psa.start_time), 'HH24:MI') AS shift_start_time,
+          to_char(COALESCE(nsa.end_time, psa.end_time), 'HH24:MI') AS shift_end_time,
           pu.user_desc AS previous_user_name,
           nu.user_desc AS new_user_name,
           h.previous_shift_assignment_id,
           h.new_shift_assignment_id,
           actor.user_desc AS changed_by_name,
-          h.changed_at,
+          to_char(h.changed_at, 'YYYY-MM-DD HH24:MI') AS changed_at,
           EXISTS (
             SELECT 1
             FROM shiftly_schema.clinical_patient_assignments pa
