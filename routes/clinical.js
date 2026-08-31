@@ -1769,6 +1769,99 @@ router.get('/assignment-board', requirePermission(OPEN_ASSIGNMENT_BOARD), async 
   }
 });
 
+router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) {
+    return sendApiError(req, res, {
+      status: 401,
+      error: 'Please sign in to continue.',
+      code: 'AUTH_REQUIRED',
+    });
+  }
+  const shiftDate = parseRequiredDate(req.query.shiftDate);
+  const shiftTypeId = parseOptionalInt(req.query.shiftTypeId);
+  const divisionId = parseOptionalInt(req.query.divisionId);
+  const departmentId = parseOptionalInt(req.query.departmentId);
+  const clinicalUnitId = parseOptionalInt(req.query.clinicalUnitId);
+  if (!shiftDate || shiftTypeId == null || divisionId == null || departmentId == null) {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'shiftDate, shiftTypeId, divisionId, and departmentId are required.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+  if (shiftTypeId === undefined || divisionId === undefined || departmentId === undefined || clinicalUnitId === undefined) {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'Numeric filters must be positive integers when provided.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          h.id,
+          h.assignment_id,
+          h.optimization_run_id,
+          r.run_number,
+          r.optimization_mode,
+          r.optimization_status,
+          h.change_type,
+          h.change_reason,
+          p.display_name AS patient_name,
+          p.patient_public_id,
+          cu.unit_name,
+          COALESCE(nsa.shift_date, psa.shift_date, r.shift_date) AS shift_date,
+          COALESCE(nst.shift_label, pst.shift_label, rst.shift_label) AS shift_label,
+          COALESCE(nsa.start_time, psa.start_time) AS shift_start_time,
+          COALESCE(nsa.end_time, psa.end_time) AS shift_end_time,
+          pu.user_desc AS previous_user_name,
+          nu.user_desc AS new_user_name,
+          h.previous_shift_assignment_id,
+          h.new_shift_assignment_id,
+          actor.user_desc AS changed_by_name,
+          h.changed_at,
+          EXISTS (
+            SELECT 1
+            FROM shiftly_schema.clinical_patient_assignments pa
+            WHERE pa.id = h.assignment_id
+              AND pa.assignment_status = 'PUBLISHED'
+              AND pa.ended_at IS NULL
+          ) AS is_current_published
+        FROM shiftly_schema.clinical_patient_assignment_history h
+        JOIN shiftly_schema.clinical_encounters e ON e.id = h.encounter_id
+        JOIN shiftly_schema.clinical_patients p ON p.id = h.patient_id
+        JOIN shiftly_schema.clinical_units cu ON cu.id = e.current_clinical_unit_id
+        LEFT JOIN shiftly_schema.clinical_assignment_optimization_runs r ON r.id = h.optimization_run_id
+        LEFT JOIN shiftly_schema.shift_assignments nsa ON nsa.id = h.new_shift_assignment_id
+        LEFT JOIN shiftly_schema.shift_types nst ON nst.id = nsa.shift_type_id
+        LEFT JOIN shiftly_schema.shift_assignments psa ON psa.id = h.previous_shift_assignment_id
+        LEFT JOIN shiftly_schema.shift_types pst ON pst.id = psa.shift_type_id
+        LEFT JOIN shiftly_schema.shift_types rst ON rst.id = r.shift_type_id
+        LEFT JOIN shiftly_schema.users pu ON pu.id = h.previous_assigned_user_id
+        LEFT JOIN shiftly_schema.users nu ON nu.id = h.new_assigned_user_id
+        LEFT JOIN shiftly_schema.users actor ON actor.id = h.changed_by
+        WHERE e.division_id = $3
+          AND e.department_id = $4
+          AND ($5::integer IS NULL OR e.current_clinical_unit_id = $5)
+          AND shiftly_api.fn_user_can_access_division_department($1, e.division_id, e.department_id)
+          AND COALESCE(nsa.shift_date, psa.shift_date, r.shift_date) = $2::date
+          AND COALESCE(nsa.shift_type_id, psa.shift_type_id, r.shift_type_id) = $6
+        ORDER BY h.changed_at DESC, h.id DESC
+        LIMIT 250
+      `,
+      [userId, shiftDate, divisionId, departmentId, clinicalUnitId, shiftTypeId],
+    );
+    return res.json(result.rows);
+  } catch (err) {
+    return sendPostgresError(req, res, err, {
+      action: 'LIST',
+      label: 'Error loading clinical assignment history',
+    });
+  }
+});
+
 router.get('/assignment-workflows', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
@@ -1970,6 +2063,28 @@ router.post('/assignment-runs/:id/manual-override', requirePermission(OVERRIDE_A
     });
   }
   try {
+    const runStatus = await pool.query(
+      `
+        SELECT optimization_status
+        FROM shiftly_schema.clinical_assignment_optimization_runs
+        WHERE id = $1
+      `,
+      [runId],
+    );
+    if (!runStatus.rows.length) {
+      return sendApiError(req, res, {
+        status: 404,
+        error: 'Assignment draft was not found.',
+        code: 'CLINICAL_RUN_NOT_FOUND',
+      });
+    }
+    if (!['GENERATED', 'REVIEWED'].includes(runStatus.rows[0].optimization_status)) {
+      return sendApiError(req, res, {
+        status: 409,
+        error: 'Manual changes are available only while reviewing a draft assignment. Generate a rebalance proposal before changing a published assignment.',
+        code: 'CLINICAL_RUN_NOT_EDITABLE',
+      });
+    }
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_manual_assignment_override($1, $2, $3, $4, $5) AS run`,
       [userId, runId, encounterId, shiftAssignmentId, req.body?.note ?? null],
@@ -2037,6 +2152,7 @@ router.get('/mobile/my-patients', requirePermission(OPEN_MOBILE_PATIENTS), async
 
   try {
     const scope = String(req.query.scope || 'CURRENT').trim().toUpperCase();
+    const shiftAssignmentId = parseOptionalInt(req.query.shiftAssignmentId || req.query.shift_assignment_id);
     if (!['CURRENT', 'HISTORY', 'ALL'].includes(scope)) {
       return sendApiError(req, res, {
         status: 400,
@@ -2044,10 +2160,17 @@ router.get('/mobile/my-patients', requirePermission(OPEN_MOBILE_PATIENTS), async
         code: 'INVALID_REQUEST',
       });
     }
+    if (shiftAssignmentId === undefined) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: 'shiftAssignmentId must be a positive integer when provided.',
+        code: 'INVALID_REQUEST',
+      });
+    }
 
     const result = await pool.query(
-      `SELECT * FROM shiftly_api.fn_clinical_mobile_my_patients($1, $2)`,
-      [userId, scope],
+      `SELECT * FROM shiftly_api.fn_clinical_mobile_my_patients($1, $2, $3)`,
+      [userId, scope, shiftAssignmentId],
     );
     return res.json(result.rows);
   } catch (err) {
