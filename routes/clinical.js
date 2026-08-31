@@ -1791,6 +1791,27 @@ router.get('/assignment-workflows', requirePermission(OPEN_ASSIGNMENT_BOARD), as
   }
 });
 
+router.get('/shift-context/:shiftAssignmentId', requireAnyClinicalPermission([OPEN_ASSIGNMENT_BOARD, OPEN_MOBILE_PATIENTS]), async (req, res) => {
+  const userId = actorUserId(req);
+  const shiftAssignmentId = requirePositiveId(req, res, req.params.shiftAssignmentId, 'shiftAssignmentId');
+  if (!userId) {
+    return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  }
+  if (!shiftAssignmentId) return null;
+  try {
+    const result = await pool.query(
+      `SELECT shiftly_api.fn_clinical_shift_context_summary($1, $2) AS summary`,
+      [userId, shiftAssignmentId],
+    );
+    return res.json(result.rows[0].summary || {});
+  } catch (err) {
+    return sendPostgresError(req, res, err, {
+      action: 'GET',
+      label: 'Error loading clinical shift context',
+    });
+  }
+});
+
 router.post('/assignment-workflows/evaluate', requirePermission(REVIEW_ASSIGNMENT_WORKFLOWS), async (req, res) => {
   const userId = actorUserId(req);
   const shiftDate = parseRequiredDate(req.body?.shift_date);
