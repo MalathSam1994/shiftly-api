@@ -76,6 +76,74 @@ function parseRequiredDate(value) {
   return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : undefined;
 }
 
+function sendPastClinicalAssignmentLockedError(req, res) {
+  return sendApiError(req, res, {
+    status: 409,
+    error: 'Past assignment dates are locked. Choose today or a future date to make assignment changes.',
+    code: 'CLINICAL_ASSIGNMENT_DATE_LOCKED',
+  });
+}
+
+async function ensureClinicalAssignmentDateEditable(req, res, shiftDate) {
+  const result = await pool.query(
+    `SELECT $1::date < CURRENT_DATE AS is_locked`,
+    [shiftDate],
+  );
+  if (result.rows[0]?.is_locked) {
+    sendPastClinicalAssignmentLockedError(req, res);
+    return false;
+  }
+  return true;
+}
+
+async function ensureClinicalAssignmentRunDateEditable(req, res, runId) {
+  const result = await pool.query(
+    `
+      SELECT shift_date < CURRENT_DATE AS is_locked
+      FROM shiftly_schema.clinical_assignment_optimization_runs
+      WHERE id = $1
+    `,
+    [runId],
+  );
+  if (!result.rows.length) {
+    sendApiError(req, res, {
+      status: 404,
+      error: 'Assignment draft was not found.',
+      code: 'CLINICAL_RUN_NOT_FOUND',
+    });
+    return false;
+  }
+  if (result.rows[0].is_locked) {
+    sendPastClinicalAssignmentLockedError(req, res);
+    return false;
+  }
+  return true;
+}
+
+async function ensureClinicalAssignmentWorkflowDateEditable(req, res, workflowId) {
+  const result = await pool.query(
+    `
+      SELECT shift_date < CURRENT_DATE AS is_locked
+      FROM shiftly_schema.clinical_assignment_review_workflows
+      WHERE id = $1
+    `,
+    [workflowId],
+  );
+  if (!result.rows.length) {
+    sendApiError(req, res, {
+      status: 404,
+      error: 'Assignment workflow was not found.',
+      code: 'CLINICAL_WORKFLOW_NOT_FOUND',
+    });
+    return false;
+  }
+  if (result.rows[0].is_locked) {
+    sendPastClinicalAssignmentLockedError(req, res);
+    return false;
+  }
+  return true;
+}
+
 function buildFileStamp(date = new Date()) {
   const pad = (value) => String(value).padStart(2, '0');
   return `${date.getFullYear()}${pad(date.getMonth() + 1)}${pad(date.getDate())}_${pad(date.getHours())}${pad(date.getMinutes())}${pad(date.getSeconds())}`;
@@ -1756,13 +1824,6 @@ router.get('/assignment-board/dates', requirePermission(OPEN_ASSIGNMENT_BOARD), 
       code: 'INVALID_REQUEST',
     });
   }
-  if (shiftTypeId == null || clinicalUnitId == null) {
-    return sendApiError(req, res, {
-      status: 400,
-      error: 'shiftTypeId and clinicalUnitId are required positive integers.',
-      code: 'INVALID_REQUEST',
-    });
-  }
   if (shiftTypeId === undefined || clinicalUnitId === undefined) {
     return sendApiError(req, res, {
       status: 400,
@@ -1775,31 +1836,38 @@ router.get('/assignment-board/dates', requirePermission(OPEN_ASSIGNMENT_BOARD), 
     const result = await pool.query(
       `
         SELECT
-          to_char(sa.shift_date, 'YYYY-MM-DD') AS shift_date
+          to_char(sa.shift_date, 'YYYY-MM-DD') AS shift_date,
+          sa.shift_type_id,
+          cu.id AS clinical_unit_id
         FROM shiftly_schema.clinical_units cu
         JOIN shiftly_schema.shift_assignments sa
           ON (sa.division_id IS NULL OR sa.division_id = cu.division_id)
          AND sa.department_id = cu.department_id
         JOIN shiftly_schema.users u ON u.id = sa.user_id
-        WHERE cu.id = $5
-          AND cu.is_active = true
+        WHERE cu.is_active = true
           AND sa.shift_date BETWEEN $2::date AND $3::date
-          AND sa.shift_type_id = $4
+          AND ($4::integer IS NULL OR sa.shift_type_id = $4)
+          AND ($5::integer IS NULL OR cu.id = $5)
           AND sa.status <> 'CANCELLED'
           AND COALESCE(sa.is_absence, 2) <> 1
           AND shiftly_api.fn_user_can_access_division_department($1, cu.division_id, cu.department_id)
-        GROUP BY sa.shift_date
-        ORDER BY sa.shift_date ASC
+        GROUP BY sa.shift_date, sa.shift_type_id, cu.id
+        ORDER BY sa.shift_date ASC, sa.shift_type_id ASC, cu.id ASC
       `,
       [userId, fromDate, toDate, shiftTypeId, clinicalUnitId],
     );
+
+    const dates = [
+      ...new Set(result.rows.map((row) => row.shift_date)),
+    ];
 
     return res.json({
       from_date: fromDate,
       to_date: toDate,
       shift_type_id: shiftTypeId,
       clinical_unit_id: clinicalUnitId,
-      dates: result.rows.map((row) => row.shift_date),
+      dates,
+      availability: result.rows,
     });
   } catch (err) {
     return sendPostgresError(req, res, err, {
@@ -2009,6 +2077,8 @@ router.post('/assignment-workflows/evaluate', requirePermission(REVIEW_ASSIGNMEN
     return sendApiError(req, res, { status: 400, error: 'Numeric filters must be positive integers when provided.', code: 'INVALID_REQUEST' });
   }
   try {
+    if (!(await ensureClinicalAssignmentDateEditable(req, res, shiftDate))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_evaluate_assignment_review($1, $2::date, $3, $4, $5, $6, $7, 'MANUAL') AS result`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId, triggerType],
@@ -2030,6 +2100,8 @@ router.post('/assignment-workflows/:id/review', requirePermission(REVIEW_ASSIGNM
   }
   if (!workflowId) return null;
   try {
+    if (!(await ensureClinicalAssignmentWorkflowDateEditable(req, res, workflowId))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_mark_assignment_workflow_reviewed($1, $2) AS workflows`,
       [userId, workflowId],
@@ -2059,6 +2131,8 @@ router.post('/assignment-workflows/:id/optimize', requirePermission(OPTIMIZE_ASS
     });
   }
   try {
+    if (!(await ensureClinicalAssignmentWorkflowDateEditable(req, res, workflowId))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_request_assignment_workflow_optimization($1, $2, $3) AS workflows`,
       [userId, workflowId, mode],
@@ -2080,6 +2154,8 @@ router.post('/assignment-workflows/:id/skip', requirePermission(REVIEW_ASSIGNMEN
   }
   if (!workflowId) return null;
   try {
+    if (!(await ensureClinicalAssignmentWorkflowDateEditable(req, res, workflowId))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_skip_assignment_workflow($1, $2, $3) AS workflows`,
       [userId, workflowId, req.body?.reason ?? null],
@@ -2115,6 +2191,8 @@ router.post('/assignment-runs/generate', requirePermission(OPTIMIZE_ASSIGNMENTS)
     return sendApiError(req, res, { status: 400, error: 'Numeric filters must be positive integers when provided.', code: 'INVALID_REQUEST' });
   }
   try {
+    if (!(await ensureClinicalAssignmentDateEditable(req, res, shiftDate))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_generate_assignment_run($1, $2::date, $3, $4, $5, $6, $7) AS run`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId, mode],
@@ -2145,6 +2223,8 @@ router.post('/assignment-runs/:id/manual-override', requirePermission(OVERRIDE_A
     });
   }
   try {
+    if (!(await ensureClinicalAssignmentRunDateEditable(req, res, runId))) return null;
+
     const runStatus = await pool.query(
       `
         SELECT optimization_status
@@ -2188,6 +2268,8 @@ router.post('/assignment-runs/:id/publish', requirePermission(PUBLISH_ASSIGNMENT
   }
   if (!runId) return null;
   try {
+    if (!(await ensureClinicalAssignmentRunDateEditable(req, res, runId))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_publish_assignment_run($1, $2) AS run`,
       [userId, runId],
@@ -2209,6 +2291,8 @@ router.post('/assignment-runs/:id/cancel', requirePermission(PUBLISH_ASSIGNMENTS
   }
   if (!runId) return null;
   try {
+    if (!(await ensureClinicalAssignmentRunDateEditable(req, res, runId))) return null;
+
     const result = await pool.query(
       `SELECT shiftly_api.fn_clinical_cancel_assignment_run($1, $2, $3) AS run`,
       [userId, runId, req.body?.reason ?? null],
