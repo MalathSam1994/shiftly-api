@@ -1727,6 +1727,88 @@ router.get('/analytics/excel', requirePermission(EXPORT_CLINICAL_ANALYTICS), asy
   }
 });
 
+router.get('/assignment-board/dates', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) {
+    return sendApiError(req, res, {
+      status: 401,
+      error: 'Please sign in to continue.',
+      code: 'AUTH_REQUIRED',
+    });
+  }
+
+  const fromDate = parseRequiredDate(req.query.fromDate || req.query.from_date);
+  const toDate = parseRequiredDate(req.query.toDate || req.query.to_date);
+  const shiftTypeId = parseOptionalInt(req.query.shiftTypeId || req.query.shift_type_id);
+  const clinicalUnitId = parseOptionalInt(req.query.clinicalUnitId || req.query.clinical_unit_id);
+
+  if (!fromDate || !toDate) {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'fromDate and toDate are required in YYYY-MM-DD format.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+  if (fromDate > toDate) {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'fromDate must be on or before toDate.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+  if (shiftTypeId == null || clinicalUnitId == null) {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'shiftTypeId and clinicalUnitId are required positive integers.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+  if (shiftTypeId === undefined || clinicalUnitId === undefined) {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'Numeric filters must be positive integers when provided.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+
+  try {
+    const result = await pool.query(
+      `
+        SELECT
+          to_char(sa.shift_date, 'YYYY-MM-DD') AS shift_date
+        FROM shiftly_schema.clinical_units cu
+        JOIN shiftly_schema.shift_assignments sa
+          ON (sa.division_id IS NULL OR sa.division_id = cu.division_id)
+         AND sa.department_id = cu.department_id
+        JOIN shiftly_schema.users u ON u.id = sa.user_id
+        WHERE cu.id = $5
+          AND cu.is_active = true
+          AND sa.shift_date BETWEEN $2::date AND $3::date
+          AND sa.shift_type_id = $4
+          AND sa.status <> 'CANCELLED'
+          AND COALESCE(sa.is_absence, 2) <> 1
+          AND shiftly_api.fn_user_can_access_division_department($1, cu.division_id, cu.department_id)
+        GROUP BY sa.shift_date
+        ORDER BY sa.shift_date ASC
+      `,
+      [userId, fromDate, toDate, shiftTypeId, clinicalUnitId],
+    );
+
+    return res.json({
+      from_date: fromDate,
+      to_date: toDate,
+      shift_type_id: shiftTypeId,
+      clinical_unit_id: clinicalUnitId,
+      dates: result.rows.map((row) => row.shift_date),
+    });
+  } catch (err) {
+    return sendPostgresError(req, res, err, {
+      action: 'LIST',
+      label: 'Error loading clinical assignment board dates',
+    });
+  }
+});
+
 router.get('/assignment-board', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
