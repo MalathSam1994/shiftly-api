@@ -38,7 +38,7 @@ router.get('/', async (req, res) => {
     });
   }
   
-   const shiftDateExpr = `(shift_date AT TIME ZONE 'Europe/Berlin')::date`;
+   const shiftDateExpr = `shift_date::date`;
 
   const conditions = [
     'user_id = $1',

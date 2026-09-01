@@ -38,7 +38,7 @@ router.get('/', async (req, res) => {
     });
   }
   
-   const reqDateExpr = `(requested_shift_date AT TIME ZONE 'Europe/Berlin')::date`;
+   const reqDateExpr = `requested_shift_date::date`;
 
   // Note: we keep the OR involvement filter, but we still keep the
   // date range + optional filters first to reduce scanned rows.

@@ -39,9 +39,9 @@ router.get('/', async (req, res) => {
     });
   }
   
-  // Use local-calendar date for filtering and output (fixes "2025-12-31" instead of "2026-01-01").
-// Works when vw exposes shift_date as timestamptz/ts; we always compare by Berlin date.
-const shiftDateExpr = `(shift_date AT TIME ZONE 'Europe/Berlin')::date`;
+  // shift_date is a business DATE in the backing view. Keep it date-only so
+  // search results match calendar/day-detail APIs without timezone shifts.
+const shiftDateExpr = `shift_date::date`;
 
   const conditions = [
     'user_id = $1',

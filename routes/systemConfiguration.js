@@ -59,6 +59,18 @@ function normalizeNotificationBehavior(value) {
   return normalized;
 }
 
+function normalizeConfigurationResponse(row) {
+  if (!row) return row;
+
+  return {
+    ...row,
+    clinical_imbalance_threshold: Number(row.clinical_imbalance_threshold),
+    clinical_minimum_optimizer_improvement: Number(
+      row.clinical_minimum_optimizer_improvement,
+    ),
+  };
+}
+
 router.get('/', async (req, res) => {
   try {
     const result = await pool.query(
@@ -190,10 +202,14 @@ router.get('/', async (req, res) => {
         `
       );
 
-      return res.status(200).json(insertResult.rows[0]);
+      return res
+        .status(200)
+        .json(normalizeConfigurationResponse(insertResult.rows[0]));
     }
 
-    return res.status(200).json(result.rows[0]);
+    return res
+      .status(200)
+      .json(normalizeConfigurationResponse(result.rows[0]));
   } catch (err) {
     console.error('Error loading system configuration:', err);
     return sendPostgresError(req, res, err, {
@@ -463,7 +479,9 @@ router.put('/', async (req, res) => {
       ]
     );
 
-    return res.status(200).json(result.rows[0]);
+    return res
+      .status(200)
+      .json(normalizeConfigurationResponse(result.rows[0]));
   } catch (err) {
     console.error('Error updating system configuration:', err);
 

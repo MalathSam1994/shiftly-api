@@ -94,6 +94,195 @@ async function fetchShiftRequestResponse(queryable, requestId) {
   return result.rows[0] ? normalizeShiftRequestRow(result.rows[0]) : null;
 }
 
+function isMatchingApprovedNewShiftAssignment(row) {
+  if (!row) return false;
+
+  const assignmentId = Number(row.assignment_id);
+  if (!Number.isFinite(assignmentId) || assignmentId <= 0) return false;
+
+  const status = String(row.assignment_status || '').trim().toUpperCase();
+  if (status !== 'APPROVED') return false;
+
+  if (Number(row.assignment_is_absence ?? 2) === 1) return false;
+
+  return (
+    String(row.assignment_shift_date || '').slice(0, 10) ===
+      String(row.requested_shift_date || '').slice(0, 10) &&
+    Number(row.assignment_user_id) === Number(row.requested_by_user_id) &&
+    Number(row.assignment_shift_type_id) ===
+      Number(row.requested_shift_type_id) &&
+    Number(row.assignment_department_id) ===
+      Number(row.requested_department_id) &&
+    Number(row.assignment_division_id || 0) === Number(row.division_id || 0)
+  );
+}
+
+async function resolveCompletedNewShiftApproval({
+  client,
+  requestId,
+  decisionByUserId,
+  decisionComment,
+}) {
+  const result = await client.query(
+    `
+    SELECT
+      sr.id,
+      sr.request_type,
+      sr.request_status,
+      sr.requested_by_user_id,
+      sr.requested_shift_type_id,
+      sr.requested_department_id,
+      sr.division_id,
+      sr.manager_user_id,
+      sr.inbox_user_id,
+      sr.decision_comment,
+      to_char(sr.requested_shift_date, 'YYYY-MM-DD') AS requested_shift_date,
+      sa.id AS assignment_id,
+      sa.user_id AS assignment_user_id,
+      sa.shift_type_id AS assignment_shift_type_id,
+      sa.department_id AS assignment_department_id,
+      sa.division_id AS assignment_division_id,
+      sa.status AS assignment_status,
+      sa.is_absence AS assignment_is_absence,
+      to_char(sa.shift_date, 'YYYY-MM-DD') AS assignment_shift_date
+    FROM shiftly_schema.shift_requests sr
+    LEFT JOIN LATERAL (
+      SELECT h.shift_assignment_id
+      FROM shiftly_schema.shift_assignment_user_history h
+      WHERE h.shift_request_id = sr.id
+        AND h.change_reason = 'NEW_SHIFT'
+      ORDER BY h.id DESC
+      LIMIT 1
+    ) hist ON TRUE
+    LEFT JOIN shiftly_schema.shift_assignments sa
+      ON sa.id = COALESCE(sr.shift_assignment_id, hist.shift_assignment_id)
+    WHERE sr.id = $1
+    FOR UPDATE OF sr
+    `,
+    [requestId],
+  );
+
+  const row = result.rows[0];
+  if (!row || String(row.request_type || '').trim().toUpperCase() !== 'NEW_SHIFT') {
+    return null;
+  }
+
+  if (!isMatchingApprovedNewShiftAssignment(row)) {
+    return null;
+  }
+
+  const requestStatus = String(row.request_status || '').trim().toUpperCase();
+  const currentInboxUserId = row.inbox_user_id ?? row.manager_user_id;
+  const requestIsPending = requestStatus.startsWith('PENDING');
+
+  if (
+    requestIsPending &&
+    currentInboxUserId != null &&
+    Number(currentInboxUserId) !== Number(decisionByUserId)
+  ) {
+    return null;
+  }
+
+  if (requestStatus === 'APPROVED') {
+    const existing = await fetchShiftRequestResponse(client, requestId);
+    return existing
+      ? {
+          ...existing,
+          workflow_action: 'ALREADY_APPROVED',
+          workflow_message: 'This request has already been approved.',
+        }
+      : null;
+  }
+
+  if (!requestIsPending) {
+    return null;
+  }
+
+  await client.query(
+    `
+    UPDATE shiftly_schema.shift_requests
+       SET request_status = 'APPROVED',
+           inbox_user_id = NULL,
+           shift_assignment_id = $2,
+           decided_at = COALESCE(decided_at, NOW()),
+           decision_by_user_id = COALESCE(decision_by_user_id, $3),
+           decision_comment = COALESCE($4::text, decision_comment),
+           last_action_at = NOW(),
+           last_action_by_user_id = $3
+     WHERE id = $1
+    `,
+    [requestId, row.assignment_id, decisionByUserId, decisionComment ?? null],
+  );
+
+  await client.query(
+    `
+    INSERT INTO shiftly_schema.shift_assignment_user_history
+      (shift_assignment_id, from_user_id, to_user_id, change_reason, shift_request_id,
+       shift_date, shift_type_id, department_id, division_id, comment)
+    SELECT
+      $2,
+      NULL,
+      $3,
+      'NEW_SHIFT',
+      $1,
+      $4::date,
+      $5,
+      $6,
+      $7,
+      COALESCE($8::text, $9::text)
+    WHERE NOT EXISTS (
+      SELECT 1
+      FROM shiftly_schema.shift_assignment_user_history h
+      WHERE h.shift_assignment_id = $2
+        AND h.shift_request_id = $1
+        AND h.change_reason = 'NEW_SHIFT'
+      LIMIT 1
+    )
+    `,
+    [
+      requestId,
+      row.assignment_id,
+      row.requested_by_user_id,
+      row.requested_shift_date,
+      row.requested_shift_type_id,
+      row.requested_department_id,
+      row.division_id,
+      decisionComment ?? null,
+      row.decision_comment ?? null,
+    ],
+  );
+
+  await client.query(
+    `
+    WITH request_interval AS (
+      SELECT user_id, start_ts, end_ts
+      FROM shiftly_api.shift_request_work_intervals($1)
+      LIMIT 1
+    )
+    SELECT shiftly_api.reject_overlapping_pending_shift_requests(
+      request_interval.user_id,
+      request_interval.start_ts,
+      request_interval.end_ts,
+      $1,
+      $2,
+      '[SYSTEM] Automatically rejected because an overlapping shift request was approved.'
+    )
+    FROM request_interval
+    `,
+    [requestId, decisionByUserId],
+  );
+
+  const repaired = await fetchShiftRequestResponse(client, requestId);
+  return repaired
+    ? {
+        ...repaired,
+        workflow_action: 'ALREADY_APPROVED',
+        workflow_message:
+          'This request had already created its assignment, so the approval was completed without creating another assignment.',
+      }
+    : null;
+}
+
 // Small helper: normalize client input for absence types
 function normalizeAbsenceType(code) {
   const v = String(code ?? '').trim();
@@ -468,18 +657,33 @@ router.post('/:id/approve', async (req, res) => {
           `SELECT set_config('shiftly.workflow_request_id', $1, true)`,
           [String(rid)],
         );
+        const completed = await resolveCompletedNewShiftApproval({
+          client,
+          requestId: rid,
+          decisionByUserId: decision_by_user_id,
+          decisionComment: decision_comment ?? null,
+        });
+        if (completed) {
+          return { rows: [completed] };
+        }
         return client.query(
           `SELECT * FROM shiftly_api.shift_request_approve($1::int, $2::int, $3::text)`,
           [rid, decision_by_user_id, decision_comment ?? null],
         );
       },
     );
+     const outcome = result.rows[0] || {};
      const updated = await fetchShiftRequestResponse(
        pool,
-       result.rows[0]?.id ?? rid,
+       outcome.id ?? rid,
      );
+     const decorated = decorateShiftRequestWorkflowOutcome({
+       ...(updated ?? outcome),
+       workflow_action: outcome.workflow_action,
+       workflow_message: outcome.workflow_message,
+     });
      return res.json(
-       decorateShiftRequestWorkflowOutcome(updated ?? result.rows[0]),
+       decorated,
      );
   } catch (err) {
     return sendPostgresError(req, res, err, {

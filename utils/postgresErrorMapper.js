@@ -63,6 +63,48 @@ function classifyMessage(message) {
 
   if (!normalized) return null;
 
+  if (
+    lower.includes('approved_shift_overlap') ||
+    lower.includes('overlapping approved shift') ||
+    lower.includes('overlapping approved shifts')
+  ) {
+    return {
+      code: 'APPROVED_SHIFT_OVERLAP',
+      status: 409,
+      details:
+        'The user already has an approved shift that overlaps this request.',
+    };
+  }
+
+  if (
+    lower.includes('already has an approved assignment for this shift slot') ||
+    lower.includes('same assignment slot')
+  ) {
+    return {
+      code: 'DUPLICATE_SHIFT_ASSIGNMENT',
+      status: 409,
+      details:
+        'The user already has an approved assignment for this date and shift.',
+    };
+  }
+
+  if (lower.includes('non-approved assignment already exists for this shift slot')) {
+    return {
+      code: 'SHIFT_ASSIGNMENT_SLOT_PENDING',
+      status: 409,
+      details:
+        'A pending or draft assignment already exists for this date and shift. Approve, edit, or remove that row instead of creating another one.',
+    };
+  }
+
+  if (lower.includes('approval already completed for this request')) {
+    return {
+      code: 'SHIFT_REQUEST_ALREADY_APPROVED',
+      status: 409,
+      details: 'This request has already been approved.',
+    };
+  }
+
   if (lower.includes('primary manager')) {
     return {
       code: 'PRIMARY_MANAGER_REQUIRED',
@@ -170,11 +212,26 @@ function mapConstraint(err) {
     };
   }
 
-  if (constraint.includes('assignment')) {
+  if (constraint === 'uq_assignment') {
     return {
       status: 409,
       code: 'DUPLICATE_SHIFT_ASSIGNMENT',
       error: 'The user already has an assignment for this shift slot.',
+      details:
+        'A shift assignment already exists for this exact period, date, user, shift, and department scope.',
+    };
+  }
+
+  if (
+    constraint === 'uq_clinical_assignment_review_workflows_number' ||
+    constraint === 'ux_clinical_assignment_review_workflows_open_fingerprint'
+  ) {
+    return {
+      status: 409,
+      code: 'CLINICAL_REVIEW_WORKFLOW_CONFLICT',
+      error: 'The scheduling action could not be completed.',
+      details:
+        'A clinical review workflow conflict prevented the action. No scheduling changes were saved.',
     };
   }
 
