@@ -77,6 +77,7 @@ const dropdownShiftAssignmentHistoryUsersQuery = require('./query/dropdownShiftA
 	const searchColleagueShiftsQuery = require('./query/searchColleagueShifts');
 	const mobileDashboardQuery = require('./query/mobileDashboard');
 const managerDashboardQuery = require('./query/managerDashboard');
+const clinicalDashboardQuery = require('./query/clinicalDashboard');
 const mobileDayDetailsUiQuery = require('./query/mobileDayDetailsUi');
 const shiftAssignmentHistoryQuery = require('./query/shiftAssignmentHistory');
 const desktopShiftMatrixSearchQuery = require('./query/desktopShiftMatrixSearch');
@@ -248,6 +249,7 @@ app.use('/dropdown/search-colleague-users', dropdownSearchColleagueUsersQuery);
 	app.use('/search/assigned-shifts', searchAssignedShiftsQuery);
 	app.use('/search/pending-requests', searchPendingShiftRequestsQuery);
 	app.use('/search/colleague-shifts', searchColleagueShiftsQuery);
+	app.use('/dashboard', clinicalDashboardQuery);
 	app.use('/dashboard/mobile', mobileDashboardQuery);
 	app.use('/dashboard/manager', managerDashboardQuery);
 app.use('/mobile-calendar/day-states', mobileCalendarDayStates);
