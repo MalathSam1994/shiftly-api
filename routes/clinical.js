@@ -1043,6 +1043,24 @@ router.get('/mobile/patients', requirePermission(OPEN_MOBILE_PATIENTS), async (r
   }
 });
 
+router.get('/encounters/:encounterId/history', requireAnyClinicalPermission([OPEN_PATIENT_ADMIN, OPEN_MOBILE_PATIENTS]), async (req, res) => {
+  const encounterId = requirePositiveId(req, res, req.params.encounterId, 'encounterId');
+  if (!encounterId) return null;
+  const offset = Number(req.query.offset ?? 0);
+  if (!Number.isSafeInteger(offset) || offset < 0 || offset > 2147483647) {
+    return sendApiError(req, res, { status: 400, error: 'Invalid history offset.', code: 'INVALID_INPUT' });
+  }
+  try {
+    const result = await pool.query(
+      'SELECT shiftly_api.fn_clinical_patient_history($1, $2, $3) AS history',
+      [actorUserId(req), encounterId, offset],
+    );
+    return res.json(result.rows[0].history);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'GET', label: 'Error loading clinical patient history' });
+  }
+});
+
 router.get('/mobile/patients/:encounterId', requirePermission(OPEN_MOBILE_PATIENTS), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {

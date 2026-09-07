@@ -89,27 +89,51 @@ const desktopShiftMatrixSearchQuery = require('./query/desktopShiftMatrixSearch'
 	// Behind Nginx (reverse proxy)
 app.set('trust proxy', 1);
 
-// CORS (supports production allow-list + always allow localhost dev ports)
-const allowedOrigins = (process.env.CORS_ORIGINS || '')
- .split(',')
- .map(s => s.trim())
- .filter(Boolean);
+// CORS
+// Production origins are always allowed. Additional environments
+// can be configured through the comma-separated CORS_ORIGINS value.
+const productionOrigins = [
+  'https://shiftmixapp.com',
+  'https://www.shiftmixapp.com',
+  'http://37.120.168.91',
+];
+
+const configuredOrigins = (process.env.CORS_ORIGINS || '')
+  .split(',')
+  .map((value) => value.trim().replace(/\/+$/, ''))
+  .filter(Boolean);
+
+const allowedOrigins = [
+  ...new Set([
+    ...productionOrigins,
+    ...configuredOrigins,
+  ]),
+];
 
 function isAllowedOrigin(origin) {
- if (!origin) return true; // same-origin / curl / server-to-server
- if (allowedOrigins.length === 0) return true; // no allow-list => allow all (testing)
- if (allowedOrigins.includes(origin)) return true;
- // allow Flutter web dev server / local testing
- if (/^http:\/\/localhost:\d+$/.test(origin)) return true;
- if (/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) return true;
- return false;
+  if (!origin) return true; // curl / server-to-server
+  if (allowedOrigins.includes(origin)) return true;
+
+  // Flutter web development servers.
+  if (/^http:\/\/localhost:\d+$/.test(origin)) return true;
+  if (/^http:\/\/127\.0\.0\.1:\d+$/.test(origin)) return true;
+
+  return false;
 }
 
-app.use(cors({
- origin: (origin, cb) => cb(null, isAllowedOrigin(origin)),
- methods: ['GET', 'POST', 'PUT', 'DELETE', 'OPTIONS'],
- allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+const corsOptions = {
+  origin(origin, callback) {
+    callback(null, isAllowedOrigin(origin));
+  },
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization'],
+  optionsSuccessStatus: 204,
+};
+
+// Must remain before authentication middleware and route mounts.
+app.use(cors(corsOptions));
+
+console.log('CORS allowed origins =', allowedOrigins);
 	
 	function ts() {
   // ISO 8601, sortable, timezone-safe
