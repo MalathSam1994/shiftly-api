@@ -59,8 +59,10 @@ function actorUserId(req) {
 
 function parseOptionalInt(value) {
   if (value == null || `${value}`.trim() === '') return null;
-  const parsed = Number.parseInt(`${value}`, 10);
-  return Number.isInteger(parsed) && parsed > 0 ? parsed : undefined;
+  if (typeof value !== 'string' && typeof value !== 'number') return undefined;
+  const text = `${value}`.trim();
+  const parsed = /^\d+$/.test(text) ? Number(text) : NaN;
+  return Number.isSafeInteger(parsed) && parsed > 0 && parsed <= 2147483647 ? parsed : undefined;
 }
 
 function parseBoolean(value, defaultValue) {
@@ -73,7 +75,7 @@ function parseBoolean(value, defaultValue) {
 
 function parseRequiredDate(value) {
   const text = value == null ? '' : `${value}`.trim();
-  return /^\d{4}-\d{2}-\d{2}$/.test(text) ? text : undefined;
+  return isCalendarDate(text) ? text : undefined;
 }
 
 function sendPastClinicalAssignmentLockedError(req, res) {
@@ -504,10 +506,10 @@ function requireText(req, res, value, label, maxLength) {
 function optionalDate(req, res, value, label) {
   const text = cleanText(value);
   if (text == null) return null;
-  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) {
+  if (typeof value !== 'string' || !isCalendarDate(text)) {
     sendApiError(req, res, {
       status: 400,
-      error: `${label} must be in YYYY-MM-DD format.`,
+      error: `${label} must be a valid calendar date in YYYY-MM-DD format.`,
       code: 'INVALID_REQUEST',
     });
     return undefined;
@@ -515,18 +517,53 @@ function optionalDate(req, res, value, label) {
   return text;
 }
 
+function isCalendarDate(text) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(text)) return false;
+  const year = Number(text.slice(0, 4));
+  const month = Number(text.slice(5, 7));
+  const day = Number(text.slice(8, 10));
+  const leap = year % 4 === 0 && (year % 100 !== 0 || year % 400 === 0);
+  const days = [31, leap ? 29 : 28, 31, 30, 31, 30, 31, 31, 30, 31, 30, 31];
+  return year >= 1 && month >= 1 && month <= 12 && day >= 1 && day <= days[month - 1];
+}
+
 function optionalTimestamp(req, res, value, label) {
   const text = cleanText(value);
   if (text == null) return null;
-  if (!/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2})?)?$/.test(text)) {
+  if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}(?:[ T]\d{2}:\d{2}(?::\d{2}(?:\.\d{1,6})?)?)?$/.test(text)
+      || !isCalendarDate(text.slice(0, 10))
+      || (text.length > 10 && (Number(text.slice(11, 13)) > 23 || Number(text.slice(14, 16)) > 59))
+      || (text.length > 16 && Number(text.slice(17, 19)) > 59)) {
     sendApiError(req, res, {
       status: 400,
-      error: `${label} must be a date or timestamp starting with YYYY-MM-DD.`,
+      error: `${label} must be a valid local date/time (YYYY-MM-DD HH:mm:ss), without a timezone.`,
       code: 'INVALID_REQUEST',
     });
     return undefined;
   }
   return text;
+}
+
+// Preserve omitted fields on edits; validate optional text against actual column sizes.
+function validateAdminFields(req, res, body, source, partial, limits) {
+  if (partial) {
+    for (const key of Object.keys(body)) {
+      if (!Object.prototype.hasOwnProperty.call(source, key)
+          && !(['current_clinical_unit_id', 'division_id', 'department_id'].includes(key)
+            && (source.current_clinical_unit_id != null || source.clinical_unit_id != null))) delete body[key];
+    }
+  }
+  for (const [key, limit] of Object.entries(limits)) {
+    if (body[key] != null && (typeof source[key] !== 'string' || body[key].length > limit)) {
+      sendApiError(req, res, { status: 400, error: `${key} must be text of ${limit} characters or fewer.`, code: 'INVALID_REQUEST' });
+      return null;
+    }
+  }
+  if (body.source_type != null && !['MANUAL', 'DEMO', 'EXTERNAL'].includes(body.source_type)) {
+    sendApiError(req, res, { status: 400, error: 'source_type must be MANUAL, DEMO or EXTERNAL.', code: 'INVALID_REQUEST' });
+    return null;
+  }
+  return body;
 }
 
 function enumValue(req, res, value, label, allowed, defaultValue = null) {
@@ -607,13 +644,23 @@ function normalizePatientBody(req, res, { partial = false } = {}) {
   const publicId = partial && !Object.prototype.hasOwnProperty.call(source, 'patient_public_id')
     ? null
     : requireText(req, res, source.patient_public_id, 'patient_public_id', 80);
+  if (publicId === undefined) return null;
   const displayName = partial && !Object.prototype.hasOwnProperty.call(source, 'display_name')
     ? null
     : requireText(req, res, source.display_name, 'display_name', 160);
+  if (displayName === undefined) return null;
   const dob = optionalDate(req, res, source.date_of_birth, 'date_of_birth');
+  if (dob === undefined) return null;
   const sex = enumValue(req, res, source.sex, 'sex', SEX_VALUES);
+  if (sex === undefined) return null;
   const patientStatus = enumValue(req, res, source.patient_status, 'patient_status', PATIENT_STATUSES, 'ACTIVE');
+  if (patientStatus === undefined) return null;
   const isDemo = parseBoolean(source.is_demo, false);
+
+  if (isDemo === undefined) {
+    sendApiError(req, res, { status: 400, error: 'is_demo must be true or false.', code: 'INVALID_REQUEST' });
+    return null;
+  }
 
   if (publicId === undefined || displayName === undefined || dob === undefined || sex === undefined || patientStatus === undefined || isDemo === undefined) return null;
   if (publicId != null) body.patient_public_id = publicId;
@@ -625,34 +672,66 @@ function normalizePatientBody(req, res, { partial = false } = {}) {
   body.external_source_system = cleanText(source.external_source_system);
   body.external_patient_id = cleanText(source.external_patient_id);
   body.is_demo = isDemo;
-  return body;
+  return validateAdminFields(req, res, body, source, partial, {
+    patient_public_id: 80, display_name: 160, external_source_system: 80, external_patient_id: 120,
+  });
 }
 
 async function normalizeEncounterBody(req, res, source, { partial = false } = {}) {
   const body = {};
-  const encounterNumber = partial && !Object.prototype.hasOwnProperty.call(source, 'encounter_number')
+  // On create, blank/omitted business numbers are generated by the database.
+  const encounterNumber = !partial && cleanText(source.encounter_number) == null
     ? null
-    : requireText(req, res, source.encounter_number, 'encounter_number', 80);
+    : partial && !Object.prototype.hasOwnProperty.call(source, 'encounter_number')
+      ? null
+      : requireText(req, res, source.encounter_number, 'encounter_number', 80);
+  if (encounterNumber === undefined) return null;
   const status = enumValue(req, res, source.encounter_status, 'encounter_status', ENCOUNTER_STATUSES, 'ACTIVE');
+  if (status === undefined) return null;
   const admissionType = enumValue(req, res, source.admission_type, 'admission_type', ADMISSION_TYPES);
+  if (admissionType === undefined) return null;
   const admittedAt = partial && !Object.prototype.hasOwnProperty.call(source, 'admitted_at')
     ? null
     : optionalTimestamp(req, res, source.admitted_at, 'admitted_at');
+  if (admittedAt === undefined) return null;
   const expectedDischargeAt = optionalTimestamp(req, res, source.expected_discharge_at, 'expected_discharge_at');
+  if (expectedDischargeAt === undefined) return null;
   const dischargedAt = optionalTimestamp(req, res, source.discharged_at, 'discharged_at');
+  if (dischargedAt === undefined) return null;
   const unitId = parseOptionalInt(source.current_clinical_unit_id ?? source.clinical_unit_id);
   const isDemo = parseBoolean(source.is_demo, false);
 
+  if (isDemo === undefined) {
+    sendApiError(req, res, { status: 400, error: 'is_demo must be true or false.', code: 'INVALID_REQUEST' });
+    return null;
+  }
+
   if (encounterNumber === undefined || status === undefined || admissionType === undefined || admittedAt === undefined || expectedDischargeAt === undefined || dischargedAt === undefined || isDemo === undefined) return null;
-  if (unitId === undefined || (!partial && unitId == null)) {
+  if (partial && Object.prototype.hasOwnProperty.call(source, 'admitted_at') && admittedAt == null) {
+    sendApiError(req, res, { status: 400, error: 'admitted_at is required when editing admission time.', code: 'INVALID_REQUEST' });
+    return null;
+  }
+  if (admittedAt != null && dischargedAt != null
+      && Date.parse(dischargedAt.replace(' ', 'T') + (dischargedAt.length === 10 ? 'T00:00:00Z' : 'Z'))
+        < Date.parse(admittedAt.replace(' ', 'T') + (admittedAt.length === 10 ? 'T00:00:00Z' : 'Z'))) {
+    sendApiError(req, res, { status: 400, error: 'discharged_at must be on or after admitted_at.', code: 'INVALID_REQUEST' });
+    return null;
+  }
+  if (unitId === undefined || (unitId == null && (!partial
+      || Object.prototype.hasOwnProperty.call(source, 'clinical_unit_id')
+      || Object.prototype.hasOwnProperty.call(source, 'current_clinical_unit_id')))) {
     sendApiError(req, res, { status: 400, error: 'clinical_unit_id must be a positive integer.', code: 'INVALID_REQUEST' });
     return null;
   }
 
   if (unitId != null) {
     const unitResult = await pool.query(
-      `SELECT id, division_id, department_id FROM shiftly_schema.clinical_units WHERE id = $1 AND is_active = true`,
-      [unitId],
+      `SELECT id, division_id, department_id FROM shiftly_schema.clinical_units u
+       WHERE id = $1 AND (is_active = true OR EXISTS (
+         SELECT 1 FROM shiftly_schema.clinical_encounters e
+         WHERE e.id = $2 AND e.current_clinical_unit_id = u.id
+       ))`,
+      [unitId, partial ? req.params.id : null],
     );
     if (!unitResult.rows.length) {
       sendApiError(req, res, { status: 400, error: 'Clinical unit is not active or does not exist.', code: 'INVALID_REQUEST' });
@@ -676,7 +755,10 @@ async function normalizeEncounterBody(req, res, source, { partial = false } = {}
   body.external_source_system = cleanText(source.external_source_system);
   body.external_encounter_id = cleanText(source.external_encounter_id);
   body.is_demo = isDemo;
-  return body;
+  return validateAdminFields(req, res, body, source, partial, {
+    encounter_number: 80, discharge_disposition: 80, room_label: 40, bed_label: 40,
+    external_source_system: 80, external_encounter_id: 120,
+  });
 }
 
 async function insertRow(req, res, table, allowed, contextLabel) {
@@ -883,9 +965,30 @@ router.get('/patients/:patientId', requirePermission(OPEN_PATIENT_ADMIN), async 
   }
 });
 
+function sendPatientAdminError(req, res, err, context) {
+  // The DB check is authoritative even for partial updates and concurrent edits.
+  if (err.constraint === 'chk_clinical_encounters_dates') {
+    return sendApiError(req, res, { status: 400,
+      error: 'Discharged at must be on or after admitted at.', code: 'INVALID_ENCOUNTER_DATES' });
+  }
+  if (err.code === '23505' && err.table === 'clinical_encounters') {
+    return sendApiError(req, res, { status: 409,
+      error: 'This encounter number or external encounter reference already exists. Refresh the patient before trying again.', code: 'DUPLICATE_ENCOUNTER' });
+  }
+  if (err.code === '23505' && err.table === 'clinical_patients') {
+    return sendApiError(req, res, { status: 409,
+      error: 'This patient identifier or external patient reference already exists. Open the existing patient instead.', code: 'DUPLICATE_PATIENT' });
+  }
+  return sendPostgresError(req, res, err, context);
+}
+
 router.post('/patients', requirePermission(MANAGE_PATIENT_ADMIN), async (req, res) => {
   const patientBody = normalizePatientBody(req, res);
   if (!patientBody) return null;
+  if (req.body?.encounter != null
+      && (typeof req.body.encounter !== 'object' || Array.isArray(req.body.encounter))) {
+    return sendApiError(req, res, { status: 400, error: 'encounter must be an object.', code: 'INVALID_REQUEST' });
+  }
   const rawEncounter = req.body?.encounter && typeof req.body.encounter === 'object'
     ? req.body.encounter
     : null;
@@ -913,7 +1016,7 @@ router.post('/patients', requirePermission(MANAGE_PATIENT_ADMIN), async (req, re
     return res.status(201).json({ patient, encounter });
   } catch (err) {
     await client.query('ROLLBACK').catch(() => {});
-    return sendPostgresError(req, res, err, {
+    return sendPatientAdminError(req, res, err, {
       action: 'CREATE',
       label: 'Error creating clinical patient',
     });
@@ -946,7 +1049,7 @@ router.put('/patients/:patientId', requirePermission(MANAGE_PATIENT_ADMIN), asyn
     }
     return res.json(result.rows[0]);
   } catch (err) {
-    return sendPostgresError(req, res, err, {
+    return sendPatientAdminError(req, res, err, {
       action: 'UPDATE',
       label: 'Error updating clinical patient',
     });
@@ -971,7 +1074,7 @@ router.post('/patients/:patientId/encounters', requirePermission(MANAGE_PATIENT_
     const result = await pool.query(query.sql, query.values);
     return res.status(201).json(result.rows[0]);
   } catch (err) {
-    return sendPostgresError(req, res, err, {
+    return sendPatientAdminError(req, res, err, {
       action: 'CREATE',
       label: 'Error creating clinical encounter',
     });
@@ -983,6 +1086,9 @@ router.put('/encounters/:id', requirePermission(MANAGE_PATIENT_ADMIN), async (re
   if (!encounterId) return null;
   const body = await normalizeEncounterBody(req, res, req.body || {}, { partial: true });
   if (!body) return null;
+  if (!Object.keys(body).length) {
+    return sendApiError(req, res, { status: 400, error: 'No valid encounter fields were provided.', code: 'INVALID_REQUEST' });
+  }
   const query = buildUpdate('shiftly_schema.clinical_encounters', 'id', encounterId, body);
   try {
     const result = await pool.query(query.sql, query.values);
@@ -995,7 +1101,7 @@ router.put('/encounters/:id', requirePermission(MANAGE_PATIENT_ADMIN), async (re
     }
     return res.json(result.rows[0]);
   } catch (err) {
-    return sendPostgresError(req, res, err, {
+    return sendPatientAdminError(req, res, err, {
       action: 'UPDATE',
       label: 'Error updating clinical encounter',
     });
