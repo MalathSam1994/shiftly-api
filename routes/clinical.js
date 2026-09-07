@@ -1,11 +1,13 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
-const pool = require('../db');
+const { clinicalRequestContext, clinicalPool } = require('../services/clinicalRequestContext');
+const pool = clinicalPool(require('../db'));
 const requirePermission = require('../middleware/requirePermission');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const router = express.Router();
+router.use(clinicalRequestContext);
 
 const OPEN_PATIENT_ADMIN = 'screen:clinical_patient_administration:open';
 const OPEN_CLINICAL_UNITS = 'screen:clinical_units:open';
@@ -357,6 +359,9 @@ function buildClinicalAnalyticsWorkbook(report) {
     { key: 'patients_moved', header: 'Moved', width: 12 },
     { key: 'unassigned_patients', header: 'Unassigned', width: 14 },
     { key: 'modified_recommendations', header: 'Modified', width: 12 },
+    { key: 'source', header: 'Source', width: 14 },
+    { key: 'action_by', header: 'Action By', width: 25 },
+    { key: 'action_date_time', header: 'Action Date/Time', width: 23 },
   ]);
 
   addTableSheet(workbook, 'Handover Workflow', 'Handover and Workflow', report, report.workflows, [
@@ -368,6 +373,9 @@ function buildClinicalAnalyticsWorkbook(report) {
     { key: 'unit_name', header: 'Clinical Unit', width: 24 },
     { key: 'reason_summary', header: 'Reason', width: 46 },
     { key: 'hours_to_publish', header: 'Hours To Publish', width: 18 },
+    { key: 'source', header: 'Source', width: 14 },
+    { key: 'action_by', header: 'Action By', width: 25 },
+    { key: 'action_date_time', header: 'Action Date/Time', width: 23 },
   ]);
 
   addTableSheet(workbook, 'Exceptions', 'Exceptions / Unassigned / Capacity Issues', report, report.exceptions, [
@@ -378,6 +386,11 @@ function buildClinicalAnalyticsWorkbook(report) {
     { key: 'unit_name', header: 'Clinical Unit', width: 24 },
     { key: 'detail', header: 'Detail', width: 48 },
     { key: 'occurrence_count', header: 'Count', width: 12 },
+    { key: 'evidence_reference', header: 'Evidence reference', width: 30 },
+    { key: 'record_status', header: 'Evidence status', width: 30 },
+    { key: 'source', header: 'Source', width: 14 },
+    { key: 'action_by', header: 'Action By', width: 25 },
+    { key: 'action_date_time', header: 'Action Date/Time', width: 23 },
   ]);
 
   return workbook;
@@ -1886,6 +1899,30 @@ router.get('/analytics', requirePermission(OPEN_CLINICAL_ANALYTICS), async (req,
   }
 });
 
+router.get('/analytics/evidence', requirePermission(OPEN_CLINICAL_ANALYTICS), async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  const params = parseAnalyticsParams(req, res);
+  if (!params) return;
+  const metric = String(req.query.metric || '');
+  const offsetText = String(req.query.offset ?? '0');
+  const offset = Number(offsetText);
+  if (!['patient_encounters', 'encounter_count', 'assessment_count', 'average_score', 'average_workload'].includes(metric)
+      || !/^\d+$/.test(offsetText) || !Number.isSafeInteger(offset) || offset > 2147483647
+      || params.toDate < params.fromDate) {
+    return sendApiError(req, res, { status: 400, error: 'Invalid evidence metric, dates or page offset.', code: 'INVALID_REQUEST' });
+  }
+  try {
+    const result = await pool.query(`SELECT shiftly_api.fn_clinical_analytics_evidence(
+      $1,$2::date,$3::date,$4,$5,$6,$7,$8,$9) AS evidence`,
+      [userId, params.fromDate, params.toDate, params.divisionId, params.departmentId,
+        params.clinicalUnitId, params.acuityLevelId, metric, offset]);
+    return res.json(result.rows[0].evidence);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'GET', label: 'Error loading clinical analytics evidence' });
+  }
+});
+
 router.get('/analytics/excel', requirePermission(EXPORT_CLINICAL_ANALYTICS), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
@@ -2094,8 +2131,11 @@ router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), asyn
           nu.user_desc AS new_user_name,
           h.previous_shift_assignment_id,
           h.new_shift_assignment_id,
-          actor.user_desc AS changed_by_name,
-          to_char(h.changed_at, 'YYYY-MM-DD HH24:MI') AS changed_at,
+          COALESCE(actor.user_desc, 'Unknown') AS changed_by_name,
+          shiftly_api.fn_clinical_action_metadata(to_jsonb(h))->>'source' AS source,
+          shiftly_api.fn_clinical_action_metadata(to_jsonb(h))->>'action_by' AS action_by,
+          shiftly_api.fn_clinical_action_metadata(to_jsonb(h))->>'action_date_time' AS action_date_time,
+          to_char(h.changed_at, 'YYYY-MM-DD HH24:MI:SS') AS changed_at,
           EXISTS (
             SELECT 1
             FROM shiftly_schema.clinical_patient_assignments pa
@@ -2459,7 +2499,9 @@ router.get('/mobile/my-patients', requirePermission(OPEN_MOBILE_PATIENTS), async
     }
 
     const result = await pool.query(
-      `SELECT * FROM shiftly_api.fn_clinical_mobile_my_patients($1, $2, $3)`,
+      `SELECT p.*, shiftly_api.fn_clinical_action_metadata(to_jsonb(pa)) AS assignment_action
+       FROM shiftly_api.fn_clinical_mobile_my_patients($1, $2, $3) p
+       LEFT JOIN shiftly_schema.clinical_patient_assignments pa ON pa.id=p.assignment_id`,
       [userId, scope, shiftAssignmentId],
     );
     return res.json(result.rows);

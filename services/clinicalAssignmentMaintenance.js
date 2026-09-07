@@ -28,14 +28,15 @@ function getClinicalAssignmentMaintenanceConfig() {
 
 async function evaluateClinicalAssignmentsOnce() {
   const { batchSize } = getClinicalAssignmentMaintenanceConfig();
-  const result = await runInTransactionWithBusinessTimezone(pool, (client) =>
-    client.query(
+  const result = await runInTransactionWithBusinessTimezone(pool, async (client) => {
+    await client.query("SELECT set_config('shiftly.clinical_source', 'System', true)");
+    return client.query(
       `
       SELECT shiftly_api.fn_clinical_evaluate_due_assignment_reviews($1::int) AS result
       `,
       [batchSize],
-    ),
-  );
+    );
+  });
   return result.rows?.[0]?.result || { enabled: false, checked: 0 };
 }
 
