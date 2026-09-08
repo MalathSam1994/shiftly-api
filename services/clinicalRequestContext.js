@@ -21,6 +21,23 @@ async function setContext(client, metadata) {
 // including writes and audit rows created inside PostgreSQL functions/triggers.
 function clinicalPool(base) {
   return {
+    // Lifecycle decisions read several tables before writing assignments. Keep
+    // one snapshot and let PostgreSQL reject a conflicting concurrent decision.
+    // Do not retry a manager's mutation automatically.
+    async serializableQuery(...args) {
+      const metadata = context.getStore();
+      const client = await base.connect();
+      try {
+        await client.query('BEGIN ISOLATION LEVEL SERIALIZABLE');
+        if (metadata?.writing) await setContext(client, metadata);
+        const result = await client.query(...args);
+        await client.query('COMMIT');
+        return result;
+      } catch (error) {
+        await client.query('ROLLBACK').catch(() => {});
+        throw error;
+      } finally { client.release(); }
+    },
     async query(...args) {
       const metadata = context.getStore();
       if (!metadata?.writing) return base.query(...args);

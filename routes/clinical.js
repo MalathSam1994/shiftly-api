@@ -1,6 +1,7 @@
 const express = require('express');
 const ExcelJS = require('exceljs');
 const { clinicalRequestContext, clinicalPool } = require('../services/clinicalRequestContext');
+const { describeClinicalAttention } = require('../services/clinicalAttentionDetails');
 const pool = clinicalPool(require('../db'));
 const requirePermission = require('../middleware/requirePermission');
 const { sendApiError } = require('../utils/apiError');
@@ -2176,6 +2177,19 @@ router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), asyn
   }
 });
 
+router.get('/assignment-workflows/:id/details', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
+  const userId = actorUserId(req);
+  const workflowId = requirePositiveId(req, res, req.params.id, 'id');
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  if (!workflowId) return null;
+  try {
+    const result = await pool.query('SELECT shiftly_api.fn_clinical_assignment_attention_details($1, $2) AS detail', [userId, workflowId]);
+    return res.json(describeClinicalAttention(result.rows[0].detail));
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'GET', label: 'Error loading clinical assignment attention details' });
+  }
+});
+
 router.get('/assignment-workflows', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
@@ -2297,7 +2311,7 @@ router.post('/assignment-workflows/:id/optimize', requirePermission(OPTIMIZE_ASS
   try {
     if (!(await ensureClinicalAssignmentWorkflowDateEditable(req, res, workflowId))) return null;
 
-    const result = await pool.query(
+    const result = await pool.serializableQuery(
       `SELECT shiftly_api.fn_clinical_request_assignment_workflow_optimization($1, $2, $3) AS workflows`,
       [userId, workflowId, mode],
     );
@@ -2357,7 +2371,7 @@ router.post('/assignment-runs/generate', requirePermission(OPTIMIZE_ASSIGNMENTS)
   try {
     if (!(await ensureClinicalAssignmentDateEditable(req, res, shiftDate))) return null;
 
-    const result = await pool.query(
+    const result = await pool.serializableQuery(
       `SELECT shiftly_api.fn_clinical_generate_assignment_run($1, $2::date, $3, $4, $5, $6, $7) AS run`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId, mode],
     );
@@ -2411,7 +2425,7 @@ router.post('/assignment-runs/:id/manual-override', requirePermission(OVERRIDE_A
         code: 'CLINICAL_RUN_NOT_EDITABLE',
       });
     }
-    const result = await pool.query(
+    const result = await pool.serializableQuery(
       `SELECT shiftly_api.fn_clinical_manual_assignment_override($1, $2, $3, $4, $5) AS run`,
       [userId, runId, encounterId, shiftAssignmentId, req.body?.note ?? null],
     );
@@ -2434,7 +2448,7 @@ router.post('/assignment-runs/:id/publish', requirePermission(PUBLISH_ASSIGNMENT
   try {
     if (!(await ensureClinicalAssignmentRunDateEditable(req, res, runId))) return null;
 
-    const result = await pool.query(
+    const result = await pool.serializableQuery(
       `SELECT shiftly_api.fn_clinical_publish_assignment_run($1, $2) AS run`,
       [userId, runId],
     );

@@ -240,6 +240,34 @@ function mapConstraint(err) {
 
 function mapPostgresError(err, context = {}) {
   const pgCode = String(err && err.code || '');
+  // Explicit, safe lifecycle messages: never forward SQL detail or stack traces.
+  const clinicalErrors = {
+    CLINICAL_WORKFLOW_SUPERSEDED: [409, 'This review was already completed or superseded. Refresh the Assignment Board and use the current review or draft.'],
+    CLINICAL_RUN_STALE: [409, 'This proposal no longer matches the current clinical state. Refresh the board. For a staff-only change, save a validated manual override; for patient or assignment changes, generate a fresh rebalance.'],
+    CLINICAL_RUN_SUPERSEDED: [409, 'This proposal was already published, discarded or superseded. Refresh the Assignment Board and use the current draft.'],
+    CLINICAL_STAFF_INELIGIBLE: [422, 'The selected nurse is not currently eligible for this unit and shift. Refresh candidates and check the approved shift, absence, competencies and capacity policy.'],
+    CLINICAL_COMPETENCY_MISSING: [422, 'A proposed nurse is missing a current patient competency. Refresh candidates and correct the competency or assign another eligible nurse before publishing.'],
+    CLINICAL_CAPACITY_EXCEEDED: [422, 'The proposed patient distribution exceeds a configured hard workload, patient-count or High/Extreme limit. Redistribute patients or review the applicable capacity policy.'],
+  };
+  let clinicalCode = String(err && err.hint || '');
+  // Also support the old database functions while the migration is pending.
+  const legacyClinicalCodes = {
+    'This optimization run is stale. Regenerate before publishing.': 'CLINICAL_RUN_STALE',
+    'Selected staff assignment is not eligible for this clinical unit and shift.': 'CLINICAL_STAFF_INELIGIBLE',
+    'Selected staff member is missing required patient competency.': 'CLINICAL_COMPETENCY_MISSING',
+  };
+  if (!clinicalErrors[clinicalCode]) clinicalCode = legacyClinicalCodes[err && err.message];
+  if (pgCode === 'P0001' && clinicalErrors[clinicalCode]) {
+    const [status, details] = clinicalErrors[clinicalCode];
+    return { status, code: clinicalCode, error: details, details };
+  }
+  if (pgCode === '40001' || pgCode === '40P01') {
+    return {
+      status: 409,
+      code: 'CONCURRENT_CHANGE',
+      error: 'The data changed during this operation. Refresh and try again.',
+    };
+  }
   const validation = safeValidationPayload(err);
   if (validation) {
     return {
@@ -363,6 +391,16 @@ function sendPostgresError(req, res, err, context = {}) {
   const mapped = mapPostgresError(err, context);
   if (!mapped) {
     return sendInternalError(req, res, err, context.label || 'Database error');
+  }
+
+  if (/clinical assignment|manual assignment/i.test(context.label || '')) {
+    console.warn('[clinical assignment rejected]', {
+      requestId: req && req.rid,
+      operation: context.label,
+      runId: req && req.params && req.params.id,
+      code: mapped.code,
+      status: mapped.status,
+    });
   }
 
   return sendApiError(req, res, mapped);
