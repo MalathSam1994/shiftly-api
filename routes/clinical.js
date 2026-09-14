@@ -1412,6 +1412,98 @@ router.post('/mobile/patients/:encounterId/flow-events', requirePermission(UPDAT
   }
 });
 
+// Shared catalogue entries are readable; modifying a cross-organization entry
+// requires access to every organization affected by that entry.
+function requireStaffingRecordScope(table) {
+  return async (req,res,next) => {
+    try {
+      let previous = null;
+      if (req.params.id) {
+        const id = requirePositiveId(req,res,req.params.id,'id');
+        if (!id) return;
+        const found = await pool.query(`SELECT * FROM shiftly_schema.${table} WHERE id=$1`,[id]);
+        previous = found.rows[0];
+        if (!previous) return sendApiError(req,res,{status:404,error:'Clinical record was not found.',code:'RESOURCE_NOT_FOUND'});
+      }
+      const candidate = {...previous,...req.body};
+      for (const record of [previous,candidate].filter(Boolean)) {
+        let result;
+        if (table === 'clinical_staff_competencies') {
+          result = await pool.query('SELECT EXISTS(SELECT 1 FROM shiftly_api.fn_clinical_staffing_scoped_users($1) WHERE id=$2) AS ok',[req.user.id,record.user_id]);
+        } else {
+          result = await pool.query(`SELECT
+            CASE WHEN $2::integer IS NOT NULL THEN EXISTS (
+              SELECT 1 FROM shiftly_schema.clinical_units cu WHERE cu.id=$2
+                AND ($3::integer IS NULL OR cu.division_id=$3) AND ($4::integer IS NULL OR cu.department_id=$4)
+                AND shiftly_api.fn_user_can_access_division_department($1,cu.division_id,cu.department_id))
+            ELSE EXISTS (SELECT 1 FROM shiftly_schema.division_departments dd WHERE ($3::integer IS NULL OR dd.division_id=$3) AND ($4::integer IS NULL OR dd.department_id=$4))
+             AND NOT EXISTS (SELECT 1 FROM shiftly_schema.division_departments dd WHERE ($3::integer IS NULL OR dd.division_id=$3) AND ($4::integer IS NULL OR dd.department_id=$4)
+                AND NOT shiftly_api.fn_user_can_access_division_department($1,dd.division_id,dd.department_id)) END AS ok`,
+            [req.user.id,record.clinical_unit_id??null,record.division_id??null,record.department_id??null]);
+        }
+        if (!result.rows[0]?.ok) return sendApiError(req,res,{status:403,error:'You cannot modify a clinical record outside your organization scope.',code:'PERMISSION_DENIED'});
+      }
+      return next();
+    } catch(err) { return sendPostgresError(req,res,err,{action:'UPDATE',label:'Clinical organization scope check failed'}); }
+  };
+}
+
+// Focused projections preserve the existing list contracts for other consumers.
+const staffingWorkspaceKinds = {
+  mappings: [OPEN_STAFF_COMPETENCIES, 'fn_clinical_staff_mapping_workspace'],
+  requirements: [OPEN_COMPETENCY_REQUIREMENTS, 'fn_clinical_requirement_workspace'],
+  capacity: [OPEN_CAPACITY_POLICIES, 'fn_clinical_capacity_matrix'],
+};
+router.get('/staffing/workspace/:kind', async (req, res, next) => {
+  const config = staffingWorkspaceKinds[req.params.kind];
+  if (!config) return sendApiError(req, res, {status: 404, error: 'Unknown clinical workspace.', code: 'RESOURCE_NOT_FOUND'});
+  return requirePermission(config[0])(req, res, next);
+}, async (req, res) => {
+  const config = staffingWorkspaceKinds[req.params.kind];
+  const filters = {};
+  for (const key of ['search','staff_type','shift_type','competency','unit','source','validity','tab','sort','page','status']) {
+    if (typeof req.query[key] === 'string') filters[key] = req.query[key];
+  }
+  try {
+    const result = await pool.query(`SELECT shiftly_api.${config[1]}($1, $2::jsonb) AS workspace`, [req.user.id, JSON.stringify(filters)]);
+    return res.json(result.rows[0].workspace);
+  } catch (err) { return sendPostgresError(req, res, err, {action: 'LIST', label: 'Error loading clinical workspace'}); }
+});
+router.get('/staffing/mappings/export', requirePermission(OPEN_STAFF_COMPETENCIES), async (req, res) => {
+  const filters = { export: 'true' };
+  for (const key of ['search','staff_type','competency','source','validity','tab','sort']) {
+    if (typeof req.query[key] === 'string') filters[key] = req.query[key];
+  }
+  try {
+    const result = await pool.query('SELECT shiftly_api.fn_clinical_staff_mapping_workspace($1,$2::jsonb) AS workspace', [req.user.id,JSON.stringify(filters)]);
+    const workbook = new ExcelJS.Workbook();
+    const sheet = workbook.addWorksheet('Staff competencies');
+    sheet.columns = ['Staff','Employee ID','Staff type','Competency','Valid from','Valid to','Validity','Source','Active','Missing required competencies'].map(header => ({header,width:24}));
+    for (const staff of result.rows[0].workspace.rows) {
+      const missing = staff.missing.map(m => m.competency_name).join(', ');
+      const mappings = staff.mappings.length ? staff.mappings : [{}];
+      for (const mapping of mappings) sheet.addRow([staff.user_desc || staff.user_name,staff.empno,staff.staff_type_name,mapping.competency_name,mapping.valid_from,mapping.valid_to,mapping.validity,mapping.source_type,mapping.is_active,missing]);
+    }
+    sheet.views = [{state:'frozen',ySplit:1}];
+    res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
+    res.setHeader('Content-Disposition','attachment; filename="staff_competencies.xlsx"');
+    return res.send(Buffer.from(await workbook.xlsx.writeBuffer()));
+  } catch (err) { return sendPostgresError(req,res,err,{action:'LIST',label:'Error exporting staff competencies'}); }
+});
+
+// UI capabilities only; each mutation retains its authoritative permission check.
+router.get('/staffing/access', requireAnyClinicalPermission(STAFFING_REFERENCE_PERMISSIONS), async (req, res) => {
+  try {
+    const result = await pool.query(`SELECT
+      shiftly_api.fn_user_has_permission($1, $2) AS manage_competencies,
+      shiftly_api.fn_user_has_permission($1, $3) AS manage_capacity_policies`,
+      [req.user.id, MANAGE_COMPETENCIES, MANAGE_CAPACITY_POLICIES]);
+    return res.json(result.rows[0]);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'LIST', label: 'Error loading clinical permissions' });
+  }
+});
+
 router.get('/staffing/reference-data', requireAnyClinicalPermission(STAFFING_REFERENCE_PERMISSIONS), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
@@ -1445,9 +1537,9 @@ router.get('/staffing/reference-data', requireAnyClinicalPermission(STAFFING_REF
       pool.query(`SELECT * FROM shiftly_api.fn_clinical_units($1)`, [userId]),
       canSeeStaffUsers ? pool.query(`
         SELECT id, empno, user_name, user_desc, staff_type_id, email, is_active
-        FROM shiftly_schema.users
+        FROM shiftly_api.fn_clinical_staffing_scoped_users($1)
         ORDER BY is_active DESC, user_desc NULLS LAST, user_name, id
-      `) : Promise.resolve({ rows: [] }),
+      `, [req.user.id]) : Promise.resolve({ rows: [] }),
       pool.query(`
         SELECT *
         FROM shiftly_schema.staff_types
@@ -1550,11 +1642,11 @@ router.get('/staff-competencies', requirePermission(OPEN_STAFF_COMPETENCIES), as
         c.competency_code,
         c.competency_name
       FROM shiftly_schema.clinical_staff_competencies sc
-      JOIN shiftly_schema.users u ON u.id = sc.user_id
+      JOIN shiftly_api.fn_clinical_staffing_scoped_users($1) u ON u.id = sc.user_id
       LEFT JOIN shiftly_schema.staff_types st ON st.id = u.staff_type_id
       JOIN shiftly_schema.clinical_competencies c ON c.id = sc.competency_id
       ORDER BY sc.is_active DESC, u.user_desc NULLS LAST, u.user_name, c.competency_name, sc.valid_from DESC
-    `);
+    `, [req.user.id]);
     return res.json(result.rows);
   } catch (err) {
     return sendPostgresError(req, res, err, {
@@ -1564,7 +1656,7 @@ router.get('/staff-competencies', requirePermission(OPEN_STAFF_COMPETENCIES), as
   }
 });
 
-router.post('/staff-competencies', requirePermission(MANAGE_COMPETENCIES), async (req, res) => {
+router.post('/staff-competencies', requirePermission(MANAGE_COMPETENCIES), requireStaffingRecordScope('clinical_staff_competencies'), async (req, res) => {
   const body = pickBody(req, [
     'user_id',
     'competency_id',
@@ -1586,7 +1678,7 @@ router.post('/staff-competencies', requirePermission(MANAGE_COMPETENCIES), async
   );
 });
 
-router.put('/staff-competencies/:id', requirePermission(MANAGE_COMPETENCIES), (req, res) =>
+router.put('/staff-competencies/:id', requirePermission(MANAGE_COMPETENCIES), requireStaffingRecordScope('clinical_staff_competencies'), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_staff_competencies', 'id', [
     'user_id',
     'competency_id',
@@ -1624,8 +1716,12 @@ router.get('/competency-requirements', requirePermission(OPEN_COMPETENCY_REQUIRE
       LEFT JOIN shiftly_schema.clinical_units cu ON cu.id = r.clinical_unit_id
       LEFT JOIN shiftly_schema.divisions dv ON dv.id = r.division_id
       LEFT JOIN shiftly_schema.departments dep ON dep.id = r.department_id
+      WHERE EXISTS (SELECT 1 FROM shiftly_api.fn_clinical_units($1) scope
+        WHERE (r.clinical_unit_id IS NULL OR r.clinical_unit_id=scope.id)
+          AND (r.division_id IS NULL OR r.division_id=scope.division_id)
+          AND (r.department_id IS NULL OR r.department_id=scope.department_id))
       ORDER BY r.is_active DESC, r.requirement_source, r.requirement_name, r.id
-    `);
+    `, [req.user.id]);
     return res.json(result.rows);
   } catch (err) {
     return sendPostgresError(req, res, err, {
@@ -1635,7 +1731,7 @@ router.get('/competency-requirements', requirePermission(OPEN_COMPETENCY_REQUIRE
   }
 });
 
-router.post('/competency-requirements', requirePermission(MANAGE_CAPACITY_POLICIES), (req, res) =>
+router.post('/competency-requirements', requirePermission(MANAGE_CAPACITY_POLICIES), requireStaffingRecordScope('clinical_competency_requirements'), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_competency_requirements', [
     'requirement_code',
     'requirement_name',
@@ -1654,7 +1750,7 @@ router.post('/competency-requirements', requirePermission(MANAGE_CAPACITY_POLICI
     'is_active',
   ], 'Error creating clinical competency requirement'));
 
-router.put('/competency-requirements/:id', requirePermission(MANAGE_CAPACITY_POLICIES), (req, res) =>
+router.put('/competency-requirements/:id', requirePermission(MANAGE_CAPACITY_POLICIES), requireStaffingRecordScope('clinical_competency_requirements'), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_competency_requirements', 'id', [
     'requirement_code',
     'requirement_name',
@@ -1691,8 +1787,12 @@ router.get('/capacity-policies', requirePermission(OPEN_CAPACITY_POLICIES), asyn
       LEFT JOIN shiftly_schema.divisions dv ON dv.id = p.division_id
       LEFT JOIN shiftly_schema.departments dep ON dep.id = p.department_id
       LEFT JOIN shiftly_schema.shift_types sh ON sh.id = p.shift_type_id
+      WHERE EXISTS (SELECT 1 FROM shiftly_api.fn_clinical_units($1) scope
+        WHERE (p.clinical_unit_id IS NULL OR p.clinical_unit_id=scope.id)
+          AND (p.division_id IS NULL OR p.division_id=scope.division_id)
+          AND (p.department_id IS NULL OR p.department_id=scope.department_id))
       ORDER BY p.is_active DESC, p.policy_name, p.id
-    `);
+    `, [req.user.id]);
     return res.json(result.rows);
   } catch (err) {
     return sendPostgresError(req, res, err, {
@@ -1702,7 +1802,7 @@ router.get('/capacity-policies', requirePermission(OPEN_CAPACITY_POLICIES), asyn
   }
 });
 
-router.post('/capacity-policies', requirePermission(MANAGE_CAPACITY_POLICIES), (req, res) =>
+router.post('/capacity-policies', requirePermission(MANAGE_CAPACITY_POLICIES), requireStaffingRecordScope('clinical_capacity_policies'), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_capacity_policies', [
     'policy_code',
     'policy_name',
@@ -1722,7 +1822,7 @@ router.post('/capacity-policies', requirePermission(MANAGE_CAPACITY_POLICIES), (
     'is_active',
   ], 'Error creating clinical capacity policy'));
 
-router.put('/capacity-policies/:id', requirePermission(MANAGE_CAPACITY_POLICIES), (req, res) =>
+router.put('/capacity-policies/:id', requirePermission(MANAGE_CAPACITY_POLICIES), requireStaffingRecordScope('clinical_capacity_policies'), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_capacity_policies', 'id', [
     'policy_code',
     'policy_name',
@@ -1741,6 +1841,16 @@ router.put('/capacity-policies/:id', requirePermission(MANAGE_CAPACITY_POLICIES)
     'is_demo',
     'is_active',
   ], 'Error updating clinical capacity policy'));
+
+router.get('/staff-pool/workspace', requirePermission(OPEN_STAFF_POOL), async (req, res) => {
+  const date = parseRequiredDate(req.query.shiftDate);
+  const ids = ['shiftTypeId','divisionId','departmentId','clinicalUnitId'].map(k => parseOptionalInt(req.query[k]));
+  if (!date || ids.some(id => !id)) return sendApiError(req,res,{status:400,error:'A valid date, shift type and clinical unit scope are required.',code:'INVALID_REQUEST'});
+  try {
+    const result = await pool.query('SELECT shiftly_api.fn_clinical_staff_pool_workspace($1,$2::date,$3,$4,$5,$6) AS workspace',[req.user.id,date,...ids]);
+    return res.json(result.rows[0].workspace);
+  } catch (err) { return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading staff pool workspace'}); }
+});
 
 router.get('/staff-pool', requirePermission(OPEN_STAFF_POOL), async (req, res) => {
   const userId = actorUserId(req);
@@ -1816,8 +1926,12 @@ router.get('/assignment-optimizer-policies', requirePermission(OPEN_ASSIGNMENT_O
       LEFT JOIN shiftly_schema.divisions dv ON dv.id = p.division_id
       LEFT JOIN shiftly_schema.departments dep ON dep.id = p.department_id
       LEFT JOIN shiftly_schema.shift_types sh ON sh.id = p.shift_type_id
+      WHERE EXISTS (SELECT 1 FROM shiftly_api.fn_clinical_units($1) scope
+        WHERE (p.clinical_unit_id IS NULL OR p.clinical_unit_id=scope.id)
+          AND (p.division_id IS NULL OR p.division_id=scope.division_id)
+          AND (p.department_id IS NULL OR p.department_id=scope.department_id))
       ORDER BY p.is_active DESC, p.policy_name, p.id
-    `);
+    `, [req.user.id]);
     return res.json(result.rows);
   } catch (err) {
     return sendPostgresError(req, res, err, {
