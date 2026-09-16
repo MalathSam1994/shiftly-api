@@ -649,6 +649,11 @@ function normalizeUnitBody(req, res, { partial = false } = {}) {
   body.external_unit_id = cleanText(source.external_unit_id);
   body.is_demo = isDemo;
   body.is_active = isActive;
+  if (partial) {
+    for (const key of ['external_source_system','external_unit_id','floor_label','default_room_prefix','bed_count','source_type','is_demo','is_active','unit_type']) {
+      if (!Object.prototype.hasOwnProperty.call(source,key)) delete body[key];
+    }
+  }
   return body;
 }
 
@@ -829,6 +834,125 @@ async function updateRow(req, res, table, idColumn, allowed, contextLabel) {
   }
 }
 
+router.get('/desktop/acuity/rule-sets',requirePermission(OPEN_ACUITY_RULE_SETS),async(req,res)=>{
+  try{
+    const result=await pool.query(`WITH units AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_units($1)),
+      assessment_counts AS (
+        SELECT a.rule_set_id, count(*) AS n
+        FROM shiftly_schema.clinical_acuity_assessments a
+        JOIN shiftly_schema.clinical_encounters e ON e.id = a.encounter_id
+        -- Encounter access follows its current unit, including after transfers.
+        JOIN units u ON u.id = e.current_clinical_unit_id
+        GROUP BY a.rule_set_id
+      )
+      SELECT rs.*,cu.unit_name AS clinical_unit_name,dv.division_desc,dep.department_desc,COALESCE(ac.n,0) AS assessment_count
+      FROM shiftly_schema.clinical_acuity_rule_sets rs LEFT JOIN units cu ON cu.id=rs.clinical_unit_id
+      LEFT JOIN shiftly_schema.divisions dv ON dv.id=rs.division_id LEFT JOIN shiftly_schema.departments dep ON dep.id=rs.department_id LEFT JOIN assessment_counts ac ON ac.rule_set_id=rs.id
+      WHERE EXISTS(SELECT 1 FROM units u WHERE (rs.clinical_unit_id IS NULL OR rs.clinical_unit_id=u.id) AND (rs.division_id IS NULL OR rs.division_id=u.division_id) AND (rs.department_id IS NULL OR rs.department_id=u.department_id))
+      ORDER BY rs.is_active DESC,rs.rule_code,rs.version_number DESC,rs.id DESC`,[req.user.id]);
+    return res.json(result.rows);
+  }catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading scoped clinical rule sets'});}
+});
+
+const acuityDesktopKinds = {rules:OPEN_ACUITY_RULE_SETS,levels:OPEN_ACUITY_LEVELS,factors:OPEN_ACUITY_FACTORS,flow:OPEN_FLOW_RULES};
+router.get('/desktop/acuity/:kind/summary', (req,res,next)=> {
+  const permission=acuityDesktopKinds[req.params.kind];
+  if(!permission)return sendApiError(req,res,{status:404,error:'Unknown acuity workspace.',code:'RESOURCE_NOT_FOUND'});
+  return requirePermission(permission)(req,res,next);
+}, async(req,res)=>{
+  const ruleId=parseOptionalInt(req.query.ruleSetId);
+  if(ruleId===undefined)return sendApiError(req,res,{status:400,error:'Invalid rule set ID.',code:'INVALID_REQUEST'});
+  const scope=`WITH rules AS MATERIALIZED (SELECT rs.* FROM shiftly_schema.clinical_acuity_rule_sets rs WHERE
+    EXISTS(SELECT 1 FROM shiftly_api.fn_clinical_units($1) cu WHERE (rs.clinical_unit_id IS NULL OR rs.clinical_unit_id=cu.id)
+      AND (rs.division_id IS NULL OR rs.division_id=cu.division_id) AND (rs.department_id IS NULL OR rs.department_id=cu.department_id)))`;
+  let sql;
+  if(req.params.kind==='rules')sql=scope+`, lc AS (SELECT rule_set_id,count(*) n FROM shiftly_schema.clinical_acuity_levels GROUP BY rule_set_id),
+    fc AS (SELECT rule_set_id,count(*) n FROM shiftly_schema.clinical_acuity_rule_set_factors WHERE is_active GROUP BY rule_set_id),
+    ac AS (SELECT rule_set_id,count(*) n FROM shiftly_schema.clinical_acuity_rule_set_adt_rules WHERE is_active GROUP BY rule_set_id)
+    SELECT jsonb_build_object('summary',jsonb_build_object('Total rule sets',count(*),'Published',count(*) FILTER(WHERE status='PUBLISHED'),'Draft',count(*) FILTER(WHERE status='DRAFT'),'Future effective',count(*) FILTER(WHERE effective_start_at>CURRENT_TIMESTAMP)),
+      'records',COALESCE(jsonb_object_agg(r.id::text,jsonb_build_object('levels',COALESCE(lc.n,0),'factors',COALESCE(fc.n,0),'flow_rules',COALESCE(ac.n,0))),'{}'::jsonb)) AS data
+    FROM rules r LEFT JOIN lc ON lc.rule_set_id=r.id LEFT JOIN fc ON fc.rule_set_id=r.id LEFT JOIN ac ON ac.rule_set_id=r.id WHERE $2::integer IS NULL OR r.id=$2`;
+  else if(req.params.kind==='levels')sql=scope+`, levels AS (SELECT l.* FROM shiftly_schema.clinical_acuity_levels l JOIN rules r ON r.id=l.rule_set_id WHERE l.rule_set_id=$2)
+    SELECT jsonb_build_object('summary',jsonb_build_object('Total levels',count(*),'Active levels',count(*) FILTER(WHERE is_active)),
+      'records',COALESCE(jsonb_object_agg(l.id::text,jsonb_build_object('overlap',EXISTS(SELECT 1 FROM levels other WHERE other.id<>l.id AND other.is_active AND l.is_active AND other.min_score<=COALESCE(l.max_score,'Infinity'::numeric) AND l.min_score<=COALESCE(other.max_score,'Infinity'::numeric)))),'{}'::jsonb)) AS data FROM levels l`;
+  else if(req.params.kind==='factors')sql=scope+`, links AS (SELECT f.* FROM shiftly_schema.clinical_acuity_rule_set_factors f JOIN rules r ON r.id=f.rule_set_id)
+    SELECT jsonb_build_object('summary',jsonb_build_object('Categories',(SELECT count(*) FROM shiftly_schema.clinical_acuity_factor_categories),'Factors',(SELECT count(*) FROM shiftly_schema.clinical_acuity_factors),'Rule-set links',(SELECT count(*) FROM links WHERE rule_set_id=$2),'Competency-linked',(SELECT count(*) FROM shiftly_schema.clinical_acuity_factors WHERE can_trigger_competency)),
+      'effective',COALESCE((SELECT jsonb_object_agg(f.id::text,jsonb_build_object('score',COALESCE(m.score_weight_override,f.score_weight),'workload',COALESCE(m.workload_weight_override,f.workload_weight))) FROM links m JOIN shiftly_schema.clinical_acuity_factors f ON f.id=m.factor_id WHERE m.rule_set_id=$2 AND m.is_active AND f.is_active),'{}'::jsonb),
+      'categories',COALESCE((SELECT jsonb_object_agg(category_id::text,n) FROM (SELECT category_id,count(*) n FROM shiftly_schema.clinical_acuity_factors WHERE category_id IS NOT NULL GROUP BY category_id) x),'{}'::jsonb),
+      'records',COALESCE((SELECT jsonb_object_agg(factor_id::text,n) FROM (SELECT factor_id,count(DISTINCT rule_set_id) n FROM links GROUP BY factor_id) x),'{}'::jsonb)) AS data`;
+  else sql=scope+`, mappings AS (SELECT m.* FROM shiftly_schema.clinical_acuity_rule_set_adt_rules m JOIN rules r ON r.id=m.rule_set_id WHERE m.rule_set_id=$2)
+    SELECT jsonb_build_object('summary',jsonb_build_object('Active event types',(SELECT count(*) FROM shiftly_schema.clinical_adt_event_types WHERE is_active),
+      'Configured rules',(SELECT count(*) FROM mappings),'Without mapping',(SELECT count(*) FROM shiftly_schema.clinical_adt_event_types e WHERE e.is_active AND NOT EXISTS(SELECT 1 FROM mappings m WHERE m.event_type_id=e.id)),
+      'Workload-impacting',(SELECT count(*) FROM mappings m JOIN shiftly_schema.clinical_adt_event_types e ON e.id=m.event_type_id WHERE m.is_active AND e.is_active AND COALESCE(m.workload_weight_override,e.workload_weight)<>0)),
+      'flow_metrics',jsonb_build_object(
+        'total_event_types',(SELECT count(*) FROM shiftly_schema.clinical_adt_event_types),
+        'active_mappings',(SELECT count(*) FROM mappings m JOIN shiftly_schema.clinical_adt_event_types e ON e.id=m.event_type_id WHERE m.is_active AND e.is_active),
+        'lookback_24h',(SELECT count(*) FROM mappings m JOIN shiftly_schema.clinical_adt_event_types e ON e.id=m.event_type_id WHERE m.is_active AND e.is_active AND m.lookback_hours=24),
+        'average_workload',(SELECT round(avg(COALESCE(m.workload_weight_override,e.workload_weight)),2) FROM mappings m JOIN shiftly_schema.clinical_adt_event_types e ON e.id=m.event_type_id WHERE m.is_active AND e.is_active)),
+      'effective',COALESCE((SELECT jsonb_object_agg(e.id::text,jsonb_build_object('score',COALESCE(m.score_weight_override,e.score_weight),'workload',COALESCE(m.workload_weight_override,e.workload_weight))) FROM mappings m JOIN shiftly_schema.clinical_adt_event_types e ON e.id=m.event_type_id),'{}'::jsonb),
+      'records',COALESCE((SELECT jsonb_object_agg(event_type_id::text,n) FROM (SELECT m.event_type_id,count(DISTINCT m.rule_set_id) n FROM shiftly_schema.clinical_acuity_rule_set_adt_rules m JOIN rules r ON r.id=m.rule_set_id GROUP BY m.event_type_id) x),'{}'::jsonb)) AS data`;
+  try {
+    const [result,permission]=await Promise.all([pool.query(sql,[req.user.id,ruleId]),pool.query("SELECT shiftly_api.fn_user_has_permission($1,$2) AS can_manage,jsonb_build_object('levels',shiftly_api.fn_user_has_permission($1,$3),'factors',shiftly_api.fn_user_has_permission($1,$4),'flow',shiftly_api.fn_user_has_permission($1,$5)) AS can_open",[req.user.id,MANAGE_ACUITY_RULES,OPEN_ACUITY_LEVELS,OPEN_ACUITY_FACTORS,OPEN_FLOW_RULES])]);
+    return res.json({...result.rows[0].data,...permission.rows[0]});
+  }catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading acuity workspace summary'});}
+});
+
+// POST keeps patient search terms out of request URLs/access logs. Never log this body.
+async function desktopPatientCensus(req,res){
+ const input=req.method==='POST'?req.body:req.query;
+ const unitId=parseOptionalInt(input.unitId),includeDischarged=parseBoolean(input.includeDischarged,false),acuityId=parseOptionalInt(input.acuityLevelId);
+ const offset=Number(input.offset??0),search=String(input.search??'').trim();
+ if(unitId===undefined||includeDischarged===undefined||acuityId===undefined||!Number.isSafeInteger(offset)||offset<0||search.length>160)return sendApiError(req,res,{status:400,error:'Invalid patient census filters.',code:'INVALID_REQUEST'});
+ try{
+  const result=await pool.query(`WITH census AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_patient_encounters($1::integer,$2::boolean,$3::integer,NULL::integer)),
+   filtered AS MATERIALIZED (SELECT * FROM census WHERE ($5::text='' OR strpos(lower(concat_ws(' ',display_name,patient_public_id,encounter_number)),lower($5))>0)
+    AND ($6::text='' OR encounter_status=$6) AND ($7::text='' OR clinical_status=$7) AND ($8::integer IS NULL OR acuity_level_id=$8)
+    AND ($9::text='' OR patient_source_type=$9) AND ($12::text='' OR patient_is_demo=($12='true'))),
+   page AS (SELECT * FROM filtered ORDER BY CASE WHEN $10='name' THEN lower(display_name) END,CASE WHEN $10<>'name' THEN admitted_at END DESC,encounter_id LIMIT 100 OFFSET $11)
+   SELECT jsonb_build_object('rows',COALESCE((SELECT jsonb_agg(to_jsonb(p)) FROM page p),'[]'::jsonb),'total',count(*),'offset',$11::integer,
+    'can_manage',shiftly_api.fn_user_has_permission($1,$4),
+    'options',jsonb_build_object(
+      'encounter_statuses',COALESCE((SELECT jsonb_object_agg(encounter_status,encounter_status) FROM (SELECT DISTINCT encounter_status FROM census WHERE encounter_status IS NOT NULL) x),'{}'::jsonb),
+      'clinical_statuses',COALESCE((SELECT jsonb_object_agg(clinical_status,clinical_status) FROM (SELECT DISTINCT clinical_status FROM census WHERE clinical_status IS NOT NULL) x),'{}'::jsonb),
+      'acuity_levels',COALESCE((SELECT jsonb_object_agg(acuity_level_id::text,acuity_level_name) FROM (SELECT DISTINCT acuity_level_id,acuity_level_name FROM census WHERE acuity_level_id IS NOT NULL) x),'{}'::jsonb),
+      'sources',COALESCE((SELECT jsonb_object_agg(patient_source_type,patient_source_type) FROM (SELECT DISTINCT patient_source_type FROM census WHERE patient_source_type IS NOT NULL) x),'{}'::jsonb)),
+    'summary',jsonb_build_object('Active patients',count(DISTINCT patient_id) FILTER(WHERE encounter_status='ACTIVE'),
+     'Discharged encounters',count(*) FILTER(WHERE encounter_status='DISCHARGED'),'Demo patients',count(DISTINCT patient_id) FILTER(WHERE patient_is_demo),
+     'Unassessed encounters',count(*) FILTER(WHERE current_assessment_id IS NULL AND encounter_status='ACTIVE'))) AS census FROM filtered`,
+    [req.user.id,includeDischarged,unitId,MANAGE_PATIENT_ADMIN,search,String(input.encounterStatus??''),String(input.clinicalStatus??''),acuityId,String(input.source??''),input.sort==='name'?'name':'admitted',offset,String(input.demo??'')]);
+  return res.json(result.rows[0].census);
+ }catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading patient census'});}
+}
+router.get('/desktop/patient-census', requirePermission(OPEN_PATIENT_ADMIN),desktopPatientCensus);
+router.post('/desktop/patient-census', requirePermission(OPEN_PATIENT_ADMIN),desktopPatientCensus);
+
+router.get('/desktop/units', requirePermission(OPEN_CLINICAL_UNITS), async (req,res) => {
+  try {
+    const result=await pool.query(`WITH units AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_units($1)),
+    organizations AS (SELECT dd.id,dd.division_id,dd.department_id,dv.division_desc,dep.department_desc,dd.is_active
+      FROM shiftly_schema.division_departments dd JOIN shiftly_schema.divisions dv ON dv.id=dd.division_id
+      JOIN shiftly_schema.departments dep ON dep.id=dd.department_id
+      WHERE shiftly_api.fn_user_can_access_division_department($1,dd.division_id,dd.department_id))
+    SELECT jsonb_build_object('units',COALESCE((SELECT jsonb_agg(to_jsonb(u) ORDER BY unit_name) FROM units u),'[]'::jsonb),
+      'organizations',COALESCE((SELECT jsonb_agg(to_jsonb(o) ORDER BY division_desc,department_desc) FROM organizations o),'[]'::jsonb),
+      'can_manage',shiftly_api.fn_user_has_permission($1,$2),
+      'summary',jsonb_build_object('Total units',(SELECT count(*) FROM units),'Active units',(SELECT count(*) FROM units WHERE is_active),
+       'Active encounters',COALESCE((SELECT sum(active_encounter_count) FROM units),0),'Inactive units',(SELECT count(*) FROM units WHERE NOT is_active))) AS workspace`,[req.user.id,MANAGE_CLINICAL_UNITS]);
+    return res.json(result.rows[0].workspace);
+  } catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading clinical unit workspace'});}
+});
+async function ensureClinicalUnitWriteScope(req,res,body) {
+  const oldId=req.params.id ? parseOptionalInt(req.params.id) : null;
+  if (req.params.id && !oldId) {sendApiError(req,res,{status:400,error:'A valid unit ID is required.',code:'INVALID_REQUEST'});return false;}
+  const previous=oldId ? (await pool.query('SELECT division_id,department_id FROM shiftly_schema.clinical_units WHERE id=$1',[oldId])).rows[0] : null;
+  if(oldId&&!previous){sendApiError(req,res,{status:404,error:'Clinical unit was not found.',code:'RESOURCE_NOT_FOUND'});return false;}
+  for(const record of [previous,{...previous,...body}].filter(Boolean)) {
+    const result=await pool.query('SELECT shiftly_api.fn_user_can_access_division_department($1,$2,$3) AS ok',[req.user.id,record.division_id,record.department_id]);
+    if(!result.rows[0]?.ok){sendApiError(req,res,{status:403,error:'Clinical unit is outside your organization scope.',code:'PERMISSION_DENIED'});return false;}
+  }
+  return true;
+}
+
 router.get('/units', requireAnyClinicalPermission([OPEN_PATIENT_ADMIN, OPEN_CLINICAL_UNITS]), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
@@ -856,6 +980,7 @@ router.get('/units', requireAnyClinicalPermission([OPEN_PATIENT_ADMIN, OPEN_CLIN
 router.post('/units', requirePermission(MANAGE_CLINICAL_UNITS), async (req, res) => {
   const body = normalizeUnitBody(req, res);
   if (!body) return null;
+  try { if (!await ensureClinicalUnitWriteScope(req,res,body)) return null; } catch(err) { return sendPostgresError(req,res,err,{action:'CREATE',label:'Unit scope validation failed'}); }
   req.body = body;
   return insertRow(
     req,
@@ -869,6 +994,7 @@ router.post('/units', requirePermission(MANAGE_CLINICAL_UNITS), async (req, res)
 router.put('/units/:id', requirePermission(MANAGE_CLINICAL_UNITS), async (req, res) => {
   const body = normalizeUnitBody(req, res, { partial: true });
   if (!body) return null;
+  try { if (!await ensureClinicalUnitWriteScope(req,res,body)) return null; } catch(err) { return sendPostgresError(req,res,err,{action:'UPDATE',label:'Unit scope validation failed'}); }
   req.body = body;
   return updateRow(
     req,
