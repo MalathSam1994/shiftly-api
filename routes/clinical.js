@@ -2036,6 +2036,47 @@ router.get('/staff-pool', requirePermission(OPEN_STAFF_POOL), async (req, res) =
   }
 });
 
+// Compact policy workspace: configuration summaries, never optimizer decisions.
+router.get('/assignment-optimizer-policies/workspace', requirePermission(OPEN_ASSIGNMENT_OPTIMIZER_POLICIES), async (req, res) => {
+  try {
+    const result = await pool.query(`
+      WITH units AS MATERIALIZED (
+        SELECT id,division_id,department_id,is_active FROM shiftly_schema.clinical_units u
+        WHERE shiftly_api.fn_user_can_access_division_department($1,u.division_id,u.department_id)
+      ), policies AS MATERIALIZED (
+        SELECT p.*,cu.unit_name,dv.division_desc,dep.department_desc,sh.shift_label
+        FROM shiftly_schema.clinical_assignment_optimizer_policies p
+        LEFT JOIN shiftly_schema.clinical_units cu ON cu.id=p.clinical_unit_id
+        LEFT JOIN shiftly_schema.divisions dv ON dv.id=p.division_id
+        LEFT JOIN shiftly_schema.departments dep ON dep.id=p.department_id
+        LEFT JOIN shiftly_schema.shift_types sh ON sh.id=p.shift_type_id
+        WHERE EXISTS(SELECT 1 FROM units u WHERE (p.clinical_unit_id IS NULL OR p.clinical_unit_id=u.id)
+          AND (p.division_id IS NULL OR p.division_id=u.division_id)
+          AND (p.department_id IS NULL OR p.department_id=u.department_id))
+      ) SELECT jsonb_build_object(
+        'rows',COALESCE((SELECT jsonb_agg(to_jsonb(p) || jsonb_build_object(
+          'effective_start_date',to_char(p.effective_start_date,'YYYY-MM-DD'),
+          'effective_end_date',to_char(p.effective_end_date,'YYYY-MM-DD')) ORDER BY p.is_active DESC,p.policy_name,p.id) FROM policies p),'[]'::jsonb),
+        'can_manage',shiftly_api.fn_user_has_permission($1,$2),
+        'summary',jsonb_build_object(
+          'total',(SELECT count(*) FROM policies),
+          'active',(SELECT count(*) FROM policies WHERE is_active),
+          'hard_capacity',(SELECT count(*) FROM policies WHERE hard_capacity_behavior),
+          'available_units',(SELECT count(*) FROM units WHERE is_active),
+          'covered_units',(SELECT count(*) FROM units u WHERE u.is_active AND EXISTS(
+            SELECT 1 FROM policies p WHERE p.is_active AND p.effective_start_date<=CURRENT_DATE
+              AND (p.effective_end_date IS NULL OR p.effective_end_date>=CURRENT_DATE)
+              AND (p.clinical_unit_id IS NULL OR p.clinical_unit_id=u.id)
+              AND (p.division_id IS NULL OR p.division_id=u.division_id)
+              AND (p.department_id IS NULL OR p.department_id=u.department_id))),
+          'as_of',to_char(CURRENT_DATE,'YYYY-MM-DD')
+        )) AS workspace`, [req.user.id, PUBLISH_ASSIGNMENTS]);
+    return res.json(result.rows[0].workspace);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'LIST', label: 'Error loading assignment optimizer policy workspace' });
+  }
+});
+
 router.get('/assignment-optimizer-policies', requirePermission(OPEN_ASSIGNMENT_OPTIMIZER_POLICIES), async (req, res) => {
   try {
     const result = await pool.query(`
@@ -2067,7 +2108,45 @@ router.get('/assignment-optimizer-policies', requirePermission(OPEN_ASSIGNMENT_O
   }
 });
 
-router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNMENTS), (req, res) =>
+// Limit optimizer-policy mutations to current and proposed manager-visible scope.
+async function requireOptimizerPolicyScope(req, res, next) {
+  try {
+    let current = {};
+    if (req.params.id != null) {
+      const id = requirePositiveId(req, res, req.params.id, 'id');
+      if (!id) return;
+      const found = await pool.query(`SELECT p.clinical_unit_id,p.division_id,p.department_id
+        FROM shiftly_schema.clinical_assignment_optimizer_policies p WHERE p.id=$2 AND EXISTS(
+          SELECT 1 FROM shiftly_schema.clinical_units u
+          WHERE shiftly_api.fn_user_can_access_division_department($1,u.division_id,u.department_id)
+            AND (p.clinical_unit_id IS NULL OR p.clinical_unit_id=u.id)
+            AND (p.division_id IS NULL OR p.division_id=u.division_id)
+            AND (p.department_id IS NULL OR p.department_id=u.department_id))`, [req.user.id,id]);
+      if (!found.rows.length) return sendApiError(req,res,{status:404,error:'Policy not found in your clinical scope.',code:'RESOURCE_NOT_FOUND'});
+      current = found.rows[0];
+    }
+    const scope = {...current};
+    for (const field of ['clinical_unit_id','division_id','department_id']) {
+      if (Object.prototype.hasOwnProperty.call(req.body,field)) {
+        const id = parseOptionalInt(req.body[field]);
+        if (id === undefined) return sendApiError(req,res,{status:400,error:'Scope fields must be positive identifiers or empty.',code:'INVALID_REQUEST'});
+        scope[field] = id;
+        req.body[field] = id;
+      }
+    }
+    const allowed = await pool.query(`SELECT EXISTS(SELECT 1 FROM shiftly_schema.clinical_units u
+      WHERE shiftly_api.fn_user_can_access_division_department($1,u.division_id,u.department_id)
+        AND ($2::integer IS NULL OR u.id=$2) AND ($3::integer IS NULL OR u.division_id=$3)
+        AND ($4::integer IS NULL OR u.department_id=$4)) AS ok`,
+      [req.user.id,scope.clinical_unit_id??null,scope.division_id??null,scope.department_id??null]);
+    if (!allowed.rows[0].ok) return sendApiError(req,res,{status:403,error:'The policy scope is outside your authorized clinical units or combines unrelated organization values.',code:'FORBIDDEN'});
+    return next();
+  } catch (err) {
+    return sendPostgresError(req,res,err,{action:'UPDATE',label:'Error checking optimizer policy scope'});
+  }
+}
+
+router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNMENTS), requireOptimizerPolicyScope, (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_assignment_optimizer_policies', [
     'policy_code',
     'policy_name',
@@ -2092,7 +2171,7 @@ router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNME
     'is_active',
   ], 'Error creating assignment optimizer policy'));
 
-router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIGNMENTS), (req, res) =>
+router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIGNMENTS), requireOptimizerPolicyScope, (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_assignment_optimizer_policies', 'id', [
     'policy_code',
     'policy_name',
