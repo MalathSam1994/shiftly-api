@@ -2312,7 +2312,55 @@ router.get('/assignment-board', requirePermission(OPEN_ASSIGNMENT_BOARD), async 
       `SELECT shiftly_api.fn_clinical_assignment_board($1, $2::date, $3, $4, $5, $6) AS board`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId],
     );
-    return res.json(result.rows[0].board);
+    // Read-only lifecycle evidence for the same authorized board context.
+    const activity = await pool.query(`
+      WITH units AS MATERIALIZED (
+        SELECT cu.id FROM shiftly_schema.clinical_units cu
+        WHERE cu.division_id=$4 AND cu.department_id=$5 AND ($6::integer IS NULL OR cu.id=$6)
+          AND shiftly_api.fn_user_can_access_division_department($1,cu.division_id,cu.department_id)
+      ), runs AS (
+        SELECT r.* FROM shiftly_schema.clinical_assignment_optimization_runs r
+        WHERE r.shift_date=$2::date AND r.shift_type_id=$3 AND r.division_id=$4 AND r.department_id=$5
+          AND ($6::integer IS NULL OR r.clinical_unit_id=$6)
+          AND EXISTS(SELECT 1 FROM units)
+          AND (r.clinical_unit_id IS NULL OR r.clinical_unit_id IN (SELECT id FROM units))
+      ), workflows AS (
+        SELECT w.* FROM shiftly_schema.clinical_assignment_review_workflows w
+        WHERE w.shift_date=$2::date AND w.shift_type_id=$3 AND w.division_id=$4 AND w.department_id=$5
+          AND ($6::integer IS NULL OR w.clinical_unit_id=$6)
+          AND EXISTS(SELECT 1 FROM units)
+          AND (w.clinical_unit_id IS NULL OR w.clinical_unit_id IN (SELECT id FROM units))
+      ), events AS (
+        SELECT 'run:'||r.id||':'||v.kind AS id, v.kind, v.category, v.title, v.event_at AS occurred_at,
+          COALESCE(u.user_desc,'Unknown') AS action_by,
+          CASE WHEN r.action_at=v.event_at THEN COALESCE(NULLIF(r.action_source,''),'Unknown') ELSE 'Unknown' END AS source,
+          jsonb_build_object('Run',r.run_number,'Plan type',r.optimization_mode,'Recorded action',v.title,
+            'Current run status',r.optimization_status,'Shift date',to_char(r.shift_date,'YYYY-MM-DD'),
+            'Moved patients',r.after_metrics->'patients_moved','Unassigned patients',r.after_metrics->'unassigned_patients',
+            'Balance gap',r.after_metrics->'balance_gap') AS details
+        FROM runs r CROSS JOIN LATERAL (VALUES
+          ('GENERATED',CASE WHEN r.optimization_mode='REBALANCE' THEN 'Rebalances' ELSE 'Changes' END,
+            CASE WHEN r.optimization_mode='REBALANCE' THEN 'Rebalance proposal generated' ELSE 'Assignment proposal generated' END,r.generated_at,r.generated_by),
+          ('REVIEWED','Reviews','Assignment run reviewed',r.reviewed_at,r.reviewed_by),
+          ('PUBLISHED','Publishing','Assignment published',r.published_at,r.published_by),
+          ('CANCELLED','Changes','Draft discarded',r.cancelled_at,r.cancelled_by)
+        ) v(kind,category,title,event_at,actor)
+        LEFT JOIN shiftly_schema.users u ON u.id=v.actor WHERE v.event_at IS NOT NULL
+        UNION ALL
+        SELECT 'workflow:'||e.id,e.event_type,
+          CASE WHEN e.event_type='PUBLISHED' THEN 'Publishing' WHEN e.event_type LIKE 'OPTIMIZATION_%' THEN 'Rebalances' ELSE 'Reviews' END,
+          'Review: '||replace(lower(e.event_type),'_',' '),e.occurred_at,
+          COALESCE(NULLIF(u.user_desc,''),'Unknown'),
+          COALESCE(NULLIF(e.action_source,''),'Unknown'),
+          jsonb_build_object('Workflow',w.workflow_number,'Trigger',w.trigger_type,'Reason',w.reason_summary,'Event type',e.event_type)
+        FROM workflows w JOIN shiftly_schema.clinical_assignment_workflow_events e ON e.workflow_id=w.id
+        LEFT JOIN shiftly_schema.users u ON u.id=COALESCE(e.action_by,e.actor_user_id)
+      ), recent AS (SELECT * FROM events ORDER BY occurred_at DESC,id DESC LIMIT 250)
+      SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'kind',kind,'category',category,'title',title,
+        'occurred_at',to_char(occurred_at,'YYYY-MM-DD HH24:MI:SS'),'action_by',action_by,'source',COALESCE(source,'Unknown'),
+        'details',details) ORDER BY occurred_at DESC,id DESC),'[]'::jsonb) AS rows FROM recent`,
+      [req.user.id, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId]);
+    return res.json({...result.rows[0].board, activity: activity.rows[0].rows});
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'GET',
