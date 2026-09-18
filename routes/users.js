@@ -2,6 +2,7 @@
 const express = require('express');
 const bcrypt = require('bcryptjs');
 const pool = require('../db');
+const requirePermission = require('../middleware/requirePermission');
 const { generateComplexPassword } = require('../services/passwordUtil');
 const { sendUserWelcomeEmail } = require('../services/mailer');
 const {
@@ -25,6 +26,62 @@ const {
 
 
 const router = express.Router();
+
+const RESET_PASSWORD_PERMISSION = 'action:users:reset_password';
+
+// Must precede /:id so the capability name is not parsed as a user ID.
+router.get('/action-permissions', async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  try {
+    const actorId = Number(req.user?.sub ?? req.user?.id);
+    const { rows } = await pool.query(
+      'SELECT shiftly_api.fn_user_has_permission($1, $2) AS can_reset_password',
+      [actorId, RESET_PASSWORD_PERMISSION]
+    );
+    return res.json({ can_reset_password: rows[0]?.can_reset_password === true });
+  } catch (e) {
+    return sendPostgresError(req, res, e, { label: 'User action permissions failed' });
+  }
+});
+
+router.post('/:id/reset-password', requirePermission(RESET_PASSWORD_PERMISSION), async (req, res) => {
+  res.set('Cache-Control', 'no-store');
+  const userId = Number(req.params.id);
+  if (!/^\d+$/.test(req.params.id) || !Number.isInteger(userId) || userId < 1 || userId > 2147483647) {
+    return sendApiError(req, res, {
+      status: 400, code: 'INVALID_ID', error: 'A valid user ID is required.',
+    });
+  }
+
+  const password = req.body?.new_password;
+  if (typeof password !== 'string' || [...password].length < 8 ||
+      Buffer.byteLength(password, 'utf8') > 72 || password.includes('\u0000')) {
+    return sendApiError(req, res, {
+      status: 400, code: 'INVALID_PASSWORD',
+      error: 'Password must contain at least 8 characters, at most 72 UTF-8 bytes, and no null characters.',
+    });
+  }
+
+  try {
+    const actorId = Number(req.user?.sub ?? req.user?.id);
+    await pool.query(
+      'SELECT shiftly_api.set_user_password($1::integer, $2::text, $3::integer)',
+      [userId, password, actorId]
+    );
+    return res.json({ ok: true, must_change_password: true });
+  } catch (e) {
+    // Do not log/serialize raw database errors here: their context may contain
+    // the password parameter. Only return fixed messages.
+    const errors = {
+      '42501': [403, 'PERMISSION_DENIED', 'You do not have permission to reset user passwords.'],
+      P0002: [404, 'USER_NOT_FOUND', 'The selected user was not found.'],
+      '22023': [400, 'INVALID_PASSWORD', 'Password must contain at least 8 characters and at most 72 UTF-8 bytes.'],
+    };
+    const [status, code, error] = errors[e.code] ||
+      [500, 'PASSWORD_RESET_FAILED', 'The password could not be reset. Please try again.'];
+    return sendApiError(req, res, { status, code, error });
+  }
+});
 
 
 function normalizeValidationErrors(anyVal) {
