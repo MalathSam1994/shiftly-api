@@ -1,4 +1,5 @@
 const express = require('express');
+const { clinicalOperationalData } = require('../services/clinicalOperationalData');
 const ExcelJS = require('exceljs');
 const { clinicalRequestContext, clinicalPool } = require('../services/clinicalRequestContext');
 const { describeClinicalAttention } = require('../services/clinicalAttentionDetails');
@@ -9,6 +10,7 @@ const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
 const router = express.Router();
 router.use(clinicalRequestContext);
+router.use(clinicalOperationalData);
 
 const OPEN_PATIENT_ADMIN = 'screen:clinical_patient_administration:open';
 const OPEN_CLINICAL_UNITS = 'screen:clinical_units:open';
@@ -573,8 +575,8 @@ function validateAdminFields(req, res, body, source, partial, limits) {
       return null;
     }
   }
-  if (body.source_type != null && !['MANUAL', 'DEMO', 'EXTERNAL'].includes(body.source_type)) {
-    sendApiError(req, res, { status: 400, error: 'source_type must be MANUAL, DEMO or EXTERNAL.', code: 'INVALID_REQUEST' });
+  if (body.source_type != null && !['MANUAL', 'EXTERNAL'].includes(body.source_type)) {
+    sendApiError(req, res, { status: 400, error: 'source_type must be MANUAL or EXTERNAL.', code: 'INVALID_REQUEST' });
     return null;
   }
   return body;
@@ -624,7 +626,6 @@ function normalizeUnitBody(req, res, { partial = false } = {}) {
   const unitType = enumValue(req, res, source.unit_type, 'unit_type', UNIT_TYPES, 'GENERAL');
   const bedCount = optionalNonNegativeInt(req, res, source.bed_count, 'bed_count');
   const isActive = parseBoolean(source.is_active, true);
-  const isDemo = parseBoolean(source.is_demo, false);
 
   if (divisionId === undefined || (!partial && divisionId == null)) {
     sendApiError(req, res, { status: 400, error: 'division_id must be a positive integer.', code: 'INVALID_REQUEST' });
@@ -634,7 +635,7 @@ function normalizeUnitBody(req, res, { partial = false } = {}) {
     sendApiError(req, res, { status: 400, error: 'department_id must be a positive integer.', code: 'INVALID_REQUEST' });
     return null;
   }
-  if (unitCode === undefined || unitName === undefined || unitType === undefined || bedCount === undefined || isActive === undefined || isDemo === undefined) return null;
+  if (unitCode === undefined || unitName === undefined || unitType === undefined || bedCount === undefined || isActive === undefined) return null;
 
   if (divisionId != null) body.division_id = divisionId;
   if (departmentId != null) body.department_id = departmentId;
@@ -647,10 +648,9 @@ function normalizeUnitBody(req, res, { partial = false } = {}) {
   body.source_type = cleanUpper(source.source_type) || 'MANUAL';
   body.external_source_system = cleanText(source.external_source_system);
   body.external_unit_id = cleanText(source.external_unit_id);
-  body.is_demo = isDemo;
   body.is_active = isActive;
   if (partial) {
-    for (const key of ['external_source_system','external_unit_id','floor_label','default_room_prefix','bed_count','source_type','is_demo','is_active','unit_type']) {
+    for (const key of ['external_source_system','external_unit_id','floor_label','default_room_prefix','bed_count','source_type','is_active','unit_type']) {
       if (!Object.prototype.hasOwnProperty.call(source,key)) delete body[key];
     }
   }
@@ -674,14 +674,8 @@ function normalizePatientBody(req, res, { partial = false } = {}) {
   if (sex === undefined) return null;
   const patientStatus = enumValue(req, res, source.patient_status, 'patient_status', PATIENT_STATUSES, 'ACTIVE');
   if (patientStatus === undefined) return null;
-  const isDemo = parseBoolean(source.is_demo, false);
 
-  if (isDemo === undefined) {
-    sendApiError(req, res, { status: 400, error: 'is_demo must be true or false.', code: 'INVALID_REQUEST' });
-    return null;
-  }
-
-  if (publicId === undefined || displayName === undefined || dob === undefined || sex === undefined || patientStatus === undefined || isDemo === undefined) return null;
+  if (publicId === undefined || displayName === undefined || dob === undefined || sex === undefined || patientStatus === undefined) return null;
   if (publicId != null) body.patient_public_id = publicId;
   if (displayName != null) body.display_name = displayName;
   body.date_of_birth = dob;
@@ -690,7 +684,6 @@ function normalizePatientBody(req, res, { partial = false } = {}) {
   body.source_type = cleanUpper(source.source_type) || 'MANUAL';
   body.external_source_system = cleanText(source.external_source_system);
   body.external_patient_id = cleanText(source.external_patient_id);
-  body.is_demo = isDemo;
   return validateAdminFields(req, res, body, source, partial, {
     patient_public_id: 80, display_name: 160, external_source_system: 80, external_patient_id: 120,
   });
@@ -718,14 +711,8 @@ async function normalizeEncounterBody(req, res, source, { partial = false } = {}
   const dischargedAt = optionalTimestamp(req, res, source.discharged_at, 'discharged_at');
   if (dischargedAt === undefined) return null;
   const unitId = parseOptionalInt(source.current_clinical_unit_id ?? source.clinical_unit_id);
-  const isDemo = parseBoolean(source.is_demo, false);
 
-  if (isDemo === undefined) {
-    sendApiError(req, res, { status: 400, error: 'is_demo must be true or false.', code: 'INVALID_REQUEST' });
-    return null;
-  }
-
-  if (encounterNumber === undefined || status === undefined || admissionType === undefined || admittedAt === undefined || expectedDischargeAt === undefined || dischargedAt === undefined || isDemo === undefined) return null;
+  if (encounterNumber === undefined || status === undefined || admissionType === undefined || admittedAt === undefined || expectedDischargeAt === undefined || dischargedAt === undefined) return null;
   if (partial && Object.prototype.hasOwnProperty.call(source, 'admitted_at') && admittedAt == null) {
     sendApiError(req, res, { status: 400, error: 'admitted_at is required when editing admission time.', code: 'INVALID_REQUEST' });
     return null;
@@ -773,7 +760,6 @@ async function normalizeEncounterBody(req, res, source, { partial = false } = {}
   body.source_type = cleanUpper(source.source_type) || 'MANUAL';
   body.external_source_system = cleanText(source.external_source_system);
   body.external_encounter_id = cleanText(source.external_encounter_id);
-  body.is_demo = isDemo;
   return validateAdminFields(req, res, body, source, partial, {
     encounter_number: 80, discharge_disposition: 80, room_label: 40, bed_label: 40,
     external_source_system: 80, external_encounter_id: 120,
@@ -907,7 +893,7 @@ async function desktopPatientCensus(req,res){
   const result=await pool.query(`WITH census AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_patient_encounters($1::integer,$2::boolean,$3::integer,NULL::integer)),
    filtered AS MATERIALIZED (SELECT * FROM census WHERE ($5::text='' OR strpos(lower(concat_ws(' ',display_name,patient_public_id,encounter_number)),lower($5))>0)
     AND ($6::text='' OR encounter_status=$6) AND ($7::text='' OR clinical_status=$7) AND ($8::integer IS NULL OR acuity_level_id=$8)
-    AND ($9::text='' OR patient_source_type=$9) AND ($12::text='' OR patient_is_demo=($12='true'))),
+    AND ($9::text='' OR patient_source_type=$9)),
    page AS (SELECT * FROM filtered ORDER BY CASE WHEN $10='name' THEN lower(display_name) END,CASE WHEN $10<>'name' THEN admitted_at END DESC,encounter_id LIMIT 100 OFFSET $11)
    SELECT jsonb_build_object('rows',COALESCE((SELECT jsonb_agg(to_jsonb(p)) FROM page p),'[]'::jsonb),'total',count(*),'offset',$11::integer,
     'can_manage',shiftly_api.fn_user_has_permission($1,$4),
@@ -917,9 +903,9 @@ async function desktopPatientCensus(req,res){
       'acuity_levels',COALESCE((SELECT jsonb_object_agg(acuity_level_id::text,acuity_level_name) FROM (SELECT DISTINCT acuity_level_id,acuity_level_name FROM census WHERE acuity_level_id IS NOT NULL) x),'{}'::jsonb),
       'sources',COALESCE((SELECT jsonb_object_agg(patient_source_type,patient_source_type) FROM (SELECT DISTINCT patient_source_type FROM census WHERE patient_source_type IS NOT NULL) x),'{}'::jsonb)),
     'summary',jsonb_build_object('Active patients',count(DISTINCT patient_id) FILTER(WHERE encounter_status='ACTIVE'),
-     'Discharged encounters',count(*) FILTER(WHERE encounter_status='DISCHARGED'),'Demo patients',count(DISTINCT patient_id) FILTER(WHERE patient_is_demo),
+     'Discharged encounters',count(*) FILTER(WHERE encounter_status='DISCHARGED'),
      'Unassessed encounters',count(*) FILTER(WHERE current_assessment_id IS NULL AND encounter_status='ACTIVE'))) AS census FROM filtered`,
-    [req.user.id,includeDischarged,unitId,MANAGE_PATIENT_ADMIN,search,String(input.encounterStatus??''),String(input.clinicalStatus??''),acuityId,String(input.source??''),input.sort==='name'?'name':'admitted',offset,String(input.demo??'')]);
+    [req.user.id,includeDischarged,unitId,MANAGE_PATIENT_ADMIN,search,String(input.encounterStatus??''),String(input.clinicalStatus??''),acuityId,String(input.source??''),input.sort==='name'?'name':'admitted',offset]);
   return res.json(result.rows[0].census);
  }catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading patient census'});}
 }
@@ -1093,7 +1079,6 @@ router.get('/patients/:patientId', requirePermission(OPEN_PATIENT_ADMIN), async 
         patient_source_type: first.patient_source_type,
         patient_external_source_system: first.patient_external_source_system,
         patient_external_patient_id: first.patient_external_patient_id,
-        patient_is_demo: first.patient_is_demo,
       },
       encounters: result.rows,
     });
@@ -1741,7 +1726,6 @@ router.post('/competencies', requirePermission(MANAGE_COMPETENCIES), (req, res) 
     'description',
     'effective_start_date',
     'effective_end_date',
-    'is_demo',
     'is_active',
   ], 'Error creating clinical competency'));
 
@@ -1752,7 +1736,6 @@ router.put('/competencies/:id', requirePermission(MANAGE_COMPETENCIES), (req, re
     'description',
     'effective_start_date',
     'effective_end_date',
-    'is_demo',
     'is_active',
   ], 'Error updating clinical competency'));
 
@@ -1790,7 +1773,6 @@ router.post('/staff-competencies', requirePermission(MANAGE_COMPETENCIES), requi
     'valid_to',
     'source_type',
     'comment',
-    'is_demo',
     'is_active',
   ]);
   body.created_by = actorUserId(req);
@@ -1812,7 +1794,6 @@ router.put('/staff-competencies/:id', requirePermission(MANAGE_COMPETENCIES), re
     'valid_to',
     'source_type',
     'comment',
-    'is_demo',
     'is_active',
   ], 'Error updating staff clinical competency'));
 
@@ -1872,7 +1853,6 @@ router.post('/competency-requirements', requirePermission(MANAGE_CAPACITY_POLICI
     'minimum_staff_count',
     'effective_start_date',
     'effective_end_date',
-    'is_demo',
     'is_active',
   ], 'Error creating clinical competency requirement'));
 
@@ -1891,7 +1871,6 @@ router.put('/competency-requirements/:id', requirePermission(MANAGE_CAPACITY_POL
     'minimum_staff_count',
     'effective_start_date',
     'effective_end_date',
-    'is_demo',
     'is_active',
   ], 'Error updating clinical competency requirement'));
 
@@ -1944,7 +1923,6 @@ router.post('/capacity-policies', requirePermission(MANAGE_CAPACITY_POLICIES), r
     'max_extreme_acuity_count',
     'effective_start_date',
     'effective_end_date',
-    'is_demo',
     'is_active',
   ], 'Error creating clinical capacity policy'));
 
@@ -1964,7 +1942,6 @@ router.put('/capacity-policies/:id', requirePermission(MANAGE_CAPACITY_POLICIES)
     'max_extreme_acuity_count',
     'effective_start_date',
     'effective_end_date',
-    'is_demo',
     'is_active',
   ], 'Error updating clinical capacity policy'));
 
@@ -2167,7 +2144,6 @@ router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNME
     'maximum_suggested_reassignments',
     'hard_capacity_behavior',
     'imbalance_warning_threshold',
-    'is_demo',
     'is_active',
   ], 'Error creating assignment optimizer policy'));
 
@@ -2192,7 +2168,6 @@ router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIG
     'maximum_suggested_reassignments',
     'hard_capacity_behavior',
     'imbalance_warning_threshold',
-    'is_demo',
     'is_active',
   ], 'Error updating assignment optimizer policy'));
 
@@ -2942,8 +2917,7 @@ router.post(
       'clinical_unit_id',
       'division_id',
       'department_id',
-      'is_demo',
-      'is_active',
+        'is_active',
     ]);
     const userId = actorUserId(req);
     body.created_by = userId;
@@ -2982,8 +2956,7 @@ router.put(
       'clinical_unit_id',
       'division_id',
       'department_id',
-      'is_demo',
-      'is_active',
+        'is_active',
     ]);
     body.updated_by = actorUserId(req);
     if (String(body.status || '').toUpperCase() === 'PUBLISHED') {
@@ -3157,7 +3130,6 @@ router.post('/acuity/factors', requirePermission(MANAGE_ACUITY_RULES), (req, res
     'display_order',
     'effective_start_at',
     'effective_end_at',
-    'is_demo',
     'is_active',
   ], 'Error creating acuity factor'));
 
@@ -3173,7 +3145,6 @@ router.put('/acuity/factors/:id', requirePermission(MANAGE_ACUITY_RULES), (req, 
     'display_order',
     'effective_start_at',
     'effective_end_at',
-    'is_demo',
     'is_active',
   ], 'Error updating acuity factor'));
 
@@ -3265,7 +3236,6 @@ router.post('/acuity/adt-event-types', requirePermission(MANAGE_ACUITY_RULES), (
     'score_weight',
     'workload_weight',
     'display_order',
-    'is_demo',
     'is_active',
   ], 'Error creating ADT event type'));
 
@@ -3277,7 +3247,6 @@ router.put('/acuity/adt-event-types/:id', requirePermission(MANAGE_ACUITY_RULES)
     'score_weight',
     'workload_weight',
     'display_order',
-    'is_demo',
     'is_active',
   ], 'Error updating ADT event type'));
 
