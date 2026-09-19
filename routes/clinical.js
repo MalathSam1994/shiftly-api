@@ -3272,6 +3272,71 @@ router.get(
   },
 );
 
+router.post('/acuity/rule-sets/:id/link-factors',
+  requirePermission(OPEN_ACUITY_FACTORS), requirePermission(MANAGE_ACUITY_RULES),
+  async (req, res) => {
+    const ruleSetId = requirePositiveId(req, res, req.params.id, 'id');
+    if (!ruleSetId) return null;
+    const requested = req.body?.factor_ids;
+    if (!Array.isArray(requested) || !requested.length ||
+        requested.some(id => !Number.isInteger(id) || id <= 0 || id > 2147483647)) {
+      return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST',
+        error: 'Select one or more valid factors to link.' });
+    }
+    const factorIds = [...new Set(requested)].sort((a, b) => a - b);
+    let client;
+    try {
+      client = await pool.connect();
+      await client.query('BEGIN');
+      // Match the desktop selector's organization scope and serialize this
+      // operation with publication and other bulk links for the same rule set.
+      const rule = await client.query(`
+        WITH units AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_units($1))
+        SELECT rs.id, rs.status FROM shiftly_schema.clinical_acuity_rule_sets rs
+        WHERE rs.id = $2 AND EXISTS (
+          SELECT 1 FROM units u
+          WHERE (rs.clinical_unit_id IS NULL OR rs.clinical_unit_id = u.id)
+            AND (rs.division_id IS NULL OR rs.division_id = u.division_id)
+            AND (rs.department_id IS NULL OR rs.department_id = u.department_id))
+        FOR UPDATE OF rs`, [actorUserId(req), ruleSetId]);
+      const reject = async (status, code, error) => {
+        await client.query('ROLLBACK');
+        return sendApiError(req, res, { status, code, error });
+      };
+      if (!rule.rows.length) {
+        return await reject(404, 'RESOURCE_NOT_FOUND', 'The rule set is unavailable in your scope.');
+      }
+      if (rule.rows[0].status === 'PUBLISHED') {
+        return await reject(409, 'INVALID_OPERATION', 'Published rule-set links are read-only. Select an unpublished rule set.');
+      }
+      const factors = await client.query(`
+        SELECT id FROM shiftly_schema.clinical_acuity_factors
+        WHERE id = ANY($1::integer[]) ORDER BY id FOR SHARE`, [factorIds]);
+      if (factors.rowCount !== factorIds.length) {
+        return await reject(422, 'INVALID_REFERENCE', 'One or more selected factors no longer exist. Refresh the factor list and select again.');
+      }
+      // Keep shared default weights (NULL overrides), optional and active.
+      // Existing links, including disabled/customized links, stay unchanged.
+      const linked = await client.query(`
+        INSERT INTO shiftly_schema.clinical_acuity_rule_set_factors
+          (rule_set_id, factor_id, score_weight_override, workload_weight_override, is_required, is_active)
+        SELECT $1, id, NULL, NULL, false, true
+        FROM unnest($2::integer[]) AS selected(id) ORDER BY id
+        ON CONFLICT (rule_set_id, factor_id) DO NOTHING
+        RETURNING id`, [ruleSetId, factorIds]);
+      await client.query('COMMIT');
+      return res.status(linked.rowCount ? 201 : 200).json({
+        linked_count: linked.rowCount,
+        existing_count: factorIds.length - linked.rowCount,
+      });
+    } catch (err) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      return sendPostgresError(req, res, err, { action: 'CREATE', label: 'Error linking acuity factors' });
+    } finally {
+      if (client) client.release();
+    }
+  });
+
 router.post('/acuity/rule-set-factors', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_acuity_rule_set_factors', [
     'rule_set_id',
