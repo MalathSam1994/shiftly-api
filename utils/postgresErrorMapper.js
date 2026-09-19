@@ -242,6 +242,8 @@ function mapPostgresError(err, context = {}) {
   const pgCode = String(err && err.code || '');
   // Explicit, safe lifecycle messages: never forward SQL detail or stack traces.
   const clinicalErrors = {
+    CLINICAL_ACUITY_LEVELS_REQUIRED: [422, 'Add at least one active acuity level in Levels / thresholds for this rule set, then publish again.'],
+    CLINICAL_ACUITY_FACTORS_REQUIRED: [422, 'Link at least one active clinical factor to this rule set in Factors / applicability, then publish again.'],
     CLINICAL_WORKFLOW_SUPERSEDED: [409, 'This review was already completed or superseded. Refresh the Assignment Board and use the current review or draft.'],
     CLINICAL_RUN_STALE: [409, 'This proposal no longer matches the current clinical state. Refresh the board. For a staff-only change, save a validated manual override; for patient or assignment changes, generate a fresh rebalance.'],
     CLINICAL_RUN_SUPERSEDED: [409, 'This proposal was already published, discarded or superseded. Refresh the Assignment Board and use the current draft.'],
@@ -252,6 +254,8 @@ function mapPostgresError(err, context = {}) {
   let clinicalCode = String(err && err.hint || '');
   // Also support the old database functions while the migration is pending.
   const legacyClinicalCodes = {
+    'Active rule sets must have usable acuity levels.': 'CLINICAL_ACUITY_LEVELS_REQUIRED',
+    'Active rule sets must have at least one active clinical factor.': 'CLINICAL_ACUITY_FACTORS_REQUIRED',
     'This optimization run is stale. Regenerate before publishing.': 'CLINICAL_RUN_STALE',
     'Selected staff assignment is not eligible for this clinical unit and shift.': 'CLINICAL_STAFF_INELIGIBLE',
     'Selected staff member is missing required patient competency.': 'CLINICAL_COMPETENCY_MISSING',
@@ -389,6 +393,23 @@ function mapPostgresError(err, context = {}) {
 
 function sendPostgresError(req, res, err, context = {}) {
   const mapped = mapPostgresError(err, context);
+  if (context.operation === 'clinical_acuity_publish') {
+    // Deliberately omit SQL, parameters, row detail and stack traces. Preserve
+    // the database's primary rejection reason in the server log for diagnosis.
+    console.warn('[clinical acuity publish rejected]', JSON.stringify({
+      requestId: req && req.rid,
+      ruleSetId: req && req.params && req.params.id,
+      code: mapped ? mapped.code : 'INTERNAL_SERVER_ERROR',
+      status: mapped ? mapped.status : 500,
+      pgCode: err && err.code,
+      reason: stripUnsafeDbTokens(err && err.message).slice(0, 1000),
+      constraint: err && err.constraint,
+    }));
+    if (mapped && mapped.error === 'The request could not be completed.') {
+      mapped.error = mapped.details ||
+        'This rule set could not be published. Ask an administrator to check the API log using the request reference.';
+    }
+  }
   if (!mapped) {
     return sendInternalError(req, res, err, context.label || 'Database error');
   }

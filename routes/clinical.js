@@ -848,15 +848,32 @@ router.get('/desktop/acuity/:kind/summary', (req,res,next)=> {
 }, async(req,res)=>{
   const ruleId=parseOptionalInt(req.query.ruleSetId);
   if(ruleId===undefined)return sendApiError(req,res,{status:400,error:'Invalid rule set ID.',code:'INVALID_REQUEST'});
-  const scope=`WITH rules AS MATERIALIZED (SELECT rs.* FROM shiftly_schema.clinical_acuity_rule_sets rs WHERE
-    EXISTS(SELECT 1 FROM shiftly_api.fn_clinical_units($1) cu WHERE (rs.clinical_unit_id IS NULL OR rs.clinical_unit_id=cu.id)
+  const scope=`WITH scope_units AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_units($1)),
+    rules AS MATERIALIZED (SELECT rs.* FROM shiftly_schema.clinical_acuity_rule_sets rs WHERE
+    EXISTS(SELECT 1 FROM scope_units cu WHERE (rs.clinical_unit_id IS NULL OR rs.clinical_unit_id=cu.id)
       AND (rs.division_id IS NULL OR rs.division_id=cu.division_id) AND (rs.department_id IS NULL OR rs.department_id=cu.department_id)))`;
   let sql;
   if(req.params.kind==='rules')sql=scope+`, lc AS (SELECT rule_set_id,count(*) n FROM shiftly_schema.clinical_acuity_levels GROUP BY rule_set_id),
     fc AS (SELECT rule_set_id,count(*) n FROM shiftly_schema.clinical_acuity_rule_set_factors WHERE is_active GROUP BY rule_set_id),
     ac AS (SELECT rule_set_id,count(*) n FROM shiftly_schema.clinical_acuity_rule_set_adt_rules WHERE is_active GROUP BY rule_set_id)
     SELECT jsonb_build_object('summary',jsonb_build_object('Total rule sets',count(*),'Published',count(*) FILTER(WHERE status='PUBLISHED'),'Draft',count(*) FILTER(WHERE status='DRAFT'),'Future effective',count(*) FILTER(WHERE effective_start_at>CURRENT_TIMESTAMP)),
-      'records',COALESCE(jsonb_object_agg(r.id::text,jsonb_build_object('levels',COALESCE(lc.n,0),'factors',COALESCE(fc.n,0),'flow_rules',COALESCE(ac.n,0))),'{}'::jsonb)) AS data
+      'records',COALESCE(jsonb_object_agg(r.id::text,jsonb_build_object('levels',COALESCE(lc.n,0),'factors',COALESCE(fc.n,0),'flow_rules',COALESCE(ac.n,0))),'{}'::jsonb),
+      'scope_options',jsonb_build_object(
+        'clinical_units',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'id',u.id,'unit_name',u.unit_name,'unit_code',u.unit_code,'unit_type',u.unit_type,
+          'division_id',u.division_id,'division_desc',u.division_desc,
+          'department_id',u.department_id,'department_desc',u.department_desc,'is_active',u.is_active
+        ) ORDER BY u.unit_name,u.id) FROM scope_units u),'[]'::jsonb),
+        'organizations',COALESCE((SELECT jsonb_agg(jsonb_build_object(
+          'id',dd.id,'division_id',dd.division_id,'department_id',dd.department_id,
+          'division_desc',dv.division_desc,'department_desc',dep.department_desc,
+          'is_active',dd.is_active AND dv.is_active AND dep.is_active
+        ) ORDER BY dv.division_desc,dep.department_desc,dd.id)
+          FROM shiftly_schema.division_departments dd
+          JOIN shiftly_schema.divisions dv ON dv.id=dd.division_id
+          JOIN shiftly_schema.departments dep ON dep.id=dd.department_id
+          WHERE shiftly_api.fn_user_can_access_division_department($1,dd.division_id,dd.department_id)
+        ),'[]'::jsonb))) AS data
     FROM rules r LEFT JOIN lc ON lc.rule_set_id=r.id LEFT JOIN fc ON fc.rule_set_id=r.id LEFT JOIN ac ON ac.rule_set_id=r.id WHERE $2::integer IS NULL OR r.id=$2`;
   else if(req.params.kind==='levels')sql=scope+`, levels AS (SELECT l.* FROM shiftly_schema.clinical_acuity_levels l JOIN rules r ON r.id=l.rule_set_id WHERE l.rule_set_id=$2)
     SELECT jsonb_build_object('summary',jsonb_build_object('Total levels',count(*),'Active levels',count(*) FILTER(WHERE is_active)),
@@ -2994,6 +3011,7 @@ router.post(
       return sendPostgresError(req, res, err, {
         action: 'UPDATE',
         label: 'Error publishing acuity rule set',
+        operation: 'clinical_acuity_publish',
       });
     }
   },
@@ -3031,6 +3049,70 @@ router.get(
     }
   },
 );
+
+router.post('/acuity/rule-sets/:id/copy-levels',
+  requirePermission(OPEN_ACUITY_LEVELS), requirePermission(MANAGE_ACUITY_RULES),
+  async (req, res) => {
+    const targetId = requirePositiveId(req, res, req.params.id, 'id');
+    if (!targetId) return null;
+    const sourceId = requirePositiveId(req, res, req.body?.source_rule_set_id, 'source_rule_set_id');
+    if (!sourceId) return null;
+    if (sourceId === targetId) {
+      return sendApiError(req, res, { status: 422, code: 'INVALID_OPERATION',
+        error: 'Choose a different rule set to copy levels from.' });
+    }
+    let client;
+    try {
+      client = await pool.connect();
+      await client.query('BEGIN');
+      // Lock in a stable order to serialize copies and publication. Use the
+      // same organization scope as the desktop rule-set selector.
+      const rules = await client.query(`
+        WITH units AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_units($1))
+        SELECT rs.id, rs.status FROM shiftly_schema.clinical_acuity_rule_sets rs
+        WHERE rs.id IN ($2, $3) AND EXISTS (
+          SELECT 1 FROM units u
+          WHERE (rs.clinical_unit_id IS NULL OR rs.clinical_unit_id = u.id)
+            AND (rs.division_id IS NULL OR rs.division_id = u.division_id)
+            AND (rs.department_id IS NULL OR rs.department_id = u.department_id))
+        ORDER BY rs.id FOR UPDATE OF rs`, [actorUserId(req), sourceId, targetId]);
+      const reject = async (status, code, error) => {
+        await client.query('ROLLBACK');
+        return sendApiError(req, res, { status, code, error });
+      };
+      if (rules.rows.length !== 2) {
+        return await reject(404, 'RESOURCE_NOT_FOUND', 'The source or destination rule set is unavailable in your scope.');
+      }
+      if (rules.rows.find(row => row.id === targetId).status !== 'DRAFT') {
+        return await reject(409, 'INVALID_OPERATION', 'Levels can only be copied into a draft rule set.');
+      }
+      const existing = await client.query(
+        'SELECT EXISTS (SELECT 1 FROM shiftly_schema.clinical_acuity_levels WHERE rule_set_id = $1) AS has_levels', [targetId]);
+      if (existing.rows[0].has_levels) {
+        return await reject(409, 'CLINICAL_ACUITY_COPY_TARGET_NOT_EMPTY', 'The destination already has levels. Copy into an empty draft rule set, or edit its existing levels.');
+      }
+      // One database-side copy; new identities/timestamps and original values.
+      // Existing constraints and threshold/published-version triggers still run.
+      const copied = await client.query(`
+        INSERT INTO shiftly_schema.clinical_acuity_levels
+          (rule_set_id, level_code, level_name, description, min_score, max_score,
+           workload_weight, color_hex, display_order, is_active)
+        SELECT $2, level_code, level_name, description, min_score, max_score,
+          workload_weight, color_hex, display_order, is_active
+        FROM shiftly_schema.clinical_acuity_levels WHERE rule_set_id = $1
+        ORDER BY display_order, min_score, id RETURNING id`, [sourceId, targetId]);
+      if (!copied.rowCount) {
+        return await reject(422, 'INVALID_OPERATION', 'The selected source rule set has no levels to copy.');
+      }
+      await client.query('COMMIT');
+      return res.status(201).json({ copied_count: copied.rowCount });
+    } catch (err) {
+      if (client) await client.query('ROLLBACK').catch(() => {});
+      return sendPostgresError(req, res, err, { action: 'CREATE', label: 'Error copying acuity levels' });
+    } finally {
+      if (client) client.release();
+    }
+  });
 
 router.post('/acuity/levels', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_acuity_levels', [
