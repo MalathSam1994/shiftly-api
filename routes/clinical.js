@@ -2705,7 +2705,9 @@ router.post('/assignment-runs/generate', requirePermission(OPTIMIZE_ASSIGNMENTS)
       `SELECT shiftly_api.fn_clinical_generate_assignment_run($1, $2::date, $3, $4, $5, $6, $7) AS run`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId, mode],
     );
-    return res.status(201).json(result.rows[0].run);
+    const run = result.rows[0].run;
+    const reused = ['REUSED_DRAFT', 'NO_CHANGES'].includes(run?.run?.generation_outcome);
+    return res.status(reused ? 200 : 201).json(run);
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'CREATE',
