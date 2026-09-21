@@ -48,7 +48,7 @@ function describeClinicalAttention(data) {
       const fields = [];
       const chain = [];
       if (!old || !now) {
-        chain.push(old ? 'This encounter left the unit population used by the assignment.' : 'This encounter entered the unit population used by the assignment.');
+        chain.push(old ? "Patient is no longer on this unit's patient list." : "Patient is now on this unit's patient list.");
       } else {
         for (const [key, label, type] of [
           ['score','Score'], ['workload','Workload'], ['adt_burden','ADT burden'],
@@ -131,9 +131,9 @@ function describeClinicalAttention(data) {
       affected.push({
         title: nurse.user_desc || nurse.user_name || name('users',nurse.user_id),
         paragraphs: [
-          patients.length ? 'Published nurse for: ' + patients.map(p => patient(p.encounter_id)).join('; ') + '.' : 'Scheduled candidate; not assigned to a patient in this review population.',
+          patients.length ? 'Assigned patients: ' + patients.map(p => patient(p.encounter_id)).join('; ') + '.' : 'Scheduled staff member with no patient assignment in this review.',
           ...why,
-          patients.length ? 'This published assignment needs manager review because the nurse does not satisfy eligibility in the displayed evidence.' : 'This nurse was not eligible for selection in the displayed evidence.',
+          patients.length ? 'Review this staff member\'s assignments.' : 'This staff member is not eligible in the data shown.',
         ], fields: [],
       });
     }
@@ -143,7 +143,7 @@ function describeClinicalAttention(data) {
       if (!staff.some(s => s.user_id === assignment[0] && s.shift_assignment_id === assignment[1])) {
         affected.push({title:name('users',assignment[0]),fields:[],paragraphs:[
           'Published nurse for ' + patient(p.encounter_id) + ' is absent from the scheduled candidate pool for this shift.',
-          'The assignment cannot be validated against that pool and needs review. See the recorded staffing action, if available, for the specific schedule/availability change; absence from the pool alone does not prove an absence request.',
+          'Check the shift record to confirm why this staff member is unavailable. A missing roster entry does not confirm an absence request.',
         ]});
       }
     }
@@ -238,14 +238,19 @@ function describeClinicalAttention(data) {
     title: data.summary || 'Assignment review',
     scope: [data.shift_date,data.shift,data.unit || 'Department scope'].filter(Boolean).join(' · '),
     detected_at: data.detected_at,
+    // Additive presentation metadata; detection and eligibility stay in SQL.
+    reason_codes: reasons,
+    historical: Boolean(data.historical),
+    detection_context: triggerTitles[data.source_detail?.detection_context || data.trigger] || 'Assignment review',
+    scope_details: { shift_date: data.shift_date, shift: data.shift, unit: data.unit || 'Department scope' },
     evidence_label: data.historical ? 'State recorded when attention was detected' : 'Current state — historical snapshot unavailable',
     paragraphs, limitations,
     review_history: list(data.review_history), related_reviews: list(data.related_reviews),
     sections: [
-      {title:'What changed since publication',items:changes},
-      {title:'Why factors and acuity affect eligibility',items:requirements},
-      {title:data.historical ? 'Who was affected at detection' : 'Current eligibility (not historical)',items:affected},
-      {title:'Recorded actions and provenance',items:records},
+      {id:'changes',title:'What changed since publication',items:changes},
+      {id:'requirements',title:'Why factors and acuity affect eligibility',items:requirements},
+      {id:'affected',title:data.historical ? 'Who was affected at detection' : 'Current eligibility (not historical)',items:affected},
+      {id:'records',title:'Recorded actions and provenance',items:records},
     ],
   };
 }
