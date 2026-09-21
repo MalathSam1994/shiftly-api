@@ -242,6 +242,10 @@ function mapPostgresError(err, context = {}) {
   const pgCode = String(err && err.code || '');
   // Explicit, safe lifecycle messages: never forward SQL detail or stack traces.
   const clinicalErrors = {
+    CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF: [422, 'Assignment generation was refused because no scheduled staff are eligible. Resolve the reasons below and try again.'],
+    CLINICAL_ASSIGNMENT_NO_FEASIBLE_PATIENTS: [422, 'Assignment generation was refused because no patient can be assigned safely. Resolve the competency or hard-capacity restrictions below and try again.'],
+    CLINICAL_ASSIGNMENT_NO_PATIENTS: [422, 'No active patients are available in the selected clinical unit. An empty assignment cannot be generated.'],
+    CLINICAL_ASSIGNMENT_POLICY_REQUIRED: [422, 'No active assignment optimizer policy applies to this date, shift and clinical unit. Configure an applicable policy before generating an assignment.'],
     CLINICAL_ACUITY_LEVELS_REQUIRED: [422, 'Add at least one active acuity level in Levels / thresholds for this rule set, then publish again.'],
     CLINICAL_ACUITY_FACTORS_REQUIRED: [422, 'Link at least one active clinical factor to this rule set in Factors / applicability, then publish again.'],
     CLINICAL_ACUITY_ADT_RULES_REQUIRED: [422, 'Link at least one active ADT / flow rule with an active event type to this rule set, then publish again.'],
@@ -255,6 +259,7 @@ function mapPostgresError(err, context = {}) {
   let clinicalCode = String(err && err.hint || '');
   // Also support the old database functions while the migration is pending.
   const legacyClinicalCodes = {
+    'No active clinical assignment optimizer policy applies.': 'CLINICAL_ASSIGNMENT_POLICY_REQUIRED',
     'Active rule sets must have usable acuity levels.': 'CLINICAL_ACUITY_LEVELS_REQUIRED',
     'Active rule sets must have at least one active clinical factor.': 'CLINICAL_ACUITY_FACTORS_REQUIRED',
     'Active rule sets must have at least one active ADT / flow rule.': 'CLINICAL_ACUITY_ADT_RULES_REQUIRED',
@@ -265,6 +270,17 @@ function mapPostgresError(err, context = {}) {
   if (!clinicalErrors[clinicalCode]) clinicalCode = legacyClinicalCodes[err && err.message];
   if (pgCode === 'P0001' && clinicalErrors[clinicalCode]) {
     const [status, details] = clinicalErrors[clinicalCode];
+    if (clinicalCode === 'CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF' ||
+        clinicalCode === 'CLINICAL_ASSIGNMENT_NO_FEASIBLE_PATIENTS') {
+      // Only these explicit guards emit user-facing diagnostic messages.
+      // Forward message strings, never arbitrary database detail or metadata.
+      const payload = parseJsonMaybe(err.detail);
+      const errors = Array.isArray(payload && payload.errors)
+        ? payload.errors.filter(item => item && typeof item.message === 'string')
+          .map(item => ({ message: item.message }))
+        : [];
+      return { status, code: clinicalCode, error: details, details, errors };
+    }
     return { status, code: clinicalCode, error: details, details };
   }
   if (pgCode === '40001' || pgCode === '40P01') {

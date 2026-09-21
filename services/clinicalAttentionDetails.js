@@ -124,7 +124,7 @@ function describeClinicalAttention(data) {
 
   for (const nurse of staff) {
     const patients = after.filter(p => list(p.published_assignments).some(a => a[0] === nurse.user_id && a[1] === nurse.shift_assignment_id));
-    if (nurse.is_eligible === false) {
+    if (nurse.is_eligible === false && (detection.affected == null || patients.length > 0)) {
       const missing = list(nurse.missing_competencies).map(c => c.competency_name).filter(Boolean);
       const why = list(nurse.ineligibility_reasons).map(text);
       if (missing.length) why.unshift('Missing required competencies: ' + missing.join(', ') + '.');
@@ -148,13 +148,19 @@ function describeClinicalAttention(data) {
       }
     }
   }
+  for (const issue of list(detection.affected).filter(i => i.unavailable)) {
+    if (!affected.some(item => item.title === name('users', issue.user_id))) affected.push({
+      title: patient(issue.encounter_id), fields: [],
+      paragraphs: ['The published assignment to ' + name('users',issue.user_id) + ' needs review: availability, eligibility or hard capacity is no longer satisfied.'],
+    });
+  }
   const unassigned = after.filter(p => !list(p.published_assignments).length);
   if (unassigned.length) affected.push({title:'Unassigned patients',paragraphs:unassigned.map(p => patient(p.encounter_id)),fields:[]});
   if (staff.length && staff.every(s => s.is_eligible !== true)) paragraphs.push('None of the ' + staff.length + ' scheduled candidates satisfies the unit/shift eligibility rules in the displayed evidence.');
   if (!staff.length) paragraphs.push('No scheduled candidates are available in the displayed evidence.');
 
   if (reasons.includes('BALANCE_GAP')) {
-    paragraphs.push('Recorded workload gap: ' + text(detection.balance_gap) + '; review threshold: ' + text(detection.imbalance_threshold) + '. This is the absolute workload difference between assigned nurses, not the optimizer utilization gap.');
+    paragraphs.push('Recorded workload gap: ' + text(detection.balance_gap) + '; review threshold: ' + text(detection.imbalance_threshold) + '. ' + (detection.gap_basis === 'UTILIZATION' ? 'Uses published workload / positive capacity for each eligible staff member, including staff with no patients; workload itself is used when capacity is not positive.' : 'This legacy record used the absolute workload difference between assigned nurses.'));
     const loads = new Map();
     for (const p of after) for (const a of list(p.published_assignments)) {
       const entries = loads.get(a[0]) || [];
@@ -165,6 +171,7 @@ function describeClinicalAttention(data) {
   }
   if (reasons.includes('ASSIGNMENT_REVIEW_REQUIRED')) paragraphs.push('Published assignments were flagged for review. A flag alone does not establish which clinical action caused it.');
   if (data.trigger === 'HANDOVER') paragraphs.push('The incoming shift assignment was checked for handover readiness; the findings below explain the review. This does not mean a patient was transferred.');
+  if (reasons.includes('PATIENT_CARE_CHANGED')) paragraphs.push('Patient workload, acuity level, ADT burden or required competencies changed since publication. Review the affected patients before accepting a new assignment.');
   if (reasons.includes('PUBLISHED_INPUTS_CHANGED')) paragraphs.push('The recorded patient, staffing or policy inputs differ from the last accepted publication.');
   if (data.historical && baseline && !equal(baseline.policy,snapshot.policy)) paragraphs.push('The applicable optimizer policy changed since publication.');
   if (data.historical && baseline && !equal(baseline.review_threshold,snapshot.review_threshold)) paragraphs.push('Review threshold changed from ' + text(baseline.review_threshold) + ' to ' + text(snapshot.review_threshold) + '.');
@@ -228,11 +235,12 @@ function describeClinicalAttention(data) {
   if (!data.historical || data.patient_requirements == null) limitations.push('Historical factor-to-competency rule links were not captured for this review. Current rules are not substituted as historical fact.');
   if (!changes.length && !records.length && !affected.length && !reasons.includes('BALANCE_GAP')) limitations.push('No meaningful causal change was reconstructed. This may be a legacy/stale review; it is not proof that a clinical action occurred.');
   return {
-    title: triggerTitles[data.trigger] || 'Clinical assignment review',
+    title: data.summary || 'Assignment review',
     scope: [data.shift_date,data.shift,data.unit || 'Department scope'].filter(Boolean).join(' · '),
     detected_at: data.detected_at,
     evidence_label: data.historical ? 'State recorded when attention was detected' : 'Current state — historical snapshot unavailable',
     paragraphs, limitations,
+    review_history: list(data.review_history), related_reviews: list(data.related_reviews),
     sections: [
       {title:'What changed since publication',items:changes},
       {title:'Why factors and acuity affect eligibility',items:requirements},

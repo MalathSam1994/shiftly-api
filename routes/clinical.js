@@ -2383,60 +2383,31 @@ router.get('/assignment-board', requirePermission(OPEN_ASSIGNMENT_BOARD), async 
       `SELECT shiftly_api.fn_clinical_assignment_board($1, $2::date, $3, $4, $5, $6) AS board`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId],
     );
-    // Read-only lifecycle evidence for the same authorized board context.
-    const activity = await pool.query(`
-      WITH units AS MATERIALIZED (
-        SELECT cu.id FROM shiftly_schema.clinical_units cu
-        WHERE cu.division_id=$4 AND cu.department_id=$5 AND ($6::integer IS NULL OR cu.id=$6)
-          AND shiftly_api.fn_user_can_access_division_department($1,cu.division_id,cu.department_id)
-      ), runs AS (
-        SELECT r.* FROM shiftly_schema.clinical_assignment_optimization_runs r
-        WHERE r.shift_date=$2::date AND r.shift_type_id=$3 AND r.division_id=$4 AND r.department_id=$5
-          AND ($6::integer IS NULL OR r.clinical_unit_id=$6)
-          AND EXISTS(SELECT 1 FROM units)
-          AND (r.clinical_unit_id IS NULL OR r.clinical_unit_id IN (SELECT id FROM units))
-      ), workflows AS (
-        SELECT w.* FROM shiftly_schema.clinical_assignment_review_workflows w
-        WHERE w.shift_date=$2::date AND w.shift_type_id=$3 AND w.division_id=$4 AND w.department_id=$5
-          AND ($6::integer IS NULL OR w.clinical_unit_id=$6)
-          AND EXISTS(SELECT 1 FROM units)
-          AND (w.clinical_unit_id IS NULL OR w.clinical_unit_id IN (SELECT id FROM units))
-      ), events AS (
-        SELECT 'run:'||r.id||':'||v.kind AS id, v.kind, v.category, v.title, v.event_at AS occurred_at,
-          COALESCE(u.user_desc,'Unknown') AS action_by,
-          CASE WHEN r.action_at=v.event_at THEN COALESCE(NULLIF(r.action_source,''),'Unknown') ELSE 'Unknown' END AS source,
-          jsonb_build_object('Run',r.run_number,'Plan type',r.optimization_mode,'Recorded action',v.title,
-            'Current run status',r.optimization_status,'Shift date',to_char(r.shift_date,'YYYY-MM-DD'),
-            'Moved patients',r.after_metrics->'patients_moved','Unassigned patients',r.after_metrics->'unassigned_patients',
-            'Balance gap',r.after_metrics->'balance_gap') AS details
-        FROM runs r CROSS JOIN LATERAL (VALUES
-          ('GENERATED',CASE WHEN r.optimization_mode='REBALANCE' THEN 'Rebalances' ELSE 'Changes' END,
-            CASE WHEN r.optimization_mode='REBALANCE' THEN 'Rebalance proposal generated' ELSE 'Assignment proposal generated' END,r.generated_at,r.generated_by),
-          ('REVIEWED','Reviews','Assignment run reviewed',r.reviewed_at,r.reviewed_by),
-          ('PUBLISHED','Publishing','Assignment published',r.published_at,r.published_by),
-          ('CANCELLED','Changes','Draft discarded',r.cancelled_at,r.cancelled_by)
-        ) v(kind,category,title,event_at,actor)
-        LEFT JOIN shiftly_schema.users u ON u.id=v.actor WHERE v.event_at IS NOT NULL
-        UNION ALL
-        SELECT 'workflow:'||e.id,e.event_type,
-          CASE WHEN e.event_type='PUBLISHED' THEN 'Publishing' WHEN e.event_type LIKE 'OPTIMIZATION_%' THEN 'Rebalances' ELSE 'Reviews' END,
-          'Review: '||replace(lower(e.event_type),'_',' '),e.occurred_at,
-          COALESCE(NULLIF(u.user_desc,''),'Unknown'),
-          COALESCE(NULLIF(e.action_source,''),'Unknown'),
-          jsonb_build_object('Workflow',w.workflow_number,'Trigger',w.trigger_type,'Reason',w.reason_summary,'Event type',e.event_type)
-        FROM workflows w JOIN shiftly_schema.clinical_assignment_workflow_events e ON e.workflow_id=w.id
-        LEFT JOIN shiftly_schema.users u ON u.id=COALESCE(e.action_by,e.actor_user_id)
-      ), recent AS (SELECT * FROM events ORDER BY occurred_at DESC,id DESC LIMIT 250)
-      SELECT COALESCE(jsonb_agg(jsonb_build_object('id',id,'kind',kind,'category',category,'title',title,
-        'occurred_at',to_char(occurred_at,'YYYY-MM-DD HH24:MI:SS'),'action_by',action_by,'source',COALESCE(source,'Unknown'),
-        'details',details) ORDER BY occurred_at DESC,id DESC),'[]'::jsonb) AS rows FROM recent`,
-      [req.user.id, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId]);
+    // One summary per run; patient/lifecycle evidence is loaded on demand.
+    const activity = await pool.query(
+      'SELECT shiftly_api.fn_clinical_assignment_history_summaries($1,$2::date,$3,$4,$5,$6) AS rows',
+      [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId],
+    );
     return res.json({...result.rows[0].board, activity: activity.rows[0].rows});
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'GET',
       label: 'Error loading clinical assignment board',
     });
+  }
+});
+
+router.get('/assignment-runs/:id/history', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
+  const userId = actorUserId(req);
+  const runId = requirePositiveId(req, res, req.params.id, 'id');
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  if (!runId) return null;
+  try {
+    const result = await pool.query(
+      'SELECT shiftly_api.fn_clinical_assignment_history_details($1,$2) AS history', [userId, runId]);
+    return res.json(result.rows[0].history);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'GET', label: 'Error loading assignment run history' });
   }
 });
 
@@ -2483,7 +2454,7 @@ router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), asyn
           p.display_name AS patient_name,
           p.patient_public_id,
           cu.unit_name,
-          to_char(COALESCE(nsa.shift_date, psa.shift_date, r.shift_date), 'YYYY-MM-DD') AS shift_date,
+          to_char(COALESCE(r.shift_date, nsa.shift_date, psa.shift_date), 'YYYY-MM-DD') AS shift_date,
           COALESCE(nst.shift_label, pst.shift_label, rst.shift_label) AS shift_label,
           to_char(COALESCE(nsa.start_time, psa.start_time), 'HH24:MI') AS shift_start_time,
           to_char(COALESCE(nsa.end_time, psa.end_time), 'HH24:MI') AS shift_end_time,
@@ -2503,11 +2474,11 @@ router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), asyn
               AND pa.assignment_status = 'PUBLISHED'
               AND pa.ended_at IS NULL
           ) AS is_current_published
-        FROM shiftly_schema.clinical_patient_assignment_history h
+        FROM shiftly_api.clinical_assignment_history_evidence h
         JOIN shiftly_schema.clinical_encounters e ON e.id = h.encounter_id
         JOIN shiftly_schema.clinical_patients p ON p.id = h.patient_id
-        JOIN shiftly_schema.clinical_units cu ON cu.id = e.current_clinical_unit_id
         LEFT JOIN shiftly_schema.clinical_assignment_optimization_runs r ON r.id = h.optimization_run_id
+        LEFT JOIN shiftly_schema.clinical_units cu ON cu.id = CASE WHEN r.id IS NOT NULL THEN r.clinical_unit_id ELSE e.current_clinical_unit_id END
         LEFT JOIN shiftly_schema.shift_assignments nsa ON nsa.id = h.new_shift_assignment_id
         LEFT JOIN shiftly_schema.shift_types nst ON nst.id = nsa.shift_type_id
         LEFT JOIN shiftly_schema.shift_assignments psa ON psa.id = h.previous_shift_assignment_id
@@ -2516,12 +2487,12 @@ router.get('/assignment-history', requirePermission(OPEN_ASSIGNMENT_BOARD), asyn
         LEFT JOIN shiftly_schema.users pu ON pu.id = h.previous_assigned_user_id
         LEFT JOIN shiftly_schema.users nu ON nu.id = h.new_assigned_user_id
         LEFT JOIN shiftly_schema.users actor ON actor.id = h.changed_by
-        WHERE e.division_id = $3
-          AND e.department_id = $4
-          AND ($5::integer IS NULL OR e.current_clinical_unit_id = $5)
-          AND shiftly_api.fn_user_can_access_division_department($1, e.division_id, e.department_id)
-          AND COALESCE(nsa.shift_date, psa.shift_date, r.shift_date) = $2::date
-          AND COALESCE(nsa.shift_type_id, psa.shift_type_id, r.shift_type_id) = $6
+        WHERE COALESCE(r.division_id,e.division_id) = $3
+          AND COALESCE(r.department_id,e.department_id) = $4
+          AND ($5::integer IS NULL OR CASE WHEN r.id IS NOT NULL THEN r.clinical_unit_id ELSE e.current_clinical_unit_id END = $5)
+          AND shiftly_api.fn_user_can_access_division_department($1, COALESCE(r.division_id,e.division_id), COALESCE(r.department_id,e.department_id))
+          AND COALESCE(r.shift_date, nsa.shift_date, psa.shift_date) = $2::date
+          AND COALESCE(r.shift_type_id, nsa.shift_type_id, psa.shift_type_id) = $6
         ORDER BY h.changed_at DESC, h.id DESC
         LIMIT 250
       `,
