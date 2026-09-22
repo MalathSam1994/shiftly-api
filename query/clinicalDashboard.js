@@ -2,6 +2,7 @@ const express = require('express');
 const pool = require('../db');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
+const { loadLiveCoverage, acknowledgeLiveCoverage } = require('../services/clinicalLiveCoverage');
 
 const router = express.Router();
 
@@ -141,5 +142,34 @@ async function workspace(req, res) {
 }
 router.get('/manager/workspace', workspace);
 router.get('/manager/workspace/excel', workspace);
+
+// Intentionally accepts no date/shift/staff filters: live care uses business now.
+router.get('/manager/live-coverage', async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  let unitId;
+  try { unitId = workspaceFilters({ unitId: req.query.unitId })[2]; }
+  catch (_) { return sendApiError(req, res, { status: 400, error: 'Use a positive integer unitId.', code: 'INVALID_REQUEST' }); }
+  try {
+    res.set('Cache-Control', 'no-store');
+    return res.json(await loadLiveCoverage(userId, unitId));
+  } catch (error) {
+    return sendPostgresError(req, res, error, { action: 'GET', label: 'Error loading live clinical coverage' });
+  }
+});
+
+router.post('/manager/live-coverage/:id/acknowledge', async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  if (!/^[1-9]\d*$/.test(req.params.id) || !Number.isSafeInteger(Number(req.params.id))) {
+    return sendApiError(req, res, { status: 400, error: 'Invalid incident ID.', code: 'INVALID_REQUEST' });
+  }
+  try {
+    res.set('Cache-Control', 'no-store');
+    return res.json(await acknowledgeLiveCoverage(userId, req.params.id));
+  } catch (error) {
+    return sendPostgresError(req, res, error, { action: 'POST', label: 'Error acknowledging live clinical coverage' });
+  }
+});
 
 module.exports = router;

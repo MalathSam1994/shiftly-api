@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { evaluateLiveCoverage } = require('./clinicalLiveCoverage');
 const {
   runInTransactionWithBusinessTimezone,
 } = require('../utils/shiftlyRuntimeConfig');
@@ -28,6 +29,18 @@ function getClinicalAssignmentMaintenanceConfig() {
 
 async function evaluateClinicalAssignmentsOnce() {
   const { batchSize } = getClinicalAssignmentMaintenanceConfig();
+  // Commit the unit sweep independently. A failing/batched shift review must
+  // never starve units with no shifts, or roll back their coverage notifications.
+  let liveCoverage;
+  try {
+    liveCoverage = await evaluateLiveCoverage();
+    if (liveCoverage.errors?.length) {
+      console.error('Live coverage: some units could not be checked:', liveCoverage.errors);
+    }
+  } catch (error) {
+    console.error('Live coverage maintenance failed:', error);
+    liveCoverage = { checked: 0, failed: true };
+  }
   const result = await runInTransactionWithBusinessTimezone(pool, async (client) => {
     await client.query("SELECT set_config('shiftly.clinical_source', 'System', true)");
     return client.query(
@@ -37,7 +50,7 @@ async function evaluateClinicalAssignmentsOnce() {
       [batchSize],
     );
   });
-  return result.rows?.[0]?.result || { enabled: false, checked: 0 };
+  return { ...(result.rows?.[0]?.result || { enabled: false, checked: 0 }), live_coverage: liveCoverage };
 }
 
 async function runMaintenanceTick() {
