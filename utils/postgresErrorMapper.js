@@ -242,6 +242,7 @@ function mapPostgresError(err, context = {}) {
   const pgCode = String(err && err.code || '');
   // Explicit, safe lifecycle messages: never forward SQL detail or stack traces.
   const clinicalErrors = {
+    CLINICAL_ASSIGNMENT_INELIGIBLE_SCHEDULED_STAFF: [422, 'Assignment generation was refused because one or more approved staff scheduled to work are not clinically eligible. No proposal or history record was created. Resolve the reasons below and try again.'],
     CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF: [422, 'Assignment generation was refused because no scheduled staff are eligible. Resolve the reasons below and try again.'],
     CLINICAL_ASSIGNMENT_NO_FEASIBLE_PATIENTS: [422, 'Assignment generation was refused because no patient can be assigned safely. Resolve the competency or hard-capacity restrictions below and try again.'],
     CLINICAL_ASSIGNMENT_NO_PATIENTS: [422, 'No active patients are available in the selected clinical unit. An empty assignment cannot be generated.'],
@@ -270,7 +271,8 @@ function mapPostgresError(err, context = {}) {
   if (!clinicalErrors[clinicalCode]) clinicalCode = legacyClinicalCodes[err && err.message];
   if (pgCode === 'P0001' && clinicalErrors[clinicalCode]) {
     const [status, details] = clinicalErrors[clinicalCode];
-    if (clinicalCode === 'CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF' ||
+    if (clinicalCode === 'CLINICAL_ASSIGNMENT_INELIGIBLE_SCHEDULED_STAFF' ||
+        clinicalCode === 'CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF' ||
         clinicalCode === 'CLINICAL_ASSIGNMENT_NO_FEASIBLE_PATIENTS') {
       // Only these explicit guards emit user-facing diagnostic messages.
       // Forward message strings, never arbitrary database detail or metadata.
