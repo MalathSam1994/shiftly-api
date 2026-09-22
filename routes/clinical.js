@@ -2542,6 +2542,60 @@ router.get('/assignment-workflows', requirePermission(OPEN_ASSIGNMENT_BOARD), as
   }
 });
 
+router.get('/shift-context/:shiftAssignmentId/patients', requirePermission(OPEN_ASSIGNMENT_BOARD), async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  const shiftAssignmentId = requirePositiveId(req, res, req.params.shiftAssignmentId, 'shiftAssignmentId');
+  if (!shiftAssignmentId) return null;
+  try {
+    const result = await pool.query(`
+      WITH selected_shift AS (
+        SELECT sa.id, sa.user_id, sa.division_id, sa.department_id,
+          to_char(sa.shift_date, 'YYYY-MM-DD') shift_date, st.shift_label,
+          to_char(sa.start_time, 'HH24:MI') start_time, to_char(sa.end_time, 'HH24:MI') end_time,
+          COALESCE(NULLIF(u.user_desc, ''), u.user_name) staff_name, dep.department_desc
+        FROM shiftly_schema.shift_assignments sa
+        JOIN shiftly_schema.users u ON u.id = sa.user_id
+        JOIN shiftly_schema.departments dep ON dep.id = sa.department_id
+        LEFT JOIN shiftly_schema.shift_types st ON st.id = sa.shift_type_id
+        WHERE sa.id = $2::integer
+          AND shiftly_api.fn_user_can_access_division_department($1::integer, sa.division_id, sa.department_id)
+      ), patients AS (
+        SELECT pa.id assignment_id, e.id encounter_id, p.patient_public_id, p.display_name,
+          cu.unit_name, e.room_label, e.bed_label, ca.acuity_level_name, ca.acuity_level_code,
+          ca.explanation #>> '{level,color}' acuity_color, ca.workload,
+          pa.review_required, pa.review_reason
+        FROM selected_shift s
+        JOIN shiftly_schema.clinical_patient_assignments pa
+          ON pa.shift_assignment_id = s.id AND pa.assigned_user_id = s.user_id
+          AND pa.assignment_status = 'PUBLISHED' AND pa.ended_at IS NULL
+        JOIN shiftly_schema.clinical_encounters e ON e.id = pa.encounter_id
+          AND e.encounter_status IN ('ACTIVE', 'TRANSFERRED')
+          AND e.division_id = s.division_id AND e.department_id = s.department_id
+        JOIN shiftly_schema.clinical_patients p ON p.id = e.patient_id
+        JOIN shiftly_schema.clinical_units cu ON cu.id = e.current_clinical_unit_id
+        LEFT JOIN shiftly_schema.clinical_current_patient_acuity ca ON ca.encounter_id = e.id
+        WHERE shiftly_api.fn_user_can_access_division_department($1::integer, e.division_id, e.department_id)
+      )
+      SELECT jsonb_build_object(
+        'shift', to_jsonb(s),
+        'patient_count', (SELECT count(*) FROM patients),
+        'review_count', (SELECT count(*) FROM patients WHERE review_required),
+        'total_workload', (SELECT CASE WHEN count(*) FILTER (WHERE workload IS NULL) > 0
+          THEN NULL ELSE COALESCE(sum(workload), 0) END FROM patients),
+        'patients', COALESCE((SELECT jsonb_agg(to_jsonb(p) ORDER BY unit_name, room_label, bed_label, display_name)
+          FROM patients p), '[]'::jsonb)
+      ) AS overview FROM selected_shift s`, [userId, shiftAssignmentId]);
+    if (!result.rows[0]) return sendApiError(req, res, {
+      status: 404, error: 'The shift assignment is unavailable or outside your access scope.', code: 'NOT_FOUND',
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json(result.rows[0].overview);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'GET', label: 'Error loading shift patients' });
+  }
+});
+
 router.get('/shift-context/:shiftAssignmentId', requireAnyClinicalPermission([OPEN_ASSIGNMENT_BOARD, OPEN_MOBILE_PATIENTS]), async (req, res) => {
   const userId = actorUserId(req);
   const shiftAssignmentId = requirePositiveId(req, res, req.params.shiftAssignmentId, 'shiftAssignmentId');
