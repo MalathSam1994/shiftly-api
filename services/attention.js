@@ -21,10 +21,16 @@ function attentionFilters(query = {}) {
     if (!values.includes(query[name])) throw new Error('Invalid filter');
     result[name] = query[name];
   }
-  for (const name of ['unitId', 'shiftTypeId', 'staffTypeId', 'divisionId', 'departmentId']) {
+  for (const name of ['unitId', 'shiftTypeId', 'staffTypeId', 'divisionId', 'departmentId',
+    'locationDivisionId', 'locationDepartmentId', 'locationUnitId']) {
     if (query[name] == null || query[name] === '') continue;
     if (!/^[1-9]\d*$/.test(String(query[name])) || Number(query[name]) > 2147483647) throw new Error('Invalid identifier');
     result[name] = Number(query[name]);
+  }
+  // One location selection always carries the full organization pair.
+  if ((result.locationDivisionId == null) !== (result.locationDepartmentId == null) ||
+      (result.locationUnitId != null && result.locationDepartmentId == null)) {
+    throw new Error('Choose a department/unit with its division');
   }
   for (const name of ['from', 'to', 'shiftDate']) {
     if (query[name] == null || query[name] === '') continue;
