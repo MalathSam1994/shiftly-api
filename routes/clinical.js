@@ -1803,6 +1803,107 @@ router.post('/staff-competencies', requirePermission(MANAGE_COMPETENCIES), requi
   );
 });
 
+// One staff member and one set of conditions, saved in a single SQL statement.
+// Keep the single-record POST/PUT contracts available to existing clients.
+router.post('/staff-competencies/batch', requirePermission(MANAGE_COMPETENCIES), (req, res, next) => {
+  const source = req.body || {};
+  const userId = parseOptionalInt(source.user_id);
+  const competencyIds = Array.isArray(source.competency_ids)
+    ? source.competency_ids.map(parseOptionalInt) : [];
+  const validFrom = parseRequiredDate(source.valid_from);
+  if (!userId || !competencyIds.length || competencyIds.some(id => !id)) {
+    return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST',
+      error: 'Choose a staff member and at least one valid competency.' });
+  }
+  if (!validFrom) {
+    return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST',
+      error: 'Choose a valid start date for the competency links.' });
+  }
+  const validTo = optionalDate(req, res, source.valid_to, 'Valid to');
+  if (validTo === undefined) return;
+  if (validTo && validTo < validFrom) {
+    return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST',
+      error: 'Valid to must be on or after Valid from. No links were saved.' });
+  }
+  const sourceType = cleanUpper(source.source_type) || 'MANUAL';
+  const isActive = parseBoolean(source.is_active, true);
+  if (!['MANUAL', 'EXTERNAL'].includes(sourceType) || isActive === undefined ||
+      (source.comment != null && typeof source.comment !== 'string')) {
+    return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST',
+      error: 'Choose a valid source and Active setting, and enter notes as text.' });
+  }
+  req.body = { user_id: userId, competency_ids: competencyIds, valid_from: validFrom,
+    valid_to: validTo, source_type: sourceType, comment: cleanText(source.comment), is_active: isActive };
+  return next();
+}, requireStaffingRecordScope('clinical_staff_competencies'), async (req, res) => {
+  const body = req.body;
+  try {
+    // PostgreSQL owns existing-link checks and the all-or-nothing insert.
+    // No ON CONFLICT skip/upsert: an existing link must never be overwritten.
+    // The unique constraint also protects against concurrent submissions.
+    const result = await pool.query(`
+      WITH selected AS MATERIALIZED (
+        SELECT DISTINCT unnest($2::integer[]) AS competency_id
+      ), allowed AS MATERIALIZED (
+        SELECT id FROM shiftly_api.fn_clinical_staffing_scoped_users($8)
+        WHERE id = $1
+      ), conflicts AS MATERIALIZED (
+        SELECT c.competency_name
+        FROM shiftly_schema.clinical_staff_competencies sc
+        JOIN selected s ON s.competency_id = sc.competency_id
+        JOIN shiftly_schema.clinical_competencies c ON c.id = sc.competency_id
+        WHERE sc.user_id = $1 AND sc.valid_from = $3::date
+          AND EXISTS (SELECT 1 FROM allowed)
+      ), missing AS (
+        SELECT s.competency_id FROM selected s
+        LEFT JOIN shiftly_schema.clinical_competencies c ON c.id = s.competency_id
+        WHERE c.id IS NULL
+      ), inserted AS (
+        INSERT INTO shiftly_schema.clinical_staff_competencies
+          (user_id, competency_id, valid_from, valid_to, source_type, comment, is_active, created_by)
+        SELECT $1, s.competency_id, $3::date, $4::date, $5, $6, $7, $8
+        FROM selected s
+        WHERE EXISTS (SELECT 1 FROM allowed)
+          AND NOT EXISTS (SELECT 1 FROM conflicts)
+          AND NOT EXISTS (SELECT 1 FROM missing)
+        ORDER BY s.competency_id
+        RETURNING *
+      )
+      SELECT EXISTS (SELECT 1 FROM allowed) AS allowed,
+        EXISTS (SELECT 1 FROM missing) AS missing,
+        COALESCE((SELECT jsonb_agg(competency_name ORDER BY competency_name) FROM conflicts), '[]'::jsonb) AS conflicts,
+        COALESCE((SELECT jsonb_agg(to_jsonb(i) ORDER BY competency_id) FROM inserted i), '[]'::jsonb) AS mappings
+    `, [body.user_id, body.competency_ids, body.valid_from, body.valid_to,
+      body.source_type, body.comment, body.is_active, actorUserId(req)]);
+    const saved = result.rows[0];
+    if (!saved.allowed) {
+      return sendApiError(req, res, { status: 403, code: 'PERMISSION_DENIED',
+        error: 'This staff member is no longer in your organization scope. No links were saved.' });
+    }
+    if (saved.missing) {
+      return sendApiError(req, res, { status: 422, code: 'INVALID_REFERENCE',
+        error: 'A selected competency is no longer available. Close and reopen this screen to refresh the list. No links were saved.' });
+    }
+    if (saved.conflicts.length) {
+      return sendApiError(req, res, { status: 409, code: 'STAFF_COMPETENCY_ALREADY_LINKED',
+        error: `Already linked with this Valid from date: ${saved.conflicts.join(', ')}. No links were saved. Deselect these competencies or edit their existing mappings.` });
+    }
+    return res.status(201).json(saved.mappings);
+  } catch (err) {
+    if (err.code === '23505' && err.constraint === 'uq_clinical_staff_competencies_user_comp_start') {
+      return sendApiError(req, res, { status: 409, code: 'STAFF_COMPETENCY_ALREADY_LINKED',
+        error: 'A selected competency was already linked to this staff member with this Valid from date. No links were saved by this request. Review the existing mappings before trying again.' });
+    }
+    if (err.code === '23503' && err.constraint === 'fk_clinical_staff_competencies_competency') {
+      return sendApiError(req, res, { status: 422, code: 'INVALID_REFERENCE',
+        error: 'A selected competency is no longer available. Close and reopen this screen to refresh the list. No links were saved.' });
+    }
+    return sendPostgresError(req, res, err, {
+      action: 'CREATE', label: 'Error linking staff clinical competencies',
+    });
+  }
+});
+
 router.put('/staff-competencies/:id', requirePermission(MANAGE_COMPETENCIES), requireStaffingRecordScope('clinical_staff_competencies'), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_staff_competencies', 'id', [
     'user_id',

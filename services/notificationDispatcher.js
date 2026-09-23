@@ -85,7 +85,11 @@ async function _dispatchByNotificationId(notificationId) {
   FROM shiftly_schema.notifications AS n
   JOIN shiftly_schema.users AS u
     ON u.id = n.recipient_user_id
-  WHERE n.id = $1
+  WHERE n.id = $1 AND n.delivery_eligible = true
+    AND (n.attention_issue_id IS NULL OR EXISTS (
+      SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id
+        AND shiftly_api.fn_attention_can_view(n.recipient_user_id,i.payload->'scope',i.domain)
+        AND shiftly_api.fn_attention_state(i)='ACTIVE'))
   FOR UPDATE OF n
   `,
   [notificationId],
@@ -214,11 +218,16 @@ async function _drainPending(limit = 100) {
   // Drain older pending rows (covers: API restart, token registered later, missed NOTIFY, etc.)
   const { rows } = await pool.query(
     `
-    SELECT id
-    FROM shiftly_schema.notifications
-    WHERE push_sent_at IS NULL
-      AND push_attempts < 5
-    ORDER BY id ASC
+    SELECT n.id
+    FROM shiftly_schema.notifications n
+    WHERE n.push_sent_at IS NULL
+      AND n.delivery_eligible = true
+      AND n.push_attempts < 5
+      AND (n.attention_issue_id IS NULL OR EXISTS (
+        SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id
+          AND shiftly_api.fn_attention_can_view(n.recipient_user_id,i.payload->'scope',i.domain)
+          AND shiftly_api.fn_attention_state(i)='ACTIVE'))
+    ORDER BY n.id ASC
     LIMIT $1
     `,
     [limit],

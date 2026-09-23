@@ -4,6 +4,7 @@ const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 const { loadLiveCoverage, acknowledgeLiveCoverage } = require('../services/clinicalLiveCoverage');
 
+const { attentionFilters, readAttention } = require('../services/attention');
 const router = express.Router();
 
 function actorUserId(req) {
@@ -125,8 +126,10 @@ async function workspace(req, res) {
     summary.addRow([snapshot.clinical_basis]); summary.addRow([snapshot.staffing_basis]);
     summary.addRow(['Bed occupancy uses configured beds; unknown locations/capacity yield no percentage. Average acuity is only comparable within one rule set.']);
     summary.addRow(['Patient preview', snapshot.patients.length, 'Total census', snapshot.patient_total]);
+    summary.addRow(['Attention preview', snapshot.alerts.length, 'Total matching observations', snapshot.attention?.total ?? 'Unavailable']);
+    summary.addRow(['Attention is a capped preview; View All provides the complete authorized paginated list.']);
     for (const [key, value] of Object.entries(snapshot.kpis)) summary.addRow([key, value ?? 'Unavailable']);
-    for (const [name, rows] of [['Patients (up to 500)', snapshot.patients], ['Units', snapshot.by_unit], ['Workload', snapshot.workload], ['Schedule', snapshot.schedule], ['Alerts (up to 100)', snapshot.alerts], ['Handover reviews', snapshot.handovers || []]]) {
+    for (const [name, rows] of [['Patients (up to 500)', snapshot.patients], ['Units', snapshot.by_unit], ['Workload', snapshot.workload], ['Schedule', snapshot.schedule], ['Attention preview (100)', snapshot.alerts], ['Handover preview (100)', snapshot.handovers || []]]) {
       const sheet = workbook.addWorksheet(name);
       const keys = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => key !== 'scope' && key !== 'ineligibility_reasons');
       sheet.addRow(keys);
@@ -170,6 +173,19 @@ router.post('/manager/live-coverage/:id/acknowledge', async (req, res) => {
   } catch (error) {
     return sendPostgresError(req, res, error, { action: 'POST', label: 'Error acknowledging live clinical coverage' });
   }
+});
+
+
+router.get('/manager/attention', async (req, res) => {
+  const userId = actorUserId(req);
+  if (!userId) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  let filters;
+  try { filters = attentionFilters(req.query); }
+  catch (_) { return sendApiError(req, res, { status: 400, error: 'Invalid attention filters or cursor.', code: 'INVALID_REQUEST' }); }
+  try {
+    res.set('Cache-Control', 'no-store');
+    return res.json(await readAttention(userId, filters));
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'GET', label: 'Attention could not be loaded' }); }
 });
 
 module.exports = router;

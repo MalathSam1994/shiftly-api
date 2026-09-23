@@ -2,6 +2,8 @@ const express = require('express');
 const router = express.Router();
 
 const pool = require('../db');
+const { actorUserId, attentionFilters, readAttentionDetail } = require('../services/attention');
+const { runInTransactionWithBusinessTimezone } = require('../utils/shiftlyRuntimeConfig');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 
@@ -41,97 +43,78 @@ router.get('/department-targets', async (req, res) => {
   }
 });
 
-// GET /notifications?recipientUserId=1&unreadOnly=true
-router.get('/', async (req, res) => {
-  try {
-    const recipientUserId = Number(req.query.recipientUserId);
-    const unreadOnly = String(req.query.unreadOnly || 'false') === 'true';
-
-    if (!recipientUserId) {
-      return sendApiError(req, res, {
-        status: 400,
-        error: 'A recipient user is required.',
-        code: 'INVALID_REQUEST',
-      });
-    }
-
-    const params = [recipientUserId];
-    let where = 'WHERE recipient_user_id = $1';
-    if (unreadOnly) {
-      where += ' AND is_read = false';
-    }
-
-    const sql = `
-      SELECT id, recipient_user_id, notification_type, title, body, payload,
-             is_read, created_at, read_at
-      FROM shiftly_schema.notifications
-      ${where}
-      ORDER BY created_at DESC, id DESC
-      LIMIT 500
-    `;
-
-    const { rows } = await pool.query(sql, params);
-    res.json(rows);
-  } catch (e) {
-    return sendPostgresError(req, res, e, {
-      action: 'LIST',
-      label: 'Error loading notifications',
-    });
-  }
+// Identity is authenticated; legacy recipient fields are accepted but ignored.
+router.use((req, res, next) => {
+  if (!actorUserId(req)) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  next();
 });
-
-// POST /notifications/:id/read
+async function inbox(req, res) {
+  let filters;
+  try {
+    filters = attentionFilters(req.query);
+    if (req.path === '/') {
+      filters.limit = 500;
+      filters.legacy = true;
+      const after = req.query.afterId ?? req.query.after_id;
+      if (after != null) {
+        if (!/^[0-9]+$/.test(String(after)) || !Number.isSafeInteger(Number(after))) throw new Error('Invalid cursor');
+        filters.afterId = Number(after);
+      }
+    }
+  }
+  catch (_) { return sendApiError(req, res, { status: 400, error: 'Invalid inbox filters or cursor.', code: 'INVALID_REQUEST' }); }
+  try {
+    const result = await runInTransactionWithBusinessTimezone(pool, async client => {
+      const { rows } = await client.query('SELECT shiftly_api.fn_notification_inbox($1::integer,$2::jsonb) AS result', [actorUserId(req), filters]);
+      return rows[0].result;
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json(req.path === '/' ? result.rows : result);
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'LIST', label: 'Error loading inbox' }); }
+}
+router.get('/', inbox);
+router.get('/inbox', inbox);
+router.get('/summary', async (req, res) => {
+  try {
+    const { rows } = await pool.query('SELECT shiftly_api.fn_notification_inbox_summary($1::integer) AS result', [actorUserId(req)]);
+    res.set('Cache-Control', 'no-store');
+    return res.json(rows[0].result);
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'GET', label: 'Error refreshing inbox totals' }); }
+});
+router.get('/issues/:id', async (req, res) => {
+  if (!/^[1-9]\d*$/.test(req.params.id)) return sendApiError(req, res, { status: 400, error: 'Invalid issue.', code: 'INVALID_REQUEST' });
+  try {
+    res.set('Cache-Control', 'no-store');
+    return res.json(await readAttentionDetail(actorUserId(req), req.params.id));
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'GET', label: 'Issue unavailable' }); }
+});
+router.get('/:id/details', async (req, res) => {
+  if (!/^[1-9]\d*$/.test(req.params.id)) return sendApiError(req, res, { status: 400, error: 'Invalid notification.', code: 'INVALID_REQUEST' });
+  try {
+    const result = await runInTransactionWithBusinessTimezone(pool, async client => {
+      const { rows } = await client.query('SELECT shiftly_api.fn_notification_detail($1::integer,$2::integer) AS result', [actorUserId(req), req.params.id]);
+      return rows[0].result;
+    });
+    res.set('Cache-Control', 'no-store');
+    return res.json(result);
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'GET', label: 'Notification unavailable' }); }
+});
 router.post('/:id/read', async (req, res) => {
+  if (!/^[1-9]\d*$/.test(req.params.id)) return sendApiError(req, res, { status: 400, error: 'Invalid notification.', code: 'INVALID_REQUEST' });
   try {
-    const id = Number(req.params.id);
-    if (!id) {
-      return sendApiError(req, res, {
-        status: 400,
-        error: 'The notification id is invalid.',
-        code: 'INVALID_REQUEST',
-      });
-    }
-
-    const sql = `
-      UPDATE shiftly_schema.notifications
-      SET is_read = true, read_at = CURRENT_TIMESTAMP
-      WHERE id = $1
-      RETURNING *
-    `;
-    const { rows } = await pool.query(sql, [id]);
-    res.json(rows[0] || null);
-  } catch (e) {
-    return sendPostgresError(req, res, e, {
-      action: 'UPDATE',
-      label: 'Error marking notification read',
-    });
-  }
+    const { rows } = await runInTransactionWithBusinessTimezone(pool, client => client.query(
+      'SELECT shiftly_api.fn_notification_mark_read($1::integer,$2::integer) AS changed WHERE EXISTS(SELECT 1 FROM shiftly_schema.notifications WHERE id=$2 AND recipient_user_id=$1 AND NOT inbox_hidden)',
+      [actorUserId(req), req.params.id]));
+    if (!rows.length) return sendApiError(req, res, { status: 404, error: 'This message is not available in your inbox.', code: 'RESOURCE_NOT_FOUND' });
+    return res.json({ ok: true, changed: rows[0].changed });
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'UPDATE', label: 'Error marking notification read' }); }
 });
-
-// POST /notifications/mark-all-read  { recipientUserId: 1 }
 router.post('/mark-all-read', async (req, res) => {
   try {
-    const recipientUserId = Number(req.body.recipientUserId);
-    if (!recipientUserId) {
-      return sendApiError(req, res, {
-        status: 400,
-        error: 'A recipient user is required.',
-        code: 'INVALID_REQUEST',
-      });
-    }
-    const sql = `
-      UPDATE shiftly_schema.notifications
-      SET is_read = true, read_at = CURRENT_TIMESTAMP
-      WHERE recipient_user_id = $1 AND is_read = false
-    `;
-    await pool.query(sql, [recipientUserId]);
-    res.json({ ok: true });
-  } catch (e) {
-    return sendPostgresError(req, res, e, {
-      action: 'UPDATE',
-      label: 'Error marking notifications read',
-    });
-  }
+    const { rows } = await runInTransactionWithBusinessTimezone(pool, client =>
+      client.query('SELECT shiftly_api.fn_notification_mark_read($1::integer,NULL) AS changed', [actorUserId(req)]));
+    return res.json({ ok: true, changed: rows[0].changed, scope: 'ENTIRE_OWN_INBOX' });
+  } catch (error) { return sendPostgresError(req, res, error, { action: 'UPDATE', label: 'Error marking inbox read' }); }
 });
 
 // POST /notifications/push
@@ -150,6 +133,8 @@ router.post('/mark-all-read', async (req, res) => {
 //  - all active users
 router.post('/push', async (req, res) => {
   try {
+    const access = await pool.query("SELECT shiftly_api.fn_user_has_permission($1,'screen:push_notification:open') AS allowed", [actorUserId(req)]);
+    if (!access.rows[0]?.allowed) return sendApiError(req, res, { status: 403, error: 'Manual notification permission is required.', code: 'FORBIDDEN' });
 
     const title = String(req.body.title || '').trim();
     const body = (req.body.body == null) ? null : String(req.body.body);

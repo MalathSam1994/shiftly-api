@@ -4,6 +4,7 @@ const pool = require('../db');
 const createCrudRouter = require('../createCrudRouter');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
+const { periodApprovalOverlapError } = require('../utils/shiftPeriodApprovalErrors');
 const {
   actorUserId,
   requireDivisionDepartmentAccess,
@@ -613,12 +614,15 @@ function normalizeValidationErrors(anyVal) {
 function buildBusinessError(err, fallbackMessage) {
   const parsedDetail = tryParseJson(err && err.detail);
   const normalized = normalizeValidationErrors(parsedDetail);
+  // P0001 also covers overlap and other business guards. Only coverage arrays
+  // belong in this adapter; preserve other codes through their own mapper.
+  if (!normalized.errors.length && !normalized.warnings.length) return null;
 
   return {
     http: 422,
     body: {
-      error: 'The request could not be completed.',
-      details: fallbackMessage || 'Business rule violation.',
+      error: 'The period could not be approved because coverage needs attention.',
+      details: fallbackMessage || 'Review the coverage findings before approving.',
       code: 'VALIDATION_FAILED',
       // IMPORTANT:
       // If the DB raised DETAIL as JSON (e.g. validation errors array),
@@ -784,6 +788,8 @@ router.post('/:id/approve', async (req, res) => {
  } catch (err) {
  
     console.error('Error approving period:', err);
+    const overlap = await periodApprovalOverlapError(err, { periodId, userId: actorUserId(req) });
+    if (overlap) return sendApiError(req, res, overlap);
     const isBusiness = err && err.code === 'P0001';
      if (isBusiness) {
        const built = buildBusinessError(
@@ -794,10 +800,12 @@ router.post('/:id/approve', async (req, res) => {
 
       // Also ensure top-level "errors"/"warnings" exist for maximum compatibility,
       // while keeping validation_errors for structured parsing.
-      const ve = normalizeValidationErrors(built.body.validation_errors);
-      built.body.errors = ve.errors;
-      built.body.warnings = ve.warnings;       
-       return res.status(built.http).json(built.body);
+      if (built) {
+        const ve = normalizeValidationErrors(built.body.validation_errors);
+        built.body.errors = ve.errors;
+        built.body.warnings = ve.warnings;
+        return res.status(built.http).json(built.body);
+      }
      }
 
      return sendPostgresError(req, res, err, {
@@ -856,7 +864,7 @@ router.get('/:id/validate-approval', async (req, res) => {
     const isBusiness = err && err.code === 'P0001';
     if (isBusiness) {
       const built = buildBusinessError(err, 'Coverage validation failed.');
-      return res.status(built.http).json(built.body);
+      if (built) return res.status(built.http).json(built.body);
     }
     return sendPostgresError(req, res, err, {
       action: 'GET',

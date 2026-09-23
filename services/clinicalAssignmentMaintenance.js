@@ -1,4 +1,5 @@
 const pool = require('../db');
+const { reconcileAttention } = require('./attention');
 const { evaluateLiveCoverage } = require('./clinicalLiveCoverage');
 const {
   runInTransactionWithBusinessTimezone,
@@ -41,16 +42,25 @@ async function evaluateClinicalAssignmentsOnce() {
     console.error('Live coverage maintenance failed:', error);
     liveCoverage = { checked: 0, failed: true };
   }
-  const result = await runInTransactionWithBusinessTimezone(pool, async (client) => {
-    await client.query("SELECT set_config('shiftly.clinical_source', 'System', true)");
-    return client.query(
-      `
-      SELECT shiftly_api.fn_clinical_evaluate_due_assignment_reviews($1::int) AS result
-      `,
-      [batchSize],
-    );
-  });
-  return { ...(result.rows?.[0]?.result || { enabled: false, checked: 0 }), live_coverage: liveCoverage };
+  let reviewResult = { checked: 0, failed: true };
+  try {
+    const result = await runInTransactionWithBusinessTimezone(pool, async client => {
+      await client.query("SELECT set_config('shiftly.clinical_source', 'System', true)");
+      return client.query('SELECT shiftly_api.fn_clinical_evaluate_due_assignment_reviews($1::int) AS result', [batchSize]);
+    });
+    reviewResult = result.rows?.[0]?.result || reviewResult;
+  } catch (error) {
+    console.error('Clinical review maintenance failed:', error);
+  }
+  // Commit independently, including catch-up when an unchanged workflow took
+  // its early return. First reconciliation is in-app only in PostgreSQL.
+  let attention;
+  try { attention = await reconcileAttention(); }
+  catch (error) {
+    console.error('Attention reconciliation failed; retained findings are stale:', error);
+    attention = { failed: true };
+  }
+  return { ...reviewResult, live_coverage: liveCoverage, attention };
 }
 
 async function runMaintenanceTick() {
