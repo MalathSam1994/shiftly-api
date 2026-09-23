@@ -1,5 +1,6 @@
 const { Client } = require('pg');
 const pool = require('../db');
+const { setLocalBusinessTimezone, runInTransactionWithBusinessTimezone } = require('../utils/shiftlyRuntimeConfig');
 const { sendToUsers } = require('./firebaseAdmin');
 
 const CHANNEL = 'shiftly_notification_inserted';
@@ -70,6 +71,7 @@ async function _dispatchByNotificationId(notificationId) {
   // Keep transaction open while sending to avoid duplicates across concurrent notifies.
   await _client.query('BEGIN');
   try {
+   await setLocalBusinessTimezone(_client);
    const { rows } = await _client.query(
   `
   SELECT
@@ -89,7 +91,12 @@ async function _dispatchByNotificationId(notificationId) {
     AND (n.attention_issue_id IS NULL OR EXISTS (
       SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id
         AND shiftly_api.fn_attention_can_view(n.recipient_user_id,i.payload->'scope',i.domain)
-        AND shiftly_api.fn_attention_state(i)='ACTIVE'))
+        AND shiftly_api.fn_attention_state(i)='ACTIVE'
+        AND shiftly_api.fn_attention_within_horizon(i.payload->'scope',i.source_kind)
+        AND EXISTS (SELECT 1 FROM shiftly_api.fn_clinical_responsible_managers(
+          (i.payload#>>'{scope,division_id}')::integer,
+          (i.payload#>>'{scope,department_id}')::integer) rm
+          WHERE rm.manager_user_id=n.recipient_user_id)))
   FOR UPDATE OF n
   `,
   [notificationId],
@@ -216,7 +223,7 @@ async function _dispatchByNotificationId(notificationId) {
 async function _drainPending(limit = 100) {
   console.log('[dispatcher] drain start', { limit });
   // Drain older pending rows (covers: API restart, token registered later, missed NOTIFY, etc.)
-  const { rows } = await pool.query(
+  const { rows } = await runInTransactionWithBusinessTimezone(pool, client => client.query(
     `
     SELECT n.id
     FROM shiftly_schema.notifications n
@@ -226,12 +233,17 @@ async function _drainPending(limit = 100) {
       AND (n.attention_issue_id IS NULL OR EXISTS (
         SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id
           AND shiftly_api.fn_attention_can_view(n.recipient_user_id,i.payload->'scope',i.domain)
-          AND shiftly_api.fn_attention_state(i)='ACTIVE'))
+          AND shiftly_api.fn_attention_state(i)='ACTIVE'
+          AND shiftly_api.fn_attention_within_horizon(i.payload->'scope',i.source_kind)
+          AND EXISTS (SELECT 1 FROM shiftly_api.fn_clinical_responsible_managers(
+            (i.payload#>>'{scope,division_id}')::integer,
+            (i.payload#>>'{scope,department_id}')::integer) rm
+            WHERE rm.manager_user_id=n.recipient_user_id)))
     ORDER BY n.id ASC
     LIMIT $1
     `,
     [limit],
-  );
+  ));
 
   console.log('[dispatcher] drain found', {
     count: rows.length,

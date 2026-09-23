@@ -82,6 +82,7 @@ router.get('/', async (req, res) => {
         overlap_validation_enabled,
         mobile_dashboard_default_days,
         desktop_dashboard_default_days,
+        attention_future_days,
         break_duration_minutes,
         shift_handover_minutes,
         clinical_assignment_sync_enabled,
@@ -178,6 +179,7 @@ router.get('/', async (req, res) => {
           overlap_validation_enabled,
            mobile_dashboard_default_days,
           desktop_dashboard_default_days,
+          attention_future_days,
           break_duration_minutes,
           shift_handover_minutes,
           clinical_assignment_sync_enabled,
@@ -326,6 +328,14 @@ router.put('/', async (req, res) => {
         req.body.clinical_assignment_change_notification_behavior
       );
 
+    const rawAttentionDays = req.body.attention_future_days;
+    const attentionFutureDays = rawAttentionDays == null ? null : Number(rawAttentionDays);
+    if (rawAttentionDays != null && (!['number', 'string'].includes(typeof rawAttentionDays) ||
+        !/^\d+$/.test(String(rawAttentionDays)) || !Number.isInteger(attentionFutureDays) ||
+        attentionFutureDays < 0 || attentionFutureDays > 365)) {
+      throw { status: 400, message: 'Invalid value for "attention_future_days". Choose a whole number from 0 to 365.' };
+    }
+
     const updatedBy =
       req.user && req.user.id != null
         ? Number(req.user.id)
@@ -341,6 +351,7 @@ router.put('/', async (req, res) => {
         overlap_validation_enabled,
         mobile_dashboard_default_days,
         desktop_dashboard_default_days,
+        attention_future_days,
         break_duration_minutes,
         shift_handover_minutes,
         clinical_assignment_sync_enabled,
@@ -371,6 +382,7 @@ router.put('/', async (req, res) => {
         $3,
         $4,
         $5,
+        COALESCE($26::integer,(SELECT attention_future_days FROM shiftly_schema.system_configuration WHERE id=1),3),
         $6,
         $7,
         $8,
@@ -400,6 +412,7 @@ router.put('/', async (req, res) => {
         overlap_validation_enabled = EXCLUDED.overlap_validation_enabled,
         mobile_dashboard_default_days = EXCLUDED.mobile_dashboard_default_days,
         desktop_dashboard_default_days = EXCLUDED.desktop_dashboard_default_days,
+        attention_future_days = COALESCE($26::integer,shiftly_schema.system_configuration.attention_future_days),
         break_duration_minutes = EXCLUDED.break_duration_minutes,
         shift_handover_minutes = EXCLUDED.shift_handover_minutes,
         clinical_assignment_sync_enabled = EXCLUDED.clinical_assignment_sync_enabled,
@@ -428,6 +441,7 @@ router.put('/', async (req, res) => {
         overlap_validation_enabled,
         mobile_dashboard_default_days,
         desktop_dashboard_default_days,
+        attention_future_days,
         break_duration_minutes,
         shift_handover_minutes,
         clinical_assignment_sync_enabled,
@@ -476,6 +490,7 @@ router.put('/', async (req, res) => {
         clinicalStaleOptimizationExpirationMinutes,
         clinicalAssignmentChangeNotificationBehavior,
         updatedBy,
+        attentionFutureDays,
       ]
     );
 

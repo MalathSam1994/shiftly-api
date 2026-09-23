@@ -10,7 +10,8 @@ function attentionFilters(query = {}) {
   const result = {};
   for (const [name, values] of Object.entries({
     domain: ['ALL', 'CLINICAL', 'SCHEDULING', 'OTHER'],
-    status: ['ALL', 'ACTIVE', 'HISTORY'],
+    status: ['ALL', 'ACTIVE', 'HISTORY', 'RESOLVED', 'EXPIRED', 'SUPERSEDED', 'UNAVAILABLE'],
+    dateMode: ['TODAY', 'RANGE', 'ALL'],
     severity: ['CRITICAL', 'WARNING', 'INFO'],
     timeScope: ['LIVE', 'UPCOMING', 'SELECTED', 'HISTORICAL'],
     mode: ['BOARD', 'DASHBOARD', 'LIVE'],
@@ -32,6 +33,13 @@ function attentionFilters(query = {}) {
     const parsed = new Date(value + 'T00:00:00Z');
     if (!Number.isFinite(parsed.getTime()) || parsed.toISOString().slice(0, 10) !== value) throw new Error('Invalid date');
     result[name] = value;
+  }
+  if ((result.from == null) !== (result.to == null) ||
+      (result.from != null && result.to <= result.from) ||
+      (result.dateMode === 'RANGE' && result.from == null)) throw new Error('Invalid date range');
+  if (query.liveOnly != null) {
+    if (!['true', 'false'].includes(String(query.liveOnly))) throw new Error('Invalid live filter');
+    result.liveOnly = String(query.liveOnly) === 'true';
   }
   if (query.search) {
     if (typeof query.search !== 'string' || query.search.length > 200) throw new Error('Invalid search');

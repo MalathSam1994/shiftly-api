@@ -76,7 +76,8 @@ router.get('/', inbox);
 router.get('/inbox', inbox);
 router.get('/summary', async (req, res) => {
   try {
-    const { rows } = await pool.query('SELECT shiftly_api.fn_notification_inbox_summary($1::integer) AS result', [actorUserId(req)]);
+    const { rows } = await runInTransactionWithBusinessTimezone(pool, client =>
+      client.query('SELECT shiftly_api.fn_notification_inbox_summary($1::integer) AS result', [actorUserId(req)]));
     res.set('Cache-Control', 'no-store');
     return res.json(rows[0].result);
   } catch (error) { return sendPostgresError(req, res, error, { action: 'GET', label: 'Error refreshing inbox totals' }); }
