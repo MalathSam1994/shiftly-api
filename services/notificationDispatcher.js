@@ -89,7 +89,8 @@ async function _dispatchByNotificationId(notificationId) {
     ON u.id = n.recipient_user_id
   WHERE n.id = $1 AND n.delivery_eligible = true
     AND (n.attention_issue_id IS NULL OR EXISTS (
-      SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id
+      SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id AND i.grouped_into_issue_id IS NULL
+        AND NOT(i.source_kind='STAFF_POOL' AND i.reason_code='STAFF_ELIGIBILITY')
         AND shiftly_api.fn_attention_can_view(n.recipient_user_id,i.payload->'scope',i.domain)
         AND shiftly_api.fn_attention_state(i)='ACTIVE'
         AND shiftly_api.fn_attention_within_horizon(i.payload->'scope',i.source_kind)
@@ -231,7 +232,8 @@ async function _drainPending(limit = 100) {
       AND n.delivery_eligible = true
       AND n.push_attempts < 5
       AND (n.attention_issue_id IS NULL OR EXISTS (
-        SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id
+        SELECT 1 FROM shiftly_schema.attention_issues i WHERE i.id=n.attention_issue_id AND i.grouped_into_issue_id IS NULL
+          AND NOT(i.source_kind='STAFF_POOL' AND i.reason_code='STAFF_ELIGIBILITY')
           AND shiftly_api.fn_attention_can_view(n.recipient_user_id,i.payload->'scope',i.domain)
           AND shiftly_api.fn_attention_state(i)='ACTIVE'
           AND shiftly_api.fn_attention_within_horizon(i.payload->'scope',i.source_kind)
