@@ -626,6 +626,13 @@ function normalizeUnitBody(req, res, { partial = false } = {}) {
   const unitType = enumValue(req, res, source.unit_type, 'unit_type', UNIT_TYPES, 'GENERAL');
   const bedCount = optionalNonNegativeInt(req, res, source.bed_count, 'bed_count');
   const isActive = parseBoolean(source.is_active, true);
+  const hasMinimum = Object.prototype.hasOwnProperty.call(source, 'minimum_roster_staff');
+  const minimumRosterStaff = !hasMinimum ? 1
+    : /^(?:[1-9]\d*)$/.test(String(source.minimum_roster_staff)) ? Number(source.minimum_roster_staff) : NaN;
+  if (!Number.isInteger(minimumRosterStaff) || minimumRosterStaff < 1 || minimumRosterStaff > 1000) {
+    sendApiError(req, res, { status: 400, error: 'Minimum roster staff must be a whole number from 1 to 1000.', code: 'INVALID_REQUEST' });
+    return null;
+  }
 
   if (divisionId === undefined || (!partial && divisionId == null)) {
     sendApiError(req, res, { status: 400, error: 'division_id must be a positive integer.', code: 'INVALID_REQUEST' });
@@ -645,12 +652,13 @@ function normalizeUnitBody(req, res, { partial = false } = {}) {
   body.floor_label = cleanText(source.floor_label);
   body.default_room_prefix = cleanText(source.default_room_prefix);
   body.bed_count = bedCount;
+  body.minimum_roster_staff = minimumRosterStaff;
   body.source_type = cleanUpper(source.source_type) || 'MANUAL';
   body.external_source_system = cleanText(source.external_source_system);
   body.external_unit_id = cleanText(source.external_unit_id);
   body.is_active = isActive;
   if (partial) {
-    for (const key of ['external_source_system','external_unit_id','floor_label','default_room_prefix','bed_count','source_type','is_active','unit_type']) {
+    for (const key of ['external_source_system','external_unit_id','floor_label','default_room_prefix','bed_count','minimum_roster_staff','source_type','is_active','unit_type']) {
       if (!Object.prototype.hasOwnProperty.call(source,key)) delete body[key];
     }
   }
@@ -931,7 +939,9 @@ router.post('/desktop/patient-census', requirePermission(OPEN_PATIENT_ADMIN),des
 
 router.get('/desktop/units', requirePermission(OPEN_CLINICAL_UNITS), async (req,res) => {
   try {
-    const result=await pool.query(`WITH units AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_units($1)),
+    const result=await pool.query(`WITH units AS MATERIALIZED (
+      SELECT scoped.*,cu.minimum_roster_staff FROM shiftly_api.fn_clinical_units($1) scoped
+      JOIN shiftly_schema.clinical_units cu ON cu.id=scoped.id),
     organizations AS (SELECT dd.id,dd.division_id,dd.department_id,dv.division_desc,dep.department_desc,dd.is_active
       FROM shiftly_schema.division_departments dd JOIN shiftly_schema.divisions dv ON dv.id=dd.division_id
       JOIN shiftly_schema.departments dep ON dep.id=dd.department_id
@@ -968,7 +978,8 @@ router.get('/units', requireAnyClinicalPermission([OPEN_PATIENT_ADMIN, OPEN_CLIN
 
   try {
     const result = await pool.query(
-      `SELECT * FROM shiftly_api.fn_clinical_units($1)`,
+      `SELECT scoped.*,cu.minimum_roster_staff FROM shiftly_api.fn_clinical_units($1) scoped
+       JOIN shiftly_schema.clinical_units cu ON cu.id=scoped.id`,
       [userId],
     );
     return res.json(result.rows);
@@ -1589,21 +1600,52 @@ router.get('/staffing/workspace/:kind', async (req, res, next) => {
 }, async (req, res) => {
   const config = staffingWorkspaceKinds[req.params.kind];
   const filters = {};
-  for (const key of ['search','staff_type','shift_type','competency','unit','source','validity','tab','sort','page','status']) {
+  for (const key of ['search','staff_type','shift_type','competency','unit','source','validity','tab','sort','page','status','attention_issue_id','attention_assignment_id']) {
     if (typeof req.query[key] === 'string') filters[key] = req.query[key];
+  }
+  for (const key of ['attention_issue_id', 'attention_assignment_id']) {
+    if (filters[key] != null && (!/^[1-9]\d*$/.test(filters[key]) || !Number.isSafeInteger(Number(filters[key])))) {
+      return sendApiError(req, res, { status: 400, error: 'Invalid eligibility review reference.', code: 'INVALID_REQUEST' });
+    }
+  }
+  if (filters.attention_assignment_id && !filters.attention_issue_id) {
+    return sendApiError(req, res, { status: 400, error: 'A staff review requires its Attention issue.', code: 'INVALID_REQUEST' });
   }
   try {
     const result = await pool.query(`SELECT shiftly_api.${config[1]}($1, $2::jsonb) AS workspace`, [req.user.id, JSON.stringify(filters)]);
+    if (['attention_issue_id', 'attention_assignment_id'].some(key =>
+      filters[key] != null && String(result.rows[0].workspace[key]) !== filters[key])) {
+      return sendApiError(req, res, { status: 503, error: 'The eligibility review scope could not be confirmed. Refresh after the server update.', code: 'RESOURCE_UNAVAILABLE' });
+    }
     return res.json(result.rows[0].workspace);
   } catch (err) { return sendPostgresError(req, res, err, {action: 'LIST', label: 'Error loading clinical workspace'}); }
 });
 router.get('/staffing/mappings/export', requirePermission(OPEN_STAFF_COMPETENCIES), async (req, res) => {
   const filters = { export: 'true' };
-  for (const key of ['search','staff_type','competency','source','validity','tab','sort']) {
+  for (const key of ['search','staff_type','competency','source','validity','tab','sort','attention_issue_id','attention_assignment_id']) {
     if (typeof req.query[key] === 'string') filters[key] = req.query[key];
+  }
+  for (const key of ['attention_issue_id', 'attention_assignment_id']) {
+    if (filters[key] != null && (!/^[1-9]\d*$/.test(filters[key]) || !Number.isSafeInteger(Number(filters[key])))) {
+      return sendApiError(req, res, { status: 400, error: 'Invalid eligibility review reference.', code: 'INVALID_REQUEST' });
+    }
+  }
+  if (filters.attention_assignment_id && !filters.attention_issue_id) {
+    return sendApiError(req, res, { status: 400, error: 'A staff review requires its Attention issue.', code: 'INVALID_REQUEST' });
   }
   try {
     const result = await pool.query('SELECT shiftly_api.fn_clinical_staff_mapping_workspace($1,$2::jsonb) AS workspace', [req.user.id,JSON.stringify(filters)]);
+    for (const [key, header] of Object.entries({
+      attention_issue_id: 'X-ShiftMix-Attention-Issue-Id',
+      attention_assignment_id: 'X-ShiftMix-Attention-Assignment-Id',
+    })) {
+      if (filters[key] == null) continue;
+      if (String(result.rows[0].workspace[key]) !== filters[key]) {
+        return sendApiError(req, res, { status: 503, error: 'The staff review export scope could not be confirmed. Refresh after the server update.', code: 'RESOURCE_UNAVAILABLE' });
+      }
+      res.setHeader(header, String(result.rows[0].workspace[key]));
+      res.append('Access-Control-Expose-Headers', header);
+    }
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Staff competencies');
     sheet.columns = ['Staff','Employee ID','Staff type','Competency','Valid from','Valid to','Validity','Source','Active','Missing required competencies'].map(header => ({header,width:24}));

@@ -447,16 +447,10 @@ const shiftAssignmentsConfig = {
        AND g.staff_type_id = sa.staff_type_id
        AND g.shift_type_id = sa.shift_type_id
       LEFT JOIN LATERAL (
-        SELECT COUNT(*)::int AS assigned_count
-        FROM shiftly_schema.shift_assignments x
-        WHERE x.shift_period_id = sa.shift_period_id
-          AND x.shift_date = sa.shift_date
-          AND COALESCE(x.division_id, 0) = COALESCE(sa.division_id, 0)
-          AND x.department_id = sa.department_id
-          AND COALESCE(x.staff_type_id, 0) = COALESCE(sa.staff_type_id, 0)
-          AND x.shift_type_id = sa.shift_type_id
-          AND COALESCE(x.is_absence, 2) <> 1
-          AND UPPER(COALESCE(x.status, '')) <> 'CANCELLED'
+        SELECT shiftly_api.fn_roster_occupied_places(
+          sa.shift_period_id, sa.shift_date, sa.division_id,
+          sa.department_id, sa.staff_type_id, sa.shift_type_id
+        ) AS assigned_count
       ) counts ON TRUE
     `;
     const userId = actorUserId(req);

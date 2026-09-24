@@ -126,7 +126,7 @@ async function workspace(req, res) {
     summary.addRow([snapshot.clinical_basis]); summary.addRow([snapshot.staffing_basis]);
     summary.addRow(['Bed occupancy uses configured beds; unknown locations/capacity yield no percentage. Average acuity is only comparable within one rule set.']);
     summary.addRow(['Patient preview', snapshot.patients.length, 'Total census', snapshot.patient_total]);
-    summary.addRow(['Attention preview', snapshot.alerts.length, 'Total matching observations', snapshot.attention?.total ?? 'Unavailable']);
+    summary.addRow(['Attention preview', snapshot.alerts.length, 'Total matching issues', snapshot.attention?.total ?? 'Unavailable']);
     summary.addRow(['Attention is a capped preview; View All provides the complete authorized paginated list.']);
     for (const [key, value] of Object.entries(snapshot.kpis)) summary.addRow([key, value ?? 'Unavailable']);
     for (const [name, rows] of [['Patients (up to 500)', snapshot.patients], ['Units', snapshot.by_unit], ['Workload', snapshot.workload], ['Schedule', snapshot.schedule], ['Attention preview (100)', snapshot.alerts], ['Handover preview (100)', snapshot.handovers || []]]) {

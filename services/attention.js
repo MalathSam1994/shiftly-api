@@ -60,7 +60,7 @@ function attentionFilters(query = {}) {
   if (query.cursor) {
     if (typeof query.cursor !== 'string' || query.cursor.length > 500) throw new Error('Invalid cursor');
     const cursor = JSON.parse(query.cursor);
-    if (!cursor || !Number.isInteger(cursor.rank) || cursor.rank < 0 || cursor.rank > 2 ||
+    if (!cursor || !Number.isInteger(cursor.rank) || cursor.rank < 0 || cursor.rank > 14 ||
         !Number.isSafeInteger(cursor.id) || cursor.id <= 0 || typeof cursor.time !== 'string' ||
         !Number.isFinite(Date.parse(cursor.time))) throw new Error('Invalid cursor');
     result.cursor = cursor;
