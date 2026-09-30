@@ -60,12 +60,10 @@ const reports = [
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('overview','Overview','measure per unit/day'),section('patients','Patients','encounter at the daily cutoff')],
     ['unit'],['location'], 'DAY_SNAPSHOT'),
-  definition('patient_handover_sheet','Patient handover sheet','An encounter-focused sheet for the next care team.',
-    [...org,'shiftDate','shiftTypeId','shiftContextId','outgoingContextId','room','bed','encounterIds','incomingStaffId','outgoingStaffId','acuityLevelId','clinicalStatus'],
-    ['unitId','shiftDate','shiftContextId'], [PATIENT,STAFF,REVIEW],
-    [section('patients','Patient Summary','encounter at boundary'),section('factors','Care Factors','effective factor record per encounter/boundary'),
-      section('events','Recent Events','recorded flow or publication event per encounter/boundary'),section('issues','Linked Issues','evidenced encounter/issue link at boundary')],
-    ['encounter'],['location','patient'], 'BOUNDARY'),
+  definition('patient_handover_sheet','Patient handover sheet','Patient condition and recorded care factors at the end of the selected date, or so far today.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
+    [section('patients','Patients','encounter at the daily cutoff'),section('factors','Care factors','active recorded factor per encounter')],
+    ['encounter'],['location'], 'DAY_SNAPSHOT'),
   definition('changes_since_previous_shift','Changes since the previous shift','Recorded clinical changes, with effective and recording times.',
     [...org,'intervalMode','fromDate','toDate','fromTime','toTime','changeCategory','encounterId','actorId'], ['intervalMode'], [PATIENT,STAFF],
     [section('changes','Changes','evidenced source change'),section('fields','Field Changes','changed field linked to a source change')], ['timeline'],['effectiveTime','recordedTime'], 'EVENT_INTERVAL'),
@@ -93,12 +91,7 @@ Object.assign(reports[0], { available:true, unavailableReason:'', fieldOverrides
   shiftDate:{label:'Shift date',semantics:'End of the selected date; today shows data so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[1], {available:true,unavailableReason:'',fieldOverrides:{
-  shiftDate:{label:'Incoming shift date'},
-  shiftContextId:{label:'Incoming approved context',semantics:'Boundary = actual approved incoming start. Future targets use a labelled current patient baseline.'},
-  outgoingContextId:{label:'Outgoing approved context (optional)',semantics:'Preceding approved context. Recent events run from its start through the evidence cutoff; blank uses the preceding 24 hours.'},
-  room:{lookup:'patientBoundary',dependsOn:['unitId','shiftContextId'],semantics:'Effective room label in this unit at the cohort cutoff; historical locations are not replaced with current rooms.'},
-  bed:{lookup:'patientBoundary',dependsOn:['unitId','shiftContextId','room'],semantics:'Effective bed label within the selected unit and room at the cohort cutoff.'},
-  acuityLevelId:{lookup:'patientBoundary',dependsOn:['unitId','shiftContextId'],semantics:'Latest effective assessment level at the cutoff, with its frozen rule/version label.'},
+  shiftDate:{label:'Shift date',semantics:'End of the selected date; today shows data so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[2], {available:true,unavailableReason:'',defaults:{...reports[2].defaults,intervalMode:'BUSINESS_DATES'},fieldOverrides:{
   fromDate:{dependsOn:['intervalMode'],visibleWhen:{intervalMode:'BUSINESS_DATES'}},
@@ -182,10 +175,6 @@ function parameters(def, input, { partial = false } = {}) {
     if (out[key] && (!out.unitId || !out.shiftDate)) throw fail('Choose a unit and dated shift before its context.');
   }
   if (out.outgoingContextId && out.outgoingContextId === out.incomingContextId) throw fail('Choose two different shift contexts.');
-  if (def.id==='patient_handover_sheet') {
-    if (out.outgoingStaffId && !out.outgoingContextId) throw fail('Choose an outgoing context before its published staff.');
-    if (['room','bed','encounterIds','incomingStaffId','outgoingStaffId','acuityLevelId','clinicalStatus'].some(k=>out[k]!=null) && !out.shiftContextId) throw fail('Choose the incoming context before boundary-specific patient filters.');
-  }
   if (def.id==='changes_since_previous_shift') {
     const mode=out.intervalMode||def.defaults.intervalMode;
     if (mode==='BUSINESS_DATES' && (out.fromTime || out.toTime)) throw fail('Clear exact times when using business dates.');

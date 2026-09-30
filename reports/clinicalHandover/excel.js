@@ -17,6 +17,26 @@ function style(sheet, widths) {
 }
 async function excel(data) {
   const book=new ExcelJS.Workbook();book.creator='ShiftMix';book.created=new Date(data.generatedAt);
+  if(data.reportId==='patient_handover_sheet' && data.patientContext?.version===2) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Patient handover sheet','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.patientContext.date]);
+    overview.addRow(['Report time',data.patientContext.completeDay?'End of day':data.patientContext.reference]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    overview.addRow(['Patients',data.totals.patients]);
+    overview.addRow(['Note','Based on recorded history. Factor values use their configured meaning; missing records do not mean no care needs.']);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
+    style(overview,[30,85]);
+    for(const section of data.sections) {
+      const sheet=book.addWorksheet(section.title);sheet.addRow(section.columns.map(c=>c.label));
+      for(const row of section.rows) {
+        const added=sheet.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+        section.columns.forEach((c,i)=>{if(c.type==='identifier')added.getCell(i+1).numFmt='@';});
+      }
+      if(!section.rows.length)sheet.addRow([section.id==='patients'?'No patients with a recorded unit location at this time.':'No active care factors recorded.']);
+      style(sheet,section.columns.map(c=>c.key==='summary'||c.key==='notes'?65:c.type==='identifier'?24:32));
+    }
+    return book.xlsx.writeBuffer();
+  }
   if(data.reportId==='unit_handover_summary' && data.unitContext) {
     const overview=book.addWorksheet('Overview');overview.addRow(['Unit daily summary','Value']);
     overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.unitContext.date]);
