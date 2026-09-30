@@ -56,13 +56,10 @@ const definition = (id, title, description, parameters, required, access, sectio
   timeBasis, available: false, unavailableReason: 'The workspace is ready. This report dataset will be enabled in a later stage.',
 });
 const reports = [
-  definition('unit_handover_summary','Unit handover summary','A concise unit picture at a dated handover boundary.',
-    [...org,'shiftDate','shiftTypeId','shiftContextId','outgoingContextId','fromDate','toDate'],
-    ['unitId','shiftDate','shiftContextId','outgoingContextId'], [PATIENT,STAFF,REVIEW],
-    [section('overview','Overview','measure per unit/boundary'),section('distributions','Acuity and status','category per unit/boundary'),
-      section('exceptions','Exceptions','documented exception per boundary'),section('patients','Patient Roster','encounter per boundary'),
-      section('movements','Movements','canonical movement per outgoing interval')],
-    ['boundary'],['location','patient'], 'BOUNDARY'),
+  definition('unit_handover_summary','Unit daily summary','Patients and daily movements at the end of the selected date, or so far today.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
+    [section('overview','Overview','measure per unit/day'),section('patients','Patients','encounter at the daily cutoff')],
+    ['unit'],['location'], 'DAY_SNAPSHOT'),
   definition('patient_handover_sheet','Patient handover sheet','An encounter-focused sheet for the next care team.',
     [...org,'shiftDate','shiftTypeId','shiftContextId','outgoingContextId','room','bed','encounterIds','incomingStaffId','outgoingStaffId','acuityLevelId','clinicalStatus'],
     ['unitId','shiftDate','shiftContextId'], [PATIENT,STAFF,REVIEW],
@@ -93,11 +90,7 @@ const reports = [
 ];
 // Only implemented readers are enabled. Per-report overrides leave other forms unchanged.
 Object.assign(reports[0], { available:true, unavailableReason:'', fieldOverrides:{
-  shiftDate:{label:'Incoming shift date',semantics:'Business date of the explicitly selected incoming shift; range anchor.'},
-  shiftContextId:{label:'Incoming approved context',semantics:'Boundary = actual approved incoming start. Explicit times, never shift-type defaults.'},
-  outgoingContextId:{semantics:'Movement interval: outgoing start to the earlier of its end and incoming boundary. Choose explicitly; overlap is clipped.'},
-  fromDate:{default:null,label:'First boundary date (optional)',semantics:'Leave both range dates blank for one boundary. Range uses the same periods/types and outgoing day offset.'},
-  toDate:{default:null,label:'Last boundary date (optional)',semantics:'Inclusive, at most 31 dates. Each additional date must have exactly one comparable approved context; census snapshots are not additive.'},
+  shiftDate:{label:'Shift date',semantics:'End of the selected date; today shows data so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[1], {available:true,unavailableReason:'',fieldOverrides:{
   shiftDate:{label:'Incoming shift date'},
@@ -189,11 +182,6 @@ function parameters(def, input, { partial = false } = {}) {
     if (out[key] && (!out.unitId || !out.shiftDate)) throw fail('Choose a unit and dated shift before its context.');
   }
   if (out.outgoingContextId && out.outgoingContextId === out.incomingContextId) throw fail('Choose two different shift contexts.');
-  if (!partial && def.id==='unit_handover_summary') {
-    if (Boolean(out.fromDate)!==Boolean(out.toDate)) throw fail('Choose both range dates, or clear both for a single boundary.');
-    if (out.fromDate && (out.shiftDate<out.fromDate || out.shiftDate>out.toDate)) throw fail('The range must contain the selected incoming shift date.');
-    if (out.shiftContextId!=null && out.shiftContextId===out.outgoingContextId) throw fail('Choose a preceding outgoing context, different from the incoming context.');
-  }
   if (def.id==='patient_handover_sheet') {
     if (out.outgoingStaffId && !out.outgoingContextId) throw fail('Choose an outgoing context before its published staff.');
     if (['room','bed','encounterIds','incomingStaffId','outgoingStaffId','acuityLevelId','clinicalStatus'].some(k=>out[k]!=null) && !out.shiftContextId) throw fail('Choose the incoming context before boundary-specific patient filters.');

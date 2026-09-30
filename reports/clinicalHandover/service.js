@@ -166,9 +166,9 @@ async function generate(actor,id,input) {
     const rowCount=validateDataset(def,result);
     return {...result,reportId:id,title:def.title,schemaVersion:1,parameters:ctx.parameters,selections,
       authorizedScope,scopeLabel:[ctx.unit_name,...ctx.pairs.map(p=>`${p.department_name} | ${p.division_name}`)].filter(Boolean).join(' / '),
-      businessTimezone:ctx.business_timezone,referenceTime:result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
-      generatedAt:dataReferenceTime,intervalStart:result.readinessContext?.start||result.changeContext?.start||ctx.interval_start,intervalEndExclusive:result.readinessContext?.end||result.changeContext?.endExclusive||ctx.interval_end_exclusive,
-      planningBasis:'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
+      businessTimezone:ctx.business_timezone,referenceTime:result.unitContext?.reference||result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
+      generatedAt:dataReferenceTime,intervalStart:result.unitContext?.start||result.readinessContext?.start||result.changeContext?.start||ctx.interval_start,intervalEndExclusive:result.unitContext?.endExclusive||result.readinessContext?.end||result.changeContext?.endExclusive||ctx.interval_end_exclusive,
+      planningBasis:result.unitContext?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
   });
   if (Buffer.byteLength(JSON.stringify(dataset),'utf8')>MAX_BYTES) throw registry.fail('Report exceeds the 10 MB generation limit. Narrow the scope.',413,'REPORT_TOO_LARGE');
   return transaction(false,async client=>{
@@ -296,7 +296,12 @@ async function outstandingTarget(actor,id,issueId) {
 function exportData(dataset) {
   // PDF viewing and both exports require the full saved dataset. Retrieval owns
   // authorization; only /export requires the additional download permission.
-  const count=validateDataset(registry.report(dataset.reportId),dataset);
+  const def=registry.report(dataset.reportId);
+  // Existing immutable boundary reports retain their original complete section
+  // contract during the cache lifetime; new generations use the daily contract.
+  const savedDefinition=dataset.reportId==='unit_handover_summary' && !dataset.unitContext
+    ? {...def,sections:['overview','distributions','exceptions','patients','movements'].map(id=>({id}))} : def;
+  const count=validateDataset(savedDefinition,dataset);
   if (count!==dataset.rowCount) throw registry.fail('The complete saved report is unavailable. Generate the report again.',500,'REPORT_CONTRACT');
   const {authorizedScope,...data}=dataset; return data;
 }

@@ -17,6 +17,22 @@ function style(sheet, widths) {
 }
 async function excel(data) {
   const book=new ExcelJS.Workbook();book.creator='ShiftMix';book.created=new Date(data.generatedAt);
+  if(data.reportId==='unit_handover_summary' && data.unitContext) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Unit daily summary','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.unitContext.date]);
+    overview.addRow(['Report time',data.unitContext.completeDay?'End of day':data.unitContext.reference]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const row of data.sections.find(s=>s.id==='overview').rows) overview.addRow([row.measure,row.value]);
+    overview.addRow(['Note','Patient counts are at the report time; movements cover the selected date. Based on recorded history.']);
+    for(const note of data.sourceLimitations) overview.addRow(['Note',note]);
+    style(overview,[30,85]);
+    const patients=book.addWorksheet('Patients');const section=data.sections.find(s=>s.id==='patients');
+    patients.addRow(section.columns.map(c=>c.label));
+    for(const row of section.rows) patients.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+    if(!section.rows.length)patients.addRow(['No patients with a recorded unit location at this time.']);
+    style(patients,[20,30,24,20,20,32]);
+    return book.xlsx.writeBuffer();
+  }
   const unit=data.reportId==='unit_handover_summary';
   const patient=data.reportId==='patient_handover_sheet';
   const changes=data.reportId==='changes_since_previous_shift';
