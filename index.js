@@ -37,6 +37,7 @@
 	const notifications = require('./routes/notifications');
 	const fcm = require('./routes/fcm');
 	const clinicalRouter = require('./routes/clinical');
+	const clinicalHandoverReportsRouter = require('./routes/clinicalHandoverReports');
 	const { startNotificationDispatcher } = require('./services/notificationDispatcher');
 	const { startShiftRequestMaintenance } = require('./services/shiftRequestMaintenance');
 	const { startClinicalAssignmentMaintenance } = require('./services/clinicalAssignmentMaintenance');
@@ -244,6 +245,7 @@ app.use(requireAuth);
 	app.use('/yearly-holidays', yearlyHolidaysRouter);
 	app.use('/absence-types', absenceTypesRouter);
 	app.use('/clinical', clinicalRouter);
+	app.use('/clinical-handover-reports', clinicalHandoverReportsRouter);
 
 	app.use('/colleague-shifts', colleagueShiftsQuery);
 	app.use('/switch-candidates', switchCandidatesQuery);

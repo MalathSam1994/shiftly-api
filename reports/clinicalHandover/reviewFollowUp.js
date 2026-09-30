@@ -1,0 +1,58 @@
+// Read-only adapter: SQL owns membership, grouping, actions, durations and totals.
+const c=(key,label,type='text')=>({key,label,type});
+const columns={
+ reviews:[c('reviewId','Canonical review ID','identifier'),c('reviewNumber','Review number','identifier'),c('status','Current canonical status','status'),c('statusBasis','Status basis'),
+  c('memberCount','Original records','number'),c('handoverMembers','Members with handover evidence','number'),c('memberIds','Original review IDs','identifier'),c('handoverSourceIds','Handover-origin source IDs','identifier'),
+  c('unitId','Unit ID','identifier'),c('unit','Unit / scope'),c('divisionId','Division ID','identifier'),c('departmentId','Department ID','identifier'),c('organization','Organization'),
+  c('shiftDate','Target shift start date','date'),c('shiftTypeId','Shift type ID','identifier'),c('shift','Target shift'),c('recordedIntervals','Captured actual staff intervals'),c('intervalBasis','Interval evidence'),
+  c('currentRootTrigger','Current root trigger','status'),c('handoverReasons','Recorded handover detection reasons'),c('currentReasons','Current root reasons'),c('currentSummary','Current root summary'),
+  c('firstHandover','First evidenced handover detection','datetime'),c('detectionBasis','First-detection evidence basis','status'),c('managerNotified','First retained manager notification after detection','datetime'),
+  c('managerOpened','First recorded manager opening after detection','datetime'),c('firstReviewed','First recorded opening / findings review','datetime'),c('reviewerIds','Recorded reviewer IDs','identifier'),c('reviewers','Review actors (current labels)'),
+  c('optimizationRequested','First recorded optimization request','datetime'),c('optimizationGenerated','First linked proposal generation','datetime'),c('firstPublished','First linked assignment publication','datetime'),
+  c('firstSkipDecision','First recorded skip decision','datetime'),c('firstRootResolution','First recorded root resolution','datetime'),c('reviewMinutes','Detection to review (minutes)','number'),
+  c('publicationMinutes','Detection to publication (minutes)','number'),c('resolutionMinutes','Detection to root resolution (minutes)','number'),c('durationBasis','Duration basis / unavailable reason'),
+  c('linkedRunIds','Explicit linked run IDs','identifier'),c('linkedAttention','Explicit Attention references (supporting only)'),c('consolidationBasis','Grouping semantics'),c('receiptEvidence','Handover receipt evidence')],
+ members:[c('reviewId','Canonical review ID','identifier'),c('memberId','Original review ID','identifier'),c('number','Original review number','identifier'),c('parentId','Consolidated parent ID','identifier'),c('parentPath','Explicit parent path','identifier'),
+  c('membershipState','Group membership','status'),c('storedStatus','Original stored status','status'),c('preConsolidationStatus','Captured pre-consolidation status','status'),c('originalTrigger','Original trigger','status'),c('triggerSource','Trigger source','status'),c('firstHandover','First evidenced member handover','datetime'),
+  c('detectionBasis','Handover evidence basis'),c('handoverEventId','Handover detection event ID','identifier'),c('createdAt','Original creation time','datetime'),c('storedFirstDetection','Stored all-trigger first detection','datetime'),c('storedFirstDetectionMeaning','Stored detection meaning'),
+  c('shiftDate','Target shift start date','date'),c('shiftTypeId','Shift type ID','identifier'),c('unitId','Unit ID','identifier'),c('reasons','Retained reasons'),c('summary','Retained summary'),
+  c('managerNotified','Retained manager notification','datetime'),c('managerOpened','Retained manager opening','datetime'),c('reviewedAt','Retained findings review','datetime'),c('reviewerId','Retained reviewer ID','identifier'),
+  c('requestedAt','Retained optimization request','datetime'),c('requestedBy','Request actor ID','identifier'),c('optimizationRunId','Optimization run ID','identifier'),c('publishedAt','Retained publication','datetime'),c('publishedRunId','Published run ID','identifier'),
+  c('skippedAt','Retained explicit skip decision','datetime'),c('skippedBy','Skip actor ID','identifier'),c('skipReason','Recorded skip reason'),c('resolvedAt','Retained resolution','datetime'),c('checkCount','Stored detector check count','number'),c('checkCountMeaning','Check-count meaning'),c('semantics','Evidence semantics')],
+ lifecycle:[c('reviewId','Canonical review ID','identifier'),c('memberId','Original review ID','identifier'),c('eventKey','Source evidence key','identifier'),c('source','Evidence source','status'),c('event','Recorded activity','status'),
+  c('recordedAt','Recorded activity time','datetime'),c('actorId','Recorded actor ID','identifier'),c('actor','Recorded actor (current label)'),c('relationToCohort','Relation to first detection','status'),c('meaning','Actual source semantics'),c('evidence','Relevant recorded detail')],
+ gaps:[c('memberId','Original review ID','identifier'),c('number','Original review number','identifier'),c('firstHandover','Known original handover time','datetime'),c('gap','Canonicalization evidence gap'),c('meaning','Exclusion meaning')],
+};
+const limitations=[
+ 'Cohort is first evidenced HANDOVER detection of each current explicit logical workflow group, in inclusive business dates. Events after cohort end remain included through generation. Current canonical state is frozen at generation; historical as-of status is not offered because parent links and retained action fields lack complete history.',
+ 'Membership uses DETECTED events with trigger_type HANDOVER. Original HANDOVER workflow creation is also evidence; use the earlier recorded creation/detection, preferring the event on equal timestamps. Stored first_detected_at may have been rewritten by consolidation and is not the handover cohort basis. Text, shift proximity and current root trigger alone do not classify other members.',
+ 'Only explicit same-organization/unit/date/type parent paths consolidate, at most 32 links. The root counts once, including proven handover children of differently triggered roots. Cancelled consolidated members are source history, not failed handovers. Broken/cyclic/cross-scope paths are excluded with separate evidence gaps.',
+ 'OPENED is recorded manager opening / findings review. REVIEWED timestamps are retained review fields. MANAGER_OPENED alone is opening only. Notification timestamps are notification bookkeeping, not transport receipt or ownership. Skip, review, publication and resolution are independent activities.',
+ 'Repeated detector/notification events and overlapping workflow fields/run timestamps stay in detail. Management outcomes count logical groups with recorded evidence, never event rows, check_count, notifications or recipients. Reviewer filtering means a recorded review actor after first handover detection, not assigned staff.',
+ 'Durations use first evidenced group handover detection to the first retained linked action at/after it; resolution is root-only. Missing/backward times give unavailable, not zero. Root detection after a terminal/publication event disables simple durations because episode association is ambiguous. Valid-duration averages always show their own sample counts.',
+ 'Only workflow/event-linked run IDs associate generation/publication. Proposal generation is not publication. The retained optimization-request timestamp can be set by draft linkage and does not prove a separate manager click. A run can be shared by members; its repeated supporting references never multiply logical outcomes. No unrelated run is joined solely by matching date/unit/shift.',
+ 'Workflow groups exist when findings are detected and are not all expected handovers. No recorded opening does not prove failure to receive handover. PUBLISHED/REVIEWED/OPENED is not signed receipt, clinical resolution or safe coverage. No completion/compliance percentage, response target or safety score is calculated.',
+ 'Recorded staff intervals are saved snapshot values, not current default shift times or attendance. Missing/deleted shift labels or interval evidence remain unavailable. Legacy wall timestamps use the configured business timezone; original ambiguous DST offsets cannot be recovered.',
+ 'Relevant event detail omits bulky patient/eligibility snapshots and previous-findings payloads; immutable workflow/event/run IDs preserve provenance. Supporting Attention references are explicitly linked observations, never extra handover counts. Existing evidence is read without detector, acknowledgment, reconciliation or notification calls.',
+];
+async function read(client,{actor,parameters}) {
+ const {rows}=await client.query('SELECT shiftly_api.fn_handover_review_follow_up($1,$2::jsonb) value',[actor,parameters]);const d=rows[0].value;
+ const section=(id,title,grain,notes)=>({id,title,grain,evidenceBasis:'MIXED',availability:'AVAILABLE',columns:columns[id],rows:d[id],total:d[id].length,limitations:notes});
+ const metric=(label,key,definition)=>({label,value:d.totals[key],availability:'AVAILABLE',definition});
+ return {rowGrain:'One current canonical review group with evidenced HANDOVER origin; original records and lifecycle are supporting evidence.',reviewContext:d.context,statusSummaries:d.statuses,durationSummaries:d.durations,totals:d.totals,
+  summaries:[metric('Logical reviews','logicalReviews','Current explicitly linked groups; not the population of expected handovers.'),metric('Recorded review activity','reviewed','Groups with recorded opening/findings review after first handover detection.'),
+   metric('Assignment published','published','Groups with explicit linked publication evidence; not handover receipt.'),metric('Currently resolved','currentlyResolved','Current root status RESOLVED; member cancellation is not resolution.'),
+   metric('Recorded skip decisions','skipDecisions','Groups with an explicit skip after detection; issues can remain unresolved.'),metric('Incomplete duration evidence','durationGaps','Groups missing at least one valid review/publication/resolution interval; not a failure measure.')],
+  metricDefinitions:[{id:'cohort',label:'First handover cohort',definition:limitations[0]+' '+limitations[1]},{id:'grouping',label:'Logical group',definition:limitations[2]},
+   {id:'actions',label:'Activity semantics',definition:limitations[3]+' '+limitations[4]},{id:'durations',label:'Duration samples',definition:limitations[5]},{id:'receipt',label:'Not handover compliance',definition:limitations[7]}],sourceLimitations:limitations,
+  sections:[section('reviews','Logical Reviews','canonical review group',[limitations[0],limitations[7]]),section('members','Original Review Records','original workflow / canonical group',[limitations[2],limitations[4]]),
+   section('lifecycle','Lifecycle Events','source evidence record / original workflow',[limitations[3],limitations[5],limitations[9]]),section('gaps','Evidence Gaps','excluded original workflow',[limitations[2]])]};
+}
+async function lookup(client,{actor,parameters,search='',offset=0,value=null}) {
+ const {rows}=await client.query('SELECT shiftly_api.fn_handover_review_follow_up_reviewers($1,$2::jsonb,$3,$4,$5) value',[actor,parameters,search,offset,value]);return rows[0].value;
+}
+function pageDetails(data,offset,limit) {
+ const ids=new Set(data.sections.find(s=>s.id==='reviews').rows.slice(offset,offset+limit).map(r=>r.reviewId));
+ return Object.fromEntries(['members','lifecycle'].map(id=>[id,data.sections.find(s=>s.id===id).rows.filter(r=>ids.has(r.reviewId))]));
+}
+module.exports={read,lookup,pageDetails};
