@@ -64,9 +64,9 @@ const reports = [
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('patients','Patients','encounter at the daily cutoff'),section('factors','Care factors','active recorded factor per encounter')],
     ['encounter'],['location'], 'DAY_SNAPSHOT'),
-  definition('changes_since_previous_shift','Changes since the previous shift','Recorded clinical changes, with effective and recording times.',
-    [...org,'intervalMode','fromDate','toDate','fromTime','toTime','changeCategory','encounterId','actorId'], ['intervalMode'], [PATIENT,STAFF],
-    [section('changes','Changes','evidenced source change'),section('fields','Field Changes','changed field linked to a source change')], ['timeline'],['effectiveTime','recordedTime'], 'EVENT_INTERVAL'),
+  definition('changes_since_previous_shift','Daily changes','Patient and published staff changes during the selected date, or so far today.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF],
+    [section('changes','Changes','changed item during the selected day')], ['timeline'],['effectiveTime'], 'DAY_INTERVAL'),
   definition('incoming_shift_readiness','Incoming shift readiness','The recorded staffing and competency plan for a target shift.',
     [...org,'shiftDate','shiftTypeId','targetContextKey'], ['unitId','shiftDate','targetContextKey'], [PATIENT,STAFF,REVIEW],
     [section('findings','Readiness Findings','recorded condition / affected source'),section('overview','Overview','measure / denominator'),
@@ -93,12 +93,8 @@ Object.assign(reports[0], { available:true, unavailableReason:'', fieldOverrides
 Object.assign(reports[1], {available:true,unavailableReason:'',fieldOverrides:{
   shiftDate:{label:'Shift date',semantics:'End of the selected date; today shows data so far. Choose today or an earlier date.'},
 } });
-Object.assign(reports[2], {available:true,unavailableReason:'',defaults:{...reports[2].defaults,intervalMode:'BUSINESS_DATES'},fieldOverrides:{
-  fromDate:{dependsOn:['intervalMode'],visibleWhen:{intervalMode:'BUSINESS_DATES'}},
-  toDate:{dependsOn:['intervalMode'],visibleWhen:{intervalMode:'BUSINESS_DATES'}},
-  fromTime:{visibleWhen:{intervalMode:'EXACT_TIMES'}},toTime:{visibleWhen:{intervalMode:'EXACT_TIMES'}},
-  encounterId:{lookup:'changes',dependsOn:['divisionId','departmentId','unitId','intervalMode','fromDate','toDate','fromTime','toTime','changeCategory'],semantics:'Encounter identity from authorized evidenced changes in this interval; patient ID and encounter number remain distinct.'},
-  actorId:{lookup:'changes',dependsOn:['divisionId','departmentId','unitId','intervalMode','fromDate','toDate','fromTime','toTime','changeCategory','encounterId'],semantics:'Recorded actor on the selected change fields; never assigned staff. Unknown actors remain visible when unfiltered.'},
+Object.assign(reports[2], {available:true,unavailableReason:'',fieldOverrides:{
+  shiftDate:{label:'Shift date',semantics:'Changes during the selected date; today shows changes so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[3], {available:true,unavailableReason:'',fieldOverrides:{
   shiftDate:{label:'Target shift date',semantics:'Business start date. Today also offers a running overnight context or next-day context; selecting it applies its actual date. Completed-shift readiness is unavailable.'},
@@ -175,13 +171,6 @@ function parameters(def, input, { partial = false } = {}) {
     if (out[key] && (!out.unitId || !out.shiftDate)) throw fail('Choose a unit and dated shift before its context.');
   }
   if (out.outgoingContextId && out.outgoingContextId === out.incomingContextId) throw fail('Choose two different shift contexts.');
-  if (def.id==='changes_since_previous_shift') {
-    const mode=out.intervalMode||def.defaults.intervalMode;
-    if (mode==='BUSINESS_DATES' && (out.fromTime || out.toTime)) throw fail('Clear exact times when using business dates.');
-    if (mode==='EXACT_TIMES' && (out.fromDate || out.toDate)) throw fail('Clear business dates when using exact times.');
-    if (!partial && (mode==='BUSINESS_DATES' ? !out.fromDate||!out.toDate : !out.fromTime||!out.toTime)) throw fail('Choose both ends of the event interval.');
-    if (out.fromTime && out.toTime && (Date.parse(out.toTime)<=Date.parse(out.fromTime) || Date.parse(out.toTime)-Date.parse(out.fromTime)>31*86400000+3600000)) throw fail('Choose a positive event interval of at most 31 business days.');
-  }
   if (def.id==='workload_and_continuity' && (out.assignedStaffId||out.staffTypeId) && (!out.outgoingContextId||!out.incomingContextId)) throw fail('Choose both actual shift contexts before staff filters.');
   if (def.id==='outstanding_handover_issues') {
     const mode=out.issueTimeMode||def.defaults.issueTimeMode;

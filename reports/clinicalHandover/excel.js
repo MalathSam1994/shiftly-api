@@ -17,6 +17,26 @@ function style(sheet, widths) {
 }
 async function excel(data) {
   const book=new ExcelJS.Workbook();book.creator='ShiftMix';book.created=new Date(data.generatedAt);
+  if(data.reportId==='changes_since_previous_shift' && data.changeContext?.version===2) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Daily changes','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.changeContext.date]);
+    overview.addRow(['Period',data.changeContext.completeDay?'Whole day':'Today so far']);
+    overview.addRow(['From',data.changeContext.start]);overview.addRow(['Until (exclusive)',data.changeContext.endExclusive]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    overview.addRow(['Recorded changes',data.totals.changes]);overview.addRow(['Patients with changes',data.totals.changedEncounters]);
+    overview.addRow(['Note','One row per changed item. Based on recorded history; missing records may leave gaps.']);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
+    style(overview,[30,85]);
+    const changes=book.addWorksheet('Changes'),section=data.sections.find(s=>s.id==='changes');
+    changes.addRow(section.columns.map(c=>c.label));
+    for(const row of section.rows) {
+      const added=changes.addRow(section.columns.map(c=>row[c.key]??''));
+      section.columns.forEach((c,i)=>{if(c.type==='identifier')added.getCell(i+1).numFmt='@';});
+    }
+    if(!section.rows.length)changes.addRow(['No recorded changes for this unit during the selected date.']);
+    style(changes,[32,30,24,24,35,45,45,55]);
+    return book.xlsx.writeBuffer();
+  }
   if(data.reportId==='patient_handover_sheet' && data.patientContext?.version===2) {
     const overview=book.addWorksheet('Overview');overview.addRow(['Patient handover sheet','Value']);
     overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.patientContext.date]);

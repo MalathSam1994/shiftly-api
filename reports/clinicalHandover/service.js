@@ -47,7 +47,6 @@ async function selectionLookup(client,actor,def,key,params,search='',offset=0,va
       [actor,key,params,search,offset,value]);
     return rows[0].value;
   }
-  if (def.id==='changes_since_previous_shift' && ['encounterId','actorId'].includes(key)) return shiftChanges.lookup(client,{actor,field:key,parameters:params,search,offset,value});
   if (def.id==='handover_review_follow_up' && key==='reviewerId') return reviewFollowUp.lookup(client,{actor,parameters:params,search,offset,value});
   if (def.id==='workload_and_continuity' && ['assignedStaffId','staffTypeId'].includes(key)) return workload.lookup(client,{actor,field:key,parameters:params,search,offset,value});
   if (def.id==='outstanding_handover_issues' && key==='issueReason') return outstandingIssues.lookup(client,{actor,parameters:params,search,offset,value});
@@ -163,9 +162,9 @@ async function generate(actor,id,input) {
     const rowCount=validateDataset(def,result);
     return {...result,reportId:id,title:def.title,schemaVersion:1,parameters:ctx.parameters,selections,
       authorizedScope,scopeLabel:[ctx.unit_name,...ctx.pairs.map(p=>`${p.department_name} | ${p.division_name}`)].filter(Boolean).join(' / '),
-      businessTimezone:ctx.business_timezone,referenceTime:result.patientContext?.reference||result.unitContext?.reference||result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
+      businessTimezone:ctx.business_timezone,referenceTime:result.changeContext?.reference||result.patientContext?.reference||result.unitContext?.reference||result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
       generatedAt:dataReferenceTime,intervalStart:result.patientContext?.start||result.unitContext?.start||result.readinessContext?.start||result.changeContext?.start||ctx.interval_start,intervalEndExclusive:result.patientContext?.endExclusive||result.unitContext?.endExclusive||result.readinessContext?.end||result.changeContext?.endExclusive||ctx.interval_end_exclusive,
-      planningBasis:(result.unitContext||result.patientContext?.version===2)?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
+      planningBasis:result.changeContext?.version===2?'Changes during the selected date; today includes recorded changes so far.':(result.unitContext||result.patientContext?.version===2)?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
   });
   if (Buffer.byteLength(JSON.stringify(dataset),'utf8')>MAX_BYTES) throw registry.fail('Report exceeds the 10 MB generation limit. Narrow the scope.',413,'REPORT_TOO_LARGE');
   return transaction(false,async client=>{
@@ -205,7 +204,7 @@ function preview(dataset,sectionId,offset,limit) {
   if (id&&!dataset.sections.some(s=>s.id===id)) throw registry.fail('Choose an available report section.');
   const {authorizedScope,...publicData}=dataset;
   const patientDetails=dataset.reportId==='patient_handover_sheet' && id==='patients' ? patientSheet.pageDetails(dataset,offset,limit) : undefined;
-  const changeDetails=dataset.reportId==='changes_since_previous_shift' && id==='changes' ? shiftChanges.pageDetails(dataset,offset,limit) : undefined;
+  const changeDetails=dataset.reportId==='changes_since_previous_shift' && dataset.changeContext?.version!==2 && id==='changes' ? shiftChanges.pageDetails(dataset,offset,limit) : undefined;
   const issueDetails=dataset.reportId==='outstanding_handover_issues' && id==='issues' ? outstandingIssues.pageDetails(dataset,offset,limit) : undefined;
   const reviewDetails=dataset.reportId==='handover_review_follow_up' && id==='reviews' ? reviewFollowUp.pageDetails(dataset,offset,limit) : undefined;
   return {...publicData,...(reviewDetails?{reviewDetails}:{}),...(issueDetails?{issueDetails}:{}),...(patientDetails?{patientDetails}:{}),...(changeDetails?{changeDetails}:{}),sections:dataset.sections.map(s=>({...s,rows:s.id===id?s.rows.slice(offset,offset+limit):[]})),
@@ -299,7 +298,9 @@ function exportData(dataset) {
   const savedDefinition=dataset.reportId==='unit_handover_summary' && !dataset.unitContext
     ? {...def,sections:['overview','distributions','exceptions','patients','movements'].map(id=>({id}))}
     : dataset.reportId==='patient_handover_sheet' && dataset.patientContext?.version!==2
-      ? {...def,sections:['patients','factors','events','issues'].map(id=>({id}))} : def;
+      ? {...def,sections:['patients','factors','events','issues'].map(id=>({id}))}
+      : dataset.reportId==='changes_since_previous_shift' && dataset.changeContext?.version!==2
+        ? {...def,sections:['changes','fields'].map(id=>({id}))} : def;
   const count=validateDataset(savedDefinition,dataset);
   if (count!==dataset.rowCount) throw registry.fail('The complete saved report is unavailable. Generate the report again.',500,'REPORT_CONTRACT');
   const {authorizedScope,...data}=dataset; return data;
