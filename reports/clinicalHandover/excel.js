@@ -108,6 +108,25 @@ async function excel(data) {
     style(patients,[20,30,24,20,20,32]);
     return book.xlsx.writeBuffer();
   }
+  if(data.reportId==='workload_and_continuity' && data.workloadContext?.version===2) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Daily workload and assignments','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.workloadContext.date]);
+    overview.addRow(['Report time',data.workloadContext.completeDay?'End of day':data.workloadContext.reference]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const m of data.summaries)overview.addRow([m.label,m.value??'Not recorded']);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
+    style(overview,[32,90]);
+    for(const section of data.sections) {
+      const sheet=book.addWorksheet(section.title);sheet.addRow(section.columns.map(c=>c.label));
+      for(const row of section.rows) {
+        const added=sheet.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+        section.columns.forEach((c,i)=>{if(c.type==='identifier')added.getCell(i+1).numFmt='@';});
+      }
+      if(!section.rows.length)sheet.addRow([section.id==='staff'?'No staff workload records available for this date.':'No unit patient assignment records available for this date.']);
+      style(sheet,section.columns.map(c=>c.type==='number'?18:32));
+    }
+    return book.xlsx.writeBuffer();
+  }
   const unit=data.reportId==='unit_handover_summary';
   const patient=data.reportId==='patient_handover_sheet';
   const changes=data.reportId==='changes_since_previous_shift';

@@ -74,10 +74,10 @@ const reports = [
   definition('outstanding_handover_issues','Daily outstanding issues','Recorded outstanding issues at the end of the selected date, or so far today.',
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('issues','Outstanding issues','recorded primary issue')], ['priority'],['severity'], 'DAY_SNAPSHOT'),
-  definition('workload_and_continuity','Workload balance and continuity of responsibility','Published workload, shared staff load and responsibility across two explicit shifts.',
-    [...org,'shiftDate','shiftTypeId','outgoingContextId','incomingContextId','assignedStaffId','staffTypeId'], ['unitId','shiftDate','outgoingContextId','incomingContextId'], [PATIENT,STAFF],
-    [section('staff','Staff Workload','person / actual context'),section('allocations','Published Patient Allocations','encounter / comparison side'),section('continuity','Continuity','encounter across compared shifts')],
-    ['shift','staff'],['staff','workload'], 'SHIFT_COMPARISON'),
+  definition('workload_and_continuity','Daily workload and assignments','Recorded workload and published patient assignments by shift on the selected date.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF],
+    [section('staff','Staff workload','person / actual shift'),section('allocations','Patient assignments','encounter / actual shift')],
+    ['shift'],['staff'], 'DAY_SHIFTS'),
   definition('handover_review_follow_up','Handover review follow-up','Follow first detection, review and publication without implying receipt.',
     [...org,'fromDate','toDate','shiftDate','shiftTypeId','reviewStatus','reviewerId'], ['fromDate','toDate'], [PATIENT,STAFF,REVIEW],
     [section('reviews','Logical Reviews','canonical group; first handover detection in range'),section('members','Original Review Records','original workflow / group'),section('lifecycle','Lifecycle Events','recorded source evidence / workflow'),section('gaps','Evidence Gaps','excluded original workflow')], ['reviewStatus','unit'],['firstDetected','reviewedTime'], 'FIRST_DETECTION'),
@@ -99,11 +99,7 @@ Object.assign(reports[4], {available:true,unavailableReason:'',fieldOverrides:{
  shiftDate:{label:'Shift date',semantics:'Recorded outstanding issues at the end of the selected date; today shows the latest recorded state. Choose today or an earlier date.'},
 } });
 Object.assign(reports[5], {available:true,unavailableReason:'',fieldOverrides:{
- shiftDate:{label:'Incoming shift date'},shiftTypeId:{label:'Incoming shift type (optional)'},
- incomingContextId:{label:'Incoming approved context',dependsOn:['unitId','shiftDate','shiftTypeId'],semantics:'Workload observation at actual start. Explicit interval; future means current recorded plan.'},
- outgoingContextId:{label:'Outgoing approved context',semantics:'Observation immediately before its end or incoming start (earlier); not a pooled shift total.'},
- assignedStaffId:{label:'Staff (display filter)',lookup:'workload',dependsOn:['unitId','shiftDate','outgoingContextId','incomingContextId','staffTypeId'],semantics:'Selected staff rows and applicable responsibility on either side. Latest publication selected first; full-unit benchmark stays independent.'},
- staffTypeId:{lookup:'workload',dependsOn:['unitId','shiftDate','outgoingContextId','incomingContextId'],semantics:'Recorded type in either selected context, never a patient subset. Full departmental load remains visible per staff row.'},
+ shiftDate:{label:'Shift date',semantics:'Shifts starting on this date, observed by shift end or day end. Today shows started shifts so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[6], {available:true,unavailableReason:'',fieldOverrides:{
  fromDate:{label:'First handover detection - from',semantics:'Inclusive business date of the logical group first evidenced HANDOVER detection, not target shift date.'},
@@ -162,7 +158,6 @@ function parameters(def, input, { partial = false } = {}) {
     if (out[key] && (!out.unitId || !out.shiftDate)) throw fail('Choose a unit and dated shift before its context.');
   }
   if (out.outgoingContextId && out.outgoingContextId === out.incomingContextId) throw fail('Choose two different shift contexts.');
-  if (def.id==='workload_and_continuity' && (out.assignedStaffId||out.staffTypeId) && (!out.outgoingContextId||!out.incomingContextId)) throw fail('Choose both actual shift contexts before staff filters.');
   if (!partial) for (const key of def.required) if (out[key] == null) throw fail(`${fields[key].label} is required.`);
   return { ...def.defaults, ...out };
 }

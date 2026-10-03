@@ -14,7 +14,7 @@ test('daily readiness requires exactly four fields and removes target/type/sort 
  for(const key of ['targetContextKey','shiftTypeId','incomingContextId','outgoingContextId','fromDate','toDate'])
   assert.throws(()=>registry.parameters(definition,{...input,[key]:'1'}),/not supported/);
  assert.throws(()=>registry.parameters(definition,{...input,sortBy:'status'}));
- assert.throws(()=>registry.parameters(registry.report('workload_and_continuity'),input),/required/);
+ assert.throws(()=>registry.parameters(registry.report('handover_review_follow_up'),{divisionId:1,departmentId:39,unitId:2}),/required/);
 });
 async function dataset(){
  const value={context:{version:2,date:input.shiftDate,historical:true,basis:'HISTORICAL'},

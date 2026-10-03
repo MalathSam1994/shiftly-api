@@ -16,7 +16,7 @@ test('daily changes has four required filters and rejects the old range, exact-t
     assert.throws(()=>registry.parameters(definition,{...input,[key]:1}),/not supported/);
   }
   assert.throws(()=>registry.parameters(definition,{...input,sortBy:'recordedTime'}));
-  assert.throws(()=>registry.parameters(registry.report('workload_and_continuity'),input),/required/);
+  assert.throws(()=>registry.parameters(registry.report('handover_review_follow_up'),{divisionId:1,departmentId:39,unitId:2}),/required/);
 });
 async function dataset() {
   const value={changeContext:{version:2,date:'2026-09-23',start:'2026-09-23T00:00:00+02:00',endExclusive:'2026-09-24T00:00:00+02:00',completeDay:true,basis:'HISTORICAL'},

@@ -21,7 +21,7 @@ test('patient sheet requires exactly the four daily fields, with no shift select
     'encounterIds','incomingStaffId','outgoingStaffId','acuityLevelId','clinicalStatus']) {
     assert.throws(()=>registry.parameters(definition,{...input,[key]:1}),/not supported/);
   }
-  assert.throws(()=>registry.parameters(registry.report('workload_and_continuity'),input),/required/);
+  assert.throws(()=>registry.parameters(registry.report('handover_review_follow_up'),{divisionId:1,departmentId:39,unitId:2}),/required/);
 });
 
 function raw() {

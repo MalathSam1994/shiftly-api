@@ -16,7 +16,7 @@ test('daily outstanding issues uses exactly four required fields without old mod
  assert.throws(()=>registry.parameters(definition,{...input,sortBy:'firstDetected'}));
  assert.throws(()=>registry.parameters(definition,{...input,groupBy:'unit'}));
  assert.equal(registry.parameters(definition,{divisionId:1},{partial:true}).divisionId,1);
- assert.throws(()=>registry.parameters(registry.report('workload_and_continuity'),input),/required/);
+ assert.throws(()=>registry.parameters(registry.report('handover_review_follow_up'),{divisionId:1,departmentId:39,unitId:2}),/required/);
 });
 async function dataset(){
  const value={context:{version:2,date:input.shiftDate,completeDay:false,historical:false,reference:'2026-10-03T13:29:00+02:00'},
