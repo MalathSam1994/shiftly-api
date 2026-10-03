@@ -13,7 +13,7 @@ async function read(client,{actor,parameters}) {
   return {
     rowGrain:'One encounter in the unit at the end of the selected date, or at generation time today.',
     patientContext:data.patientContext,totals:data.totals,
-    summaries:[{label:'Patients',value:data.totals.patients,availability:'AVAILABLE',definition:'Patients with a recorded unit location at the report time.'}],
+    summaries:[{label:'Patients',value:data.totals.patients,availability:'AVAILABLE',definition:'Patients located by dated history or an encounter unit saved by the report time.'}],
     metricDefinitions:[],sourceLimitations:data.notes,
     sections:Object.entries(columns).map(([id,cols])=>({id,title:id==='patients'?'Patients':'Care factors',
       grain:id==='patients'?'encounter at the daily cutoff':'active recorded factor per encounter',

@@ -13,7 +13,7 @@ async function read(client,{actor,parameters}) {
   return {
     rowGrain:'One encounter in the unit at the end of the selected date, or at generation time today.',
     unitContext:data.unitContext,dailySummary:data.dailySummary,totals:data.totals,
-    summaries:[{label:'Patients',value:data.dailySummary.patients,availability:'AVAILABLE',definition:'Patients with a recorded unit location at the report time.'}],
+    summaries:[{label:'Patients',value:data.dailySummary.patients,availability:'AVAILABLE',definition:'Patients located by dated history or an encounter unit saved by the report time.'}],
     metricDefinitions:[],sourceLimitations:data.notes,
     sections:[section('overview','Overview','measure per unit/day'),section('patients','Patients','encounter at the daily cutoff')],
   };
