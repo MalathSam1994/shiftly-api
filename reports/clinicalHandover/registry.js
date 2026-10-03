@@ -78,9 +78,9 @@ const reports = [
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF],
     [section('staff','Staff workload','person / actual shift'),section('allocations','Patient assignments','encounter / actual shift')],
     ['shift'],['staff'], 'DAY_SHIFTS'),
-  definition('handover_review_follow_up','Handover review follow-up','Follow first detection, review and publication without implying receipt.',
-    [...org,'fromDate','toDate','shiftDate','shiftTypeId','reviewStatus','reviewerId'], ['fromDate','toDate'], [PATIENT,STAFF,REVIEW],
-    [section('reviews','Logical Reviews','canonical group; first handover detection in range'),section('members','Original Review Records','original workflow / group'),section('lifecycle','Lifecycle Events','recorded source evidence / workflow'),section('gaps','Evidence Gaps','excluded original workflow')], ['reviewStatus','unit'],['firstDetected','reviewedTime'], 'FIRST_DETECTION'),
+  definition('handover_review_follow_up','Patient assignment timeline','Patient coverage across scheduled and missing shifts, with published nurses and times.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
+    [section('coverage','Patient assignment matrix','patient / expected shift')], ['timeline'],['effectiveTime'], 'DAY_PLAN'),
 ];
 // Only implemented readers are enabled. Per-report overrides leave other forms unchanged.
 Object.assign(reports[0], { available:true, unavailableReason:'', fieldOverrides:{
@@ -102,12 +102,7 @@ Object.assign(reports[5], {available:true,unavailableReason:'',fieldOverrides:{
  shiftDate:{label:'Shift date',semantics:'Shifts starting on this date, observed by shift end or day end. Today shows started shifts so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[6], {available:true,unavailableReason:'',fieldOverrides:{
- fromDate:{label:'First handover detection - from',semantics:'Inclusive business date of the logical group first evidenced HANDOVER detection, not target shift date.'},
- toDate:{label:'First handover detection - through',semantics:'Inclusive cohort end. Later review/publication activity is included through generation time.'},
- shiftDate:{default:null,label:'Target shift date (optional)',semantics:'Recorded workflow shift start date, independent of detection-date cohort. No current roster context is invented.'},
- shiftTypeId:{label:'Target shift type (optional)',semantics:'Recorded workflow shift type. Captured actual staff intervals stay in detail; default type times are never substituted.'},
- reviewStatus:{label:'Current canonical workflow status',semantics:'Current root status at generation. A skip is a separate recorded decision and may leave the workflow REVIEWED or OPEN.'},
- reviewerId:{lookup:'reviewFollowUp',label:'Recorded review actor (optional)',dependsOn:['divisionId','departmentId','unitId','fromDate','toDate','shiftDate','shiftTypeId','reviewStatus'],semantics:'Recorded OPENED/review actor after first handover detection; not assigned staff or notified recipient.'},
+ shiftDate:{label:'Shift date',semantics:'Shifts starting on this date, including planned and missing assignments. Future dates show the recorded plan and current patients.'},
 } });
 function fail(message, status = 400, code = 'REPORT_VALIDATION') {
   return Object.assign(new Error(message), { status, code });

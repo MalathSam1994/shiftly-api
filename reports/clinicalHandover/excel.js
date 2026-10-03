@@ -127,6 +127,75 @@ async function excel(data) {
     }
     return book.xlsx.writeBuffer();
   }
+  if(data.reportId==='handover_review_follow_up' && data.reviewContext?.version===4) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Patient assignment timeline','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.reviewContext.date]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const m of data.summaries)overview.addRow([m.label,m.value]);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);style(overview,[32,100]);
+    const rows=data.sections.find(s=>s.id==='coverage').rows,shifts=data.reviewContext.shifts;
+    const patients=[...new Map(rows.map(r=>[r.encounterId,r])).values()];
+    // Keep the matrix compact while preserving a typed, filterable source sheet.
+    const matrix=book.addWorksheet('Patient coverage');
+    matrix.addRow(['Patient / room',...shifts.map(s=>`${s.label}\n${s.hours}${s.defaultHours?' (expected)':''}`)]);
+    matrix.addRow(['Scheduled staff',...shifts.map(s=>`${s.scheduled}${s.required==null?'':` / ${s.required} required`}\n${s.staff}`)]);
+    const lookup=new Map(rows.map(r=>[`${r.encounterId}:${r.shiftKey}`,r]));
+    for(const patient of patients)matrix.addRow([`${patient.patient}\n${patient.location}`,...shifts.map(s=>{
+      const r=lookup.get(`${patient.encounterId}:${s.key}`);
+      return r?.state==='ASSIGNED'?`${r.nurse}\nPublished ${r.publishedAt}${r.nurseScheduled?'':'\nNo matching schedule'}`:
+        r?.state==='NO_SCHEDULE'?'□ No schedule / no assignment':r?.state==='SCHEDULED_UNASSIGNED'?'□ Scheduled / no assignment':'Not recorded';
+    })]);
+    if(!patients.length)matrix.addRow(['No patients with a recorded unit location at the report time.']);
+    style(matrix,[38,...shifts.map(()=>45)]);matrix.views=[{state:'frozen',xSplit:1,ySplit:2}];
+    matrix.pageSetup.orientation='landscape';matrix.pageSetup.printTitlesRow='1:2';
+    patients.forEach((p,i)=>shifts.forEach((s,j)=>{
+      const r=lookup.get(`${p.encounterId}:${s.key}`),cell=matrix.getCell(i+3,j+2);
+      const red=r?.state==='NO_SCHEDULE',assigned=r?.state==='ASSIGNED';
+      cell.font={...cell.font,color:{argb:red?'FFC43C3C':assigned?'FF246557':'FF606B76'}};
+      cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:red?'FFFFF3F3':assigned?'FFEAF6F1':'FFF7F8FA'}};
+    }));
+    const detail=book.addWorksheet('Coverage data'),section=data.sections.find(s=>s.id==='coverage');
+    detail.addRow(section.columns.map(c=>c.label));for(const row of rows)detail.addRow(section.columns.map(c=>row[c.key]??''));
+    style(detail,[38,24,24,32,32,36]);return book.xlsx.writeBuffer();
+  }
+  if(data.reportId==='handover_review_follow_up' && data.reviewContext?.version===3) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Patient assignment timeline','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Publication date',data.reviewContext.date]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const m of data.summaries)overview.addRow([m.label,m.value??'Not recorded']);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);style(overview,[32,100]);
+    const section=data.sections.find(s=>s.id==='changes'),sheet=book.addWorksheet('Assignment timeline');
+    sheet.addRow(section.columns.map(c=>c.label));
+    for(const row of section.rows)sheet.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+    if(!section.rows.length)sheet.addRow(['No published assignment changes recorded during this date.']);
+    style(sheet,[32,38,32,28,32,28]);
+    for(let r=1;r<=sheet.rowCount;r++) {
+      for(const c of [3,4,5,6]) {
+        const cell=sheet.getCell(r,c);cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:c<5?'FFEAF0F7':'FFE5F2EE'}};
+        if(r===1)cell.font={...cell.font,color:{argb:'FF243746'}};
+      }
+    }
+    sheet.views=[{state:'frozen',xSplit:2,ySplit:1}];
+    return book.xlsx.writeBuffer();
+  }
+  if(data.reportId==='handover_review_follow_up' && data.reviewContext?.version===2) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Daily handover review','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.reviewContext.date]);
+    overview.addRow(['Report time',data.reviewContext.completeDay?'End of day':data.reviewContext.reference]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const m of data.summaries)overview.addRow([m.label,m.value??'Not recorded']);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
+    style(overview,[32,90]);
+    const section=data.sections.find(s=>s.id==='reviews'),sheet=book.addWorksheet('Handover reviews');
+    sheet.addRow(section.columns.map(c=>c.label));
+    for(const row of section.rows) {
+      const added=sheet.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+      section.columns.forEach((c,i)=>{if(c.type==='identifier')added.getCell(i+1).numFmt='@';});
+    }
+    if(!section.rows.length)sheet.addRow(['No handover review records available for this shift date by the report time.']);
+    style(sheet,[20,60,32,24,28,32,28]);
+    return book.xlsx.writeBuffer();
+  }
   const unit=data.reportId==='unit_handover_summary';
   const patient=data.reportId==='patient_handover_sheet';
   const changes=data.reportId==='changes_since_previous_shift';
