@@ -17,6 +17,26 @@ function style(sheet, widths) {
 }
 async function excel(data) {
   const book=new ExcelJS.Workbook();book.creator='ShiftMix';book.created=new Date(data.generatedAt);
+  if(data.reportId==='incoming_shift_readiness' && data.readinessContext?.version===2) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Daily staffing readiness','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.readinessContext.date]);
+    overview.addRow(['Period','All shifts starting on this date']);
+    overview.addRow(['Basis',data.readinessContext.historical?'Retained schedule':'Recorded plan']);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const summary of data.summaries)overview.addRow([summary.label,summary.value]);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
+    style(overview,[30,85]);
+    for(const section of data.sections) {
+      const sheet=book.addWorksheet(section.title);sheet.addRow(section.columns.map(c=>c.label));
+      for(const row of section.rows) {
+        const added=sheet.addRow(section.columns.map(c=>row[c.key]??(c.key==='eligible'?'Not available':c.type==='number'?'Not recorded':'')));
+        section.columns.forEach((c,i)=>{if(c.type==='identifier')added.getCell(i+1).numFmt='@';});
+      }
+      if(!section.rows.length)sheet.addRow([section.id==='staffing'?'No staffing requirements or roster recorded for this date.':'No staff scheduled for this date.']);
+      style(sheet,section.columns.map(c=>c.key==='notes'||c.key==='note'?65:c.type==='number'?18:32));
+    }
+    return book.xlsx.writeBuffer();
+  }
   if(data.reportId==='changes_since_previous_shift' && data.changeContext?.version===2) {
     const overview=book.addWorksheet('Overview');overview.addRow(['Daily changes','Value']);
     overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.changeContext.date]);

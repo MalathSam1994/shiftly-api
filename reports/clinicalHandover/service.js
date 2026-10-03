@@ -50,7 +50,6 @@ async function selectionLookup(client,actor,def,key,params,search='',offset=0,va
   if (def.id==='handover_review_follow_up' && key==='reviewerId') return reviewFollowUp.lookup(client,{actor,parameters:params,search,offset,value});
   if (def.id==='workload_and_continuity' && ['assignedStaffId','staffTypeId'].includes(key)) return workload.lookup(client,{actor,field:key,parameters:params,search,offset,value});
   if (def.id==='outstanding_handover_issues' && key==='issueReason') return outstandingIssues.lookup(client,{actor,parameters:params,search,offset,value});
-  if (def.id==='incoming_shift_readiness' && key==='targetContextKey') return readiness.lookup(client,{actor,parameters:params,search,offset,value});
   return lookup(client,actor,registry.fields[key].lookup,params,search,offset,value);
 }
 async function resolveSelections(client, actor, def, params) {
@@ -163,8 +162,8 @@ async function generate(actor,id,input) {
     return {...result,reportId:id,title:def.title,schemaVersion:1,parameters:ctx.parameters,selections,
       authorizedScope,scopeLabel:[ctx.unit_name,...ctx.pairs.map(p=>`${p.department_name} | ${p.division_name}`)].filter(Boolean).join(' / '),
       businessTimezone:ctx.business_timezone,referenceTime:result.changeContext?.reference||result.patientContext?.reference||result.unitContext?.reference||result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
-      generatedAt:dataReferenceTime,intervalStart:result.patientContext?.start||result.unitContext?.start||result.readinessContext?.start||result.changeContext?.start||ctx.interval_start,intervalEndExclusive:result.patientContext?.endExclusive||result.unitContext?.endExclusive||result.readinessContext?.end||result.changeContext?.endExclusive||ctx.interval_end_exclusive,
-      planningBasis:result.changeContext?.version===2?'Changes during the selected date; today includes recorded changes so far.':(result.unitContext||result.patientContext?.version===2)?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
+      generatedAt:dataReferenceTime,intervalStart:result.patientContext?.start||result.unitContext?.start||result.readinessContext?.start||result.changeContext?.start||ctx.interval_start,intervalEndExclusive:result.patientContext?.endExclusive||result.unitContext?.endExclusive||result.readinessContext?.endExclusive||result.readinessContext?.end||result.changeContext?.endExclusive||ctx.interval_end_exclusive,
+      planningBasis:result.readinessContext?.version===2?'All shifts starting on the selected date; past dates show retained schedules, current and future dates show the recorded plan.':result.changeContext?.version===2?'Changes during the selected date; today includes recorded changes so far.':(result.unitContext||result.patientContext?.version===2)?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
   });
   if (Buffer.byteLength(JSON.stringify(dataset),'utf8')>MAX_BYTES) throw registry.fail('Report exceeds the 10 MB generation limit. Narrow the scope.',413,'REPORT_TOO_LARGE');
   return transaction(false,async client=>{
@@ -215,7 +214,7 @@ function preview(dataset,sectionId,offset,limit) {
 async function readinessTarget(actor,id,key) {
  const data=await retrieve(actor,id);
  if(data.reportId!=='incoming_shift_readiness') throw registry.fail('This report has no readiness actions.');
- const finding=data.sections.find(s=>s.id==='findings').rows.find(r=>r.key===key);
+ const finding=data.sections.find(s=>s.id==='findings')?.rows.find(r=>r.key===key);
  const permission={BOARD:'screen:clinical_assignment_board:open',STAFF_POOL:'screen:clinical_staff_pool:open',SHIFTS:'screen:shift_periods:open'}[finding?.destination];
  if(!finding||!permission) throw registry.fail('Use the saved finding details; there is no supported context action.',409,'REPORT_TARGET_UNAVAILABLE');
  return transaction(true,async client=>{
@@ -300,7 +299,9 @@ function exportData(dataset) {
     : dataset.reportId==='patient_handover_sheet' && dataset.patientContext?.version!==2
       ? {...def,sections:['patients','factors','events','issues'].map(id=>({id}))}
       : dataset.reportId==='changes_since_previous_shift' && dataset.changeContext?.version!==2
-        ? {...def,sections:['changes','fields'].map(id=>({id}))} : def;
+        ? {...def,sections:['changes','fields'].map(id=>({id}))}
+        : dataset.reportId==='incoming_shift_readiness' && dataset.readinessContext?.version!==2
+          ? {...def,sections:['findings','overview','requirements','staff','patients','competencies','capacity','pending'].map(id=>({id}))} : def;
   const count=validateDataset(savedDefinition,dataset);
   if (count!==dataset.rowCount) throw registry.fail('The complete saved report is unavailable. Generate the report again.',500,'REPORT_CONTRACT');
   const {authorizedScope,...data}=dataset; return data;

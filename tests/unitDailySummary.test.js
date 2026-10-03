@@ -18,7 +18,7 @@ test('removed shift and range parameters cannot silently alter a daily report',(
   for(const key of ['shiftTypeId','shiftContextId','incomingContextId','outgoingContextId','fromDate','toDate']) {
     assert.throws(()=>registry.parameters(registry.report('unit_handover_summary'),{...input,[key]:1}),/not supported/);
   }
-  assert.throws(()=>registry.parameters(registry.report('incoming_shift_readiness'),input),/required/);
+  assert.throws(()=>registry.parameters(registry.report('workload_and_continuity'),input),/required/);
 });
 test('daily Excel stays compact and preserves every patient and exact assessment time',async()=>{
   const value={unitContext:{version:2,date:'2026-09-23',completeDay:true,basis:'HISTORICAL'},

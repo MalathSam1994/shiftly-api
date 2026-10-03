@@ -67,13 +67,10 @@ const reports = [
   definition('changes_since_previous_shift','Daily changes','Patient and published staff changes during the selected date, or so far today.',
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF],
     [section('changes','Changes','changed item during the selected day')], ['timeline'],['effectiveTime'], 'DAY_INTERVAL'),
-  definition('incoming_shift_readiness','Incoming shift readiness','The recorded staffing and competency plan for a target shift.',
-    [...org,'shiftDate','shiftTypeId','targetContextKey'], ['unitId','shiftDate','targetContextKey'], [PATIENT,STAFF,REVIEW],
-    [section('findings','Readiness Findings','recorded condition / affected source'),section('overview','Overview','measure / denominator'),
-     section('requirements','Staffing Requirements','department capacity group'),section('staff','Scheduled Staff','approved working roster assignment'),
-     section('patients','Patient Coverage','current-baseline encounter'),section('competencies','Competency Findings','scheduled assignment / required competency'),
-     section('capacity','Capacity Findings','shared departmental load / scheduled row'),section('pending','Pending Reviews','review / proposal / saved incident')],
-    ['unit'],['staff','status'], 'TARGET_SHIFT'),
+  definition('incoming_shift_readiness','Daily staffing readiness','Staffing and clinical eligibility across all shifts on the selected date.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
+    [section('staffing','Staffing by shift','period / shift type / role'),section('staff','Scheduled staff','recorded roster assignment')],
+    ['unit'],['shift'], 'DAY_PLAN'),
   definition('outstanding_handover_issues','Outstanding issues for the incoming shift','Carried-over canonical issues, recorded lifecycle and direct source evidence.',
     [...org,'issueTimeMode','referenceTime','shiftDate','shiftTypeId','shiftContextId','issueDomain','issueCategory','issueReason','severity','issueLifecycle'], ['issueTimeMode'], [PATIENT,STAFF,REVIEW],
     [section('issues','Issues','canonical primary issue'),section('sources','Source Detail','linked source / issue'),section('lifecycle','Lifecycle Detail','recorded event / issue'),
@@ -97,8 +94,7 @@ Object.assign(reports[2], {available:true,unavailableReason:'',fieldOverrides:{
   shiftDate:{label:'Shift date',semantics:'Changes during the selected date; today shows changes so far. Choose today or an earlier date.'},
 } });
 Object.assign(reports[3], {available:true,unavailableReason:'',fieldOverrides:{
-  shiftDate:{label:'Target shift date',semantics:'Business start date. Today also offers a running overnight context or next-day context; selecting it applies its actual date. Completed-shift readiness is unavailable.'},
-  shiftTypeId:{semantics:'Optional target-type restriction; explicit roster times remain authoritative.'},
+  shiftDate:{label:'Shift date',semantics:'All shifts starting on this date. Past dates show retained schedules; today and future dates show the recorded plan.'},
 } });
 Object.assign(reports[4], {available:true,unavailableReason:'',defaults:{...reports[4].defaults,issueTimeMode:'NOW',issueLifecycle:'ACTIVE'},fieldOverrides:{
  referenceTime:{dependsOn:['issueTimeMode'],visibleWhen:{issueTimeMode:'REFERENCE'},semantics:'Exact reference with offset. Earlier detections remain included; historical source history may be incomplete.'},
