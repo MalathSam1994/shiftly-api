@@ -71,10 +71,9 @@ const reports = [
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('staffing','Staffing by shift','period / shift type / role'),section('staff','Scheduled staff','recorded roster assignment')],
     ['unit'],['shift'], 'DAY_PLAN'),
-  definition('outstanding_handover_issues','Outstanding issues for the incoming shift','Carried-over canonical issues, recorded lifecycle and direct source evidence.',
-    [...org,'issueTimeMode','referenceTime','shiftDate','shiftTypeId','shiftContextId','issueDomain','issueCategory','issueReason','severity','issueLifecycle'], ['issueTimeMode'], [PATIENT,STAFF,REVIEW],
-    [section('issues','Issues','canonical primary issue'),section('sources','Source Detail','linked source / issue'),section('lifecycle','Lifecycle Detail','recorded event / issue'),
-     section('associations','Direct Links','explicit encounter or user link'),section('gaps','Evidence Gaps','uncaptured or unrepresented source')], ['priority','unit','reason'],['severity','firstDetected'], 'REFERENCE'),
+  definition('outstanding_handover_issues','Daily outstanding issues','Recorded outstanding issues at the end of the selected date, or so far today.',
+    [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
+    [section('issues','Outstanding issues','recorded primary issue')], ['priority'],['severity'], 'DAY_SNAPSHOT'),
   definition('workload_and_continuity','Workload balance and continuity of responsibility','Published workload, shared staff load and responsibility across two explicit shifts.',
     [...org,'shiftDate','shiftTypeId','outgoingContextId','incomingContextId','assignedStaffId','staffTypeId'], ['unitId','shiftDate','outgoingContextId','incomingContextId'], [PATIENT,STAFF],
     [section('staff','Staff Workload','person / actual context'),section('allocations','Published Patient Allocations','encounter / comparison side'),section('continuity','Continuity','encounter across compared shifts')],
@@ -96,12 +95,8 @@ Object.assign(reports[2], {available:true,unavailableReason:'',fieldOverrides:{
 Object.assign(reports[3], {available:true,unavailableReason:'',fieldOverrides:{
   shiftDate:{label:'Shift date',semantics:'All shifts starting on this date. Past dates show retained schedules; today and future dates show the recorded plan.'},
 } });
-Object.assign(reports[4], {available:true,unavailableReason:'',defaults:{...reports[4].defaults,issueTimeMode:'NOW',issueLifecycle:'ACTIVE'},fieldOverrides:{
- referenceTime:{dependsOn:['issueTimeMode'],visibleWhen:{issueTimeMode:'REFERENCE'},semantics:'Exact reference with offset. Earlier detections remain included; historical source history may be incomplete.'},
- shiftDate:{default:null,dependsOn:['issueTimeMode'],visibleWhen:{issueTimeMode:'HANDOVER'}},
- shiftTypeId:{dependsOn:['divisionId','departmentId','unitId','issueTimeMode'],visibleWhen:{issueTimeMode:'HANDOVER'}},
- shiftContextId:{dependsOn:['unitId','shiftDate','shiftTypeId','issueTimeMode'],visibleWhen:{issueTimeMode:'HANDOVER'},label:'Incoming approved boundary'},
- issueReason:{lookup:'outstandingReasons',dependsOn:['divisionId','departmentId','unitId','issueTimeMode','referenceTime','shiftDate','shiftContextId','issueDomain','issueCategory']},
+Object.assign(reports[4], {available:true,unavailableReason:'',fieldOverrides:{
+ shiftDate:{label:'Shift date',semantics:'Recorded outstanding issues at the end of the selected date; today shows the latest recorded state. Choose today or an earlier date.'},
 } });
 Object.assign(reports[5], {available:true,unavailableReason:'',fieldOverrides:{
  shiftDate:{label:'Incoming shift date'},shiftTypeId:{label:'Incoming shift type (optional)'},
@@ -168,13 +163,6 @@ function parameters(def, input, { partial = false } = {}) {
   }
   if (out.outgoingContextId && out.outgoingContextId === out.incomingContextId) throw fail('Choose two different shift contexts.');
   if (def.id==='workload_and_continuity' && (out.assignedStaffId||out.staffTypeId) && (!out.outgoingContextId||!out.incomingContextId)) throw fail('Choose both actual shift contexts before staff filters.');
-  if (def.id==='outstanding_handover_issues') {
-    const mode=out.issueTimeMode||def.defaults.issueTimeMode;
-    if (mode!=='REFERENCE' && out.referenceTime) throw fail('Use Reference mode for an explicit time.');
-    if (mode!=='HANDOVER' && ['shiftDate','shiftTypeId','shiftContextId'].some(k=>out[k]!=null)) throw fail('Use Handover mode for shift-context filters.');
-    if (!partial && mode==='REFERENCE' && !out.referenceTime) throw fail('Enter the reference time with its UTC offset.');
-    if (!partial && mode==='HANDOVER' && (!out.unitId||!out.shiftDate||!out.shiftContextId)) throw fail('Choose the unit, shift date and explicit incoming boundary.');
-  }
   if (!partial) for (const key of def.required) if (out[key] == null) throw fail(`${fields[key].label} is required.`);
   return { ...def.defaults, ...out };
 }

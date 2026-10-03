@@ -17,6 +17,21 @@ function style(sheet, widths) {
 }
 async function excel(data) {
   const book=new ExcelJS.Workbook();book.creator='ShiftMix';book.created=new Date(data.generatedAt);
+  if(data.reportId==='outstanding_handover_issues' && data.issueContext?.version===2) {
+    const overview=book.addWorksheet('Overview');overview.addRow(['Daily outstanding issues','Value']);
+    overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.issueContext.date]);
+    overview.addRow(['Report time',data.issueContext.completeDay?'End of day':data.issueContext.reference]);
+    overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
+    for(const summary of data.summaries)overview.addRow([summary.label,summary.value]);
+    for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
+    style(overview,[30,85]);
+    const section=data.sections.find(s=>s.id==='issues'),sheet=book.addWorksheet('Outstanding issues');
+    sheet.addRow(section.columns.map(c=>c.label));
+    for(const row of section.rows)sheet.addRow(section.columns.map(c=>row[c.key]??''));
+    if(!section.rows.length)sheet.addRow(['No outstanding issues recorded for this unit at the report time.']);
+    style(sheet,[18,45,65,50,32]);
+    return book.xlsx.writeBuffer();
+  }
   if(data.reportId==='incoming_shift_readiness' && data.readinessContext?.version===2) {
     const overview=book.addWorksheet('Overview');overview.addRow(['Daily staffing readiness','Value']);
     overview.addRow(['Unit',data.scopeLabel]);overview.addRow(['Shift date',data.readinessContext.date]);
