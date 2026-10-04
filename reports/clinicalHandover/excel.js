@@ -143,20 +143,26 @@ async function excel(data) {
     for(const patient of patients)matrix.addRow([`${patient.patient}\n${patient.location}`,...shifts.map(s=>{
       const r=lookup.get(`${patient.encounterId}:${s.key}`);
       return r?.state==='ASSIGNED'?`${r.nurse}\nPublished ${r.publishedAt}${r.nurseScheduled?'':'\nNo matching schedule'}`:
-        r?.state==='NO_SCHEDULE'?'□ No schedule / no assignment':r?.state==='SCHEDULED_UNASSIGNED'?'□ Scheduled / no assignment':'Not recorded';
+        r?.state==='NO_SCHEDULE'?'□ No schedule / no assignment':r?.state==='SCHEDULED_UNASSIGNED'
+          ?`□ Scheduled / no assignment${r.unassignedStaff?.trim()?`\n${r.unassignedStaff}\nStaff without patient assignments`:''}`:'Not recorded';
     })]);
     if(!patients.length)matrix.addRow(['No patients with a recorded unit location at the report time.']);
     style(matrix,[38,...shifts.map(()=>45)]);matrix.views=[{state:'frozen',xSplit:1,ySplit:2}];
     matrix.pageSetup.orientation='landscape';matrix.pageSetup.printTitlesRow='1:2';
+    shifts.forEach((s,j)=>{
+      const cell=matrix.getCell(1,j+2);
+      cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:'FFFFF2CC'}};
+      cell.font={...cell.font,color:{argb:'FF243746'}};
+    });
     patients.forEach((p,i)=>shifts.forEach((s,j)=>{
       const r=lookup.get(`${p.encounterId}:${s.key}`),cell=matrix.getCell(i+3,j+2);
       const red=r?.state==='NO_SCHEDULE',assigned=r?.state==='ASSIGNED';
-      cell.font={...cell.font,color:{argb:red?'FFC43C3C':assigned?'FF246557':'FF606B76'}};
+      cell.font={...cell.font,color:{argb:red?'FFC43C3C':assigned?'FF246557':'FF78828C'}};
       cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:red?'FFFFF3F3':assigned?'FFEAF6F1':'FFF7F8FA'}};
     }));
     const detail=book.addWorksheet('Coverage data'),section=data.sections.find(s=>s.id==='coverage');
     detail.addRow(section.columns.map(c=>c.label));for(const row of rows)detail.addRow(section.columns.map(c=>row[c.key]??''));
-    style(detail,[38,24,24,32,32,36]);return book.xlsx.writeBuffer();
+    style(detail,[38,24,24,32,32,36,45]);return book.xlsx.writeBuffer();
   }
   if(data.reportId==='handover_review_follow_up' && data.reviewContext?.version===3) {
     const overview=book.addWorksheet('Overview');overview.addRow(['Patient assignment timeline','Value']);

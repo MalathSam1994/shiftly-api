@@ -1,7 +1,8 @@
 // SQL owns the expected shifts, patient cohort and recorded coverage states.
 const c=(key,label,type='text')=>({key,label,type});
 const columns=[c('patient','Patient'),c('location','Room / bed'),c('shift','Shift'),
- c('nurse','Published nurse'),c('state','Coverage','status'),c('publishedAt','Time published','datetime')];
+ c('nurse','Published nurse'),c('state','Coverage','status'),c('publishedAt','Time published','datetime'),
+ c('unassignedStaff','Scheduled staff without patient assignments')];
 async function read(client,{actor,parameters}) {
  const {rows}=await client.query('SELECT shiftly_api.fn_handover_assignment_coverage($1::integer,$2::jsonb) value',[actor,parameters]);
  const d=rows[0].value;

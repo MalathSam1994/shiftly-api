@@ -14,7 +14,7 @@ async function coverage(){
   rows:[
    {encounterId:'01',patient:'مريض\n00001 | 00002',location:'ICU / A',shiftKey:'1',shift:'Day',state:'ASSIGNED',nurse:'=SUM(1,2)',nurseScheduled:true,publishedAt:'2026-10-03T17:00:00+02:00'},
    {encounterId:'01',patient:'مريض\n00001 | 00002',location:'ICU / A',shiftKey:'2',shift:'Night',state:'NO_SCHEDULE'},
-   {encounterId:'02',patient:'Patient B',location:'ICU / B',shiftKey:'1',shift:'Day',state:'SCHEDULED_UNASSIGNED'},
+   {encounterId:'02',patient:'Patient B',location:'ICU / B',shiftKey:'1',shift:'Day',state:'SCHEDULED_UNASSIGNED',unassignedStaff:'Osama\nusertest'},
    {encounterId:'02',patient:'Patient B',location:'ICU / B',shiftKey:'2',shift:'Night',state:'NO_SCHEDULE'}]};
  const d=await read({query:async(sql,args)=>{assert.match(sql,/fn_handover_assignment_coverage\(\$1::integer,\$2::jsonb\)/);assert.deepEqual(args,[271,input]);return{rows:[{value}]};}},{actor:271,parameters:input});
  return {...d,reportId:def.id,title:def.title,scopeLabel:'ICU',businessTimezone:'Europe/Berlin',generatedAt:'2026-10-03T18:00:00+02:00',rowCount:4};
@@ -29,8 +29,10 @@ test('v4 Excel pivots all cells, labels and colors missing schedules distinctly,
  const book=new ExcelJS.Workbook();await book.xlsx.load(await excel(await coverage()));
  assert.deepEqual(book.worksheets.map(s=>s.name),['Overview','Patient coverage','Coverage data']);
  const s=book.getWorksheet('Patient coverage');assert.equal(s.rowCount,4);assert.equal(s.columnCount,3);
- assert.equal(s.getCell('B4').value,'□ Scheduled / no assignment');assert.equal(s.getCell('C4').value,'□ No schedule / no assignment');
- assert.equal(s.getCell('C4').font.color.argb,'FFC43C3C');assert.equal(s.getCell('B4').font.color.argb,'FF606B76');
+ assert.equal(s.getCell('B4').value,'□ Scheduled / no assignment\nOsama\nusertest\nStaff without patient assignments');assert.equal(s.getCell('C4').value,'□ No schedule / no assignment');
+ assert.equal(s.getCell('C4').font.color.argb,'FFC43C3C');assert.equal(s.getCell('B4').font.color.argb,'FF78828C');
+ assert.equal(s.getCell('B1').fill.fgColor.argb,'FFFFF2CC');assert.equal(s.getCell('C1').fill.fgColor.argb,'FFFFF2CC');
+ assert.equal(book.getWorksheet('Coverage data').getCell('G4').value,'Osama\nusertest');
  assert.equal(s.getCell('A3').value,'مريض\n00001 | 00002\nICU / A');assert.equal(s.getCell('A3').alignment.readingOrder,'rtl');
  assert.match(s.getCell('B3').value,/^=SUM\(1,2\)\nPublished 2026-10-03T17:00:00\+02:00/);
  assert.equal(s.getCell('B3').type,ExcelJS.ValueType.String);assert.equal(book.getWorksheet('Coverage data').rowCount,5);
