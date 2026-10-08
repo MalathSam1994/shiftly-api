@@ -1,3 +1,4 @@
+const {assertClinicalPresentation}=require('./registry');
 // SQL owns the day interval, source identity, predecessors and authorized deltas.
 const column=(key,label,type='text')=>({key,label,type});
 const columns=[column('effectiveAt','Time','datetime'),column('patientName','Patient'),column('patientId','Patient ID','identifier'),
@@ -5,7 +6,8 @@ const columns=[column('effectiveAt','Time','datetime'),column('patientName','Pat
 async function read(client,{actor,parameters}) {
   const {rows}=await client.query('SELECT shiftly_api.fn_handover_daily_changes($1,$2::jsonb) value',[actor,parameters]);
   const data=rows[0].value;
-  return {rowGrain:'One changed item during the selected business day.',
+  assertClinicalPresentation(data,'changes_since_previous_shift');
+  return {clinicalStatusHidden:true, rowGrain:'One changed item during the selected business day.',
     changeContext:data.changeContext,totals:data.totals,authorizationPairs:data.scopePairs,
     summaries:[{label:'Recorded changes',value:data.totals.changes,availability:'AVAILABLE',definition:'Changed items; multiple items may belong to the same event.'},
       {label:'Patients with changes',value:data.totals.changedEncounters,availability:'AVAILABLE',definition:'Distinct encounters with a displayed change.'}],

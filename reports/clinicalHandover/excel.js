@@ -105,7 +105,7 @@ async function excel(data) {
     patients.addRow(section.columns.map(c=>c.label));
     for(const row of section.rows) patients.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
     if(!section.rows.length)patients.addRow(['No patients with a recorded unit location at this time.']);
-    style(patients,[20,30,24,20,20,32]);
+    style(patients,[20,30,24,20,32]);
     return book.xlsx.writeBuffer();
   }
   if(data.reportId==='workload_and_continuity' && data.workloadContext?.version===2) {

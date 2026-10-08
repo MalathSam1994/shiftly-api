@@ -16,7 +16,7 @@ const fields = {
   intervalMode: field('Event interval', 'enum', 'Inclusive business dates or exact times with offsets; end is always exclusive internally.', {options:['BUSINESS_DATES','EXACT_TIMES']}),
   fromTime: field('From time (inclusive)', 'instant', 'Exact interval start, including UTC offset. Overnight intervals can cross business dates.', {dependsOn:['intervalMode']}),
   toTime: field('To time (exclusive)', 'instant', 'Exact interval end, including UTC offset. Events at this instant belong to the next interval.', {dependsOn:['intervalMode']}),
-  changeCategory: field('Change category', 'enum', 'Selects matching evidenced fields within source changes; mixed operations can belong to multiple categories.', {options:['CLINICAL_STATUS','ACUITY','CARE_FACTOR','ADMISSION','DISCHARGE','TRANSFER','LOCATION','PUBLISHED_RESPONSIBILITY','FLOW_RECORD']}),
+  changeCategory: field('Change category', 'enum', 'Selects matching evidenced fields within source changes; mixed operations can belong to multiple categories.', {options:['ACUITY','CARE_FACTOR','ADMISSION','DISCHARGE','TRANSFER','LOCATION','PUBLISHED_RESPONSIBILITY','FLOW_RECORD']}),
   issueTimeMode: field('Issue reference', 'enum', 'Now, an explicit reference instant, or the start of a selected approved handover context. Includes carried-over issues.', {options:['NOW','REFERENCE','HANDOVER']}),
   issueDomain: field('Issue domain', 'enum', 'Recorded domain; independent of time scope.', {options:['CLINICAL','SCHEDULING']}),
   issueCategory: field('Source category', 'enum', 'Canonical source category; linked observations do not become extra issues.', {options:['REVIEW','LIVE','MINIMUM_COVERAGE','STAFF_ELIGIBILITY_GROUP','STAFF_POOL','ROSTER','CURRENT_ASSIGNMENT','DRAFT','CENSUS']}),
@@ -35,14 +35,13 @@ const fields = {
   encounterIds: {...select('Patients / encounters', 'patientBoundary', 'Select up to 100 encounters, or leave blank for all matching boundary records.', ['unitId','shiftContextId','room','bed'], [PATIENT]), multiple:true},
   incomingStaffId: select('Incoming published staff', 'patientBoundary', 'Filters evidenced published incoming responsibility, not scheduled staff or attendance.', ['unitId','shiftContextId'], [STAFF]),
   outgoingStaffId: select('Outgoing published staff', 'patientBoundary', 'Filters evidenced outgoing responsibility immediately before outgoing end or handover, whichever comes first.', ['unitId','shiftContextId','outgoingContextId'], [STAFF]),
-  clinicalStatus: select('Recorded clinical status', 'patientBoundary', 'Effective clinical state at the cohort cutoff; not current encounter status.', ['unitId','shiftContextId'], [PATIENT]),
   actorId: select('Recorded actor', 'actors', 'User recorded on the event; not responsible nurse.', ['divisionId', 'departmentId', 'unitId'], [PATIENT]),
   reviewerId: select('Reviewer', 'reviewers', 'User recorded as reviewer; review is not receipt of handover.', ['divisionId', 'departmentId', 'unitId'], [REVIEW]),
   staffTypeId: select('Staff type', 'staffTypes', 'Declared staff category; metric denominators must be explicitly defined.'),
   acuityLevelId: select('Acuity level', 'acuityLevels', 'Recorded level, qualified by rule set. No invented expiry threshold.', ['unitId'], [PATIENT]),
   competencyId: select('Competency', 'competencies', 'Declared competency category; does not recalculate eligibility.', [], [STAFF]),
   patientStatus: field('Encounter status', 'enum', 'Recorded encounter status.', { options: ['ACTIVE','DISCHARGED','TRANSFERRED','CANCELLED'] }),
-  eventType: field('Event category', 'enum', 'Recorded operation category, not inferred occurrence.', { options: ['CLINICAL_STATUS','FACTOR_VALUE','ADT_EVENT','PATIENT_UPSERT','ENCOUNTER_UPSERT'] }),
+  eventType: field('Event category', 'enum', 'Recorded operation category, not inferred occurrence.', { options: ['FACTOR_VALUE','ADT_EVENT','PATIENT_UPSERT','ENCOUNTER_UPSERT'] }),
   issueReason: select('Issue reason', 'issueReasons', 'Recorded issue reason; no new detection.'),
   severity: field('Severity', 'enum', 'Recorded severity.', { options: ['CRITICAL','WARNING','INFO'] }),
   issueStatus: field('Issue status', 'enum', 'Recorded source lifecycle at the requested reference.', { options: ['ACTIVE','RESOLVED','EXPIRED','SUPERSEDED','UNAVAILABLE'] }),
@@ -60,7 +59,7 @@ const reports = [
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('overview','Overview','measure per unit/day'),section('patients','Patients','encounter at the daily cutoff')],
     ['unit'],['location'], 'DAY_SNAPSHOT'),
-  definition('patient_handover_sheet','Patient handover sheet','Patient condition and recorded care factors at the end of the selected date, or so far today.',
+  definition('patient_handover_sheet','Patient handover sheet','Patient acuity and recorded care factors at the end of the selected date, or so far today.',
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('patients','Patients','encounter at the daily cutoff'),section('factors','Care factors','active recorded factor per encounter')],
     ['encounter'],['location'], 'DAY_SNAPSHOT'),
@@ -135,7 +134,7 @@ function parameters(def, input, { partial = false } = {}) {
           if (!Array.isArray(value) || !value.length || value.length>100 || value.some(v=>!Number.isSafeInteger(v)||v<=0||v>2147483647) || new Set(value).size!==value.length) throw fail(`${f.label}: choose 1 to 100 distinct encounters, or clear for all.`);
         } else if (key==='targetContextKey') {
           if (typeof value!=='string' || !/^(ROSTER|CAPACITY):[1-9][0-9]{0,9}$/.test(value) || Number(value.split(':')[1])>2147483647) throw fail('Choose a named current/upcoming target context.');
-        } else if (['room','bed','issueReason','clinicalStatus'].includes(key)) {
+        } else if (['room','bed','issueReason'].includes(key)) {
           if (typeof value !== 'string' || value.length > 120) throw fail(`${f.label}: invalid selection.`);
         } else if (!Number.isSafeInteger(value) || value <= 0 || value > 2147483647) throw fail(`${f.label}: choose a named record.`);
       }
@@ -156,4 +155,13 @@ function parameters(def, input, { partial = false } = {}) {
   if (!partial) for (const key of def.required) if (out[key] == null) throw fail(`${fields[key].label} is required.`);
   return { ...def.defaults, ...out };
 }
-module.exports = { OPEN, EXPORT, PATIENT, STAFF, REVIEW, fields, reports, report, parameters, fail };
+// Saved generations retain their original dataset. Require a new generation after
+// hiding manual status instead of rewriting historical report content in place.
+function assertClinicalPresentation(data, reportId = data.reportId, saved = false) {
+  if (!['patient_handover_sheet','unit_handover_summary','changes_since_previous_shift'].includes(reportId)) return;
+  if (data.clinicalStatusHidden !== true) throw fail(saved
+    ? 'This report layout has changed. Generate it again.'
+    : 'This report is temporarily unavailable. Contact your administrator.',
+    saved ? 410 : 503, saved ? 'REPORT_LAYOUT_CHANGED' : 'REPORT_UPDATE_REQUIRED');
+}
+module.exports = { assertClinicalPresentation, OPEN, EXPORT, PATIENT, STAFF, REVIEW, fields, reports, report, parameters, fail };

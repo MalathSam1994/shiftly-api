@@ -19,10 +19,10 @@ test('daily changes has four required filters and rejects the old range, exact-t
   assert.throws(()=>registry.parameters(registry.report('handover_review_follow_up'),{divisionId:1,departmentId:39,unitId:2}),/required/);
 });
 async function dataset() {
-  const value={changeContext:{version:2,date:'2026-09-23',start:'2026-09-23T00:00:00+02:00',endExclusive:'2026-09-24T00:00:00+02:00',completeDay:true,basis:'HISTORICAL'},
+  const value={clinicalStatusHidden:true,changeContext:{version:2,date:'2026-09-23',start:'2026-09-23T00:00:00+02:00',endExclusive:'2026-09-24T00:00:00+02:00',completeDay:true,basis:'HISTORICAL'},
     totals:{changes:2,changedEncounters:1},notes:['One conditional note.'],scopePairs:[{division_id:1,department_id:39}],
     changes:[{changeId:'c1',encounterId:'1',patientName:'=SUM(1,2)',patientId:'00001',encounter:'00002',effectiveAt:'2026-09-23T12:14:00+02:00',
-      change:'Clinical status',before:'Not recorded',after:'Watch',notes:null},
+      change:'Acuity',before:'Not recorded',after:'High',notes:null},
     {changeId:'c2',encounterId:'1',patientName:'=SUM(1,2)',patientId:'00001',encounter:'00002',effectiveAt:'2026-09-23T13:15:00+02:00',
       change:'Care factor - value',before:'0',after:'2.5',notes:'ملاحظة'}]};
   const data=await read({query:async(sql,args)=>{assert.match(sql,/fn_handover_daily_changes/);assert.deepEqual(args,[271,input]);return {rows:[{value}]};}},{actor:271,parameters:input});
@@ -49,16 +49,16 @@ test('empty Excel describes no recorded changes without claiming no changes occu
   const book=new ExcelJS.Workbook();await book.xlsx.load(await excel(data));
   assert.equal(book.getWorksheet('Changes').getCell('A2').value,'No recorded changes for this unit during the selected date.');
 });
-test('legacy saved datasets still require both original sections and preserve paged children',async()=>{
+test('legacy saved datasets require regeneration and keep stored detail unmodified',async()=>{
   const dbPath=require.resolve('../db'),previous=require.cache[dbPath];require.cache[dbPath]={id:dbPath,filename:dbPath,loaded:true,exports:{}};
   const {exportData}=require('../reports/clinicalHandover/service');
   if(previous)require.cache[dbPath]=previous;else delete require.cache[dbPath];
   const daily=await dataset();assert.equal(exportData(daily).rowCount,2);
   assert.throws(()=>exportData({...daily,sections:[]}),/Every declared section/);
-  const legacy={...daily,changeContext:{start:'2026-09-23T00:00:00+02:00'},rowCount:2,sections:[
+  const legacy={...daily,clinicalStatusHidden:false,changeContext:{start:'2026-09-23T00:00:00+02:00'},rowCount:2,sections:[
     {...daily.sections[0],rows:[{changeId:'c1'}],total:1},
     {...daily.sections[0],id:'fields',rows:[{changeId:'c1',field:'summary'}],total:1}]};
-  assert.equal(exportData({...legacy,authorizedScope:{private:true}}).authorizedScope,undefined);
-  assert.throws(()=>exportData({...legacy,sections:legacy.sections.slice(0,1)}),/Every declared section/);
+  assert.throws(()=>exportData({...legacy,authorizedScope:{private:true}}),/layout has changed/);
+  assert.throws(()=>exportData({...legacy,sections:legacy.sections.slice(0,1)}),/layout has changed/);
   assert.deepEqual(pageDetails(legacy,0,1),{c1:[{changeId:'c1',field:'summary'}]});
 });

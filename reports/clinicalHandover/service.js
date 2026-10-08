@@ -192,10 +192,12 @@ async function retrieve(actor,id,exporting=false) {
     const saved=rows[0];
     await authorize(client,actor,registry.report(saved.report_id),exporting);
     await recheckScope(client,actor,saved.authorized_scope);
+    registry.assertClinicalPresentation(saved.dataset,saved.report_id,true);
     return {...saved.dataset,generationId:id,expiresAt:saved.expires_at};
   });
 }
 function preview(dataset,sectionId,offset,limit) {
+  registry.assertClinicalPresentation(dataset,dataset.reportId,true);
   const id=sectionId||dataset.sections[0]?.id;
   if (id&&!dataset.sections.some(s=>s.id===id)) throw registry.fail('Choose an available report section.');
   const {authorizedScope,...publicData}=dataset;
@@ -287,6 +289,7 @@ async function outstandingTarget(actor,id,issueId) {
  });
 }
 function exportData(dataset) {
+  registry.assertClinicalPresentation(dataset,dataset.reportId,true);
   // PDF viewing and both exports require the full saved dataset. Retrieval owns
   // authorization; only /export requires the additional download permission.
   const def=registry.report(dataset.reportId);

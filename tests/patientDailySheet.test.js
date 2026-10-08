@@ -25,10 +25,10 @@ test('patient sheet requires exactly the four daily fields, with no shift select
 });
 
 function raw() {
-  return {patientContext:{version:2,date:'2026-09-23',completeDay:true,basis:'HISTORICAL'},totals:{patients:2,factors:2},notes:[],
-    patients:[{encounterId:'1',patientName:'=SUM(1,2)',patientId:'00001',encounter:'00002',location:'A / 1',clinicalStatus:'WATCH',
-      summary:'Recorded condition',acuity:'High',assessedAt:'2026-09-23T18:30:00+02:00'},
-      {encounterId:'2',patientName:'Patient Two',patientId:'00003',encounter:'00004',location:null,clinicalStatus:null,summary:null,acuity:null,assessedAt:null}],
+  return {clinicalStatusHidden:true,patientContext:{version:2,date:'2026-09-23',completeDay:true,basis:'HISTORICAL'},totals:{patients:2,factors:2},notes:[],
+    patients:[{encounterId:'1',patientName:'=SUM(1,2)',patientId:'00001',encounter:'00002',location:'A / 1',
+      acuity:'High',assessedAt:'2026-09-23T18:30:00+02:00'},
+      {encounterId:'2',patientName:'Patient Two',patientId:'00003',encounter:'00004',location:null,acuity:null,assessedAt:null}],
     factors:[{encounterId:'1',patientId:'00001',patientName:'=SUM(1,2)',encounter:'00002',factor:'Care factor',value:0,notes:'Keep the recorded zero'},
       {encounterId:'2',patientId:'00003',patientName:'Patient Two',encounter:'00004',factor:'Second factor',value:2.5,notes:'ملاحظة'}]};
 }
@@ -54,8 +54,8 @@ test('compact Excel retains identities, zero values, notes and explicit timestam
   assert.equal(patients.rowCount,3);assert.equal(factors.rowCount,3);
   assert.equal(patients.getCell('B2').value,'=SUM(1,2)');assert.equal(patients.getCell('B2').type,ExcelJS.ValueType.String);
   assert.equal(patients.getCell('C2').value,'00001');assert.equal(patients.getCell('D2').value,'00002');
-  assert.equal(patients.getCell('H2').value,'2026-09-23T18:30:00+02:00');
-  assert.equal(patients.getCell('H3').value,'Not recorded');
+  assert.equal(patients.getCell('F2').value,'2026-09-23T18:30:00+02:00');
+  assert.equal(patients.getCell('F3').value,'Not recorded');
   assert.equal(factors.getCell('E2').value,0);assert.equal(factors.getCell('F3').value,'ملاحظة');
 });
 test('empty exports describe missing records without claiming an absence of care needs',async()=>{
@@ -65,7 +65,7 @@ test('empty exports describe missing records without claiming an absence of care
   assert.equal(book.getWorksheet('Patients').getCell('A2').value,'No patients with a recorded unit location at this time.');
   assert.equal(book.getWorksheet('Care factors').getCell('A2').value,'No active care factors recorded.');
 });
-test('saved boundary reports keep their four-section contract; daily reports require both compact sections',async()=>{
+test('saved reports with manual status require regeneration; current reports require both sections',async()=>{
   const dbPath=require.resolve('../db'),previous=require.cache[dbPath];
   require.cache[dbPath]={id:dbPath,filename:dbPath,loaded:true,exports:{}};
   const {exportData}=require('../reports/clinicalHandover/service');
@@ -73,8 +73,8 @@ test('saved boundary reports keep their four-section contract; daily reports req
   const data=await dataset();
   assert.equal(exportData({...data,authorizedScope:{private:true}}).authorizedScope,undefined);
   assert.throws(()=>exportData({...data,sections:data.sections.slice(0,1)}),/Every declared section/);
-  const legacy={...data,patientContext:{boundary:'2026-09-23T19:00:00+02:00'},rowCount:0,
+  const legacy={...data,clinicalStatusHidden:false,patientContext:{boundary:'2026-09-23T19:00:00+02:00'},rowCount:0,
     sections:['patients','factors','events','issues'].map(id=>({id,grain:'record',evidenceBasis:'HISTORICAL',availability:'AVAILABLE',limitations:[],columns:[],rows:[],total:0}))};
-  assert.equal(exportData(legacy).rowCount,0);
-  assert.throws(()=>exportData({...legacy,sections:legacy.sections.slice(0,-1)}),/Every declared section/);
+  assert.throws(()=>exportData(legacy),/layout has changed/);
+  assert.throws(()=>exportData({...legacy,sections:legacy.sections.slice(0,-1)}),/layout has changed/);
 });

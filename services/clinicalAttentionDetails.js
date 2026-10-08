@@ -177,7 +177,10 @@ function describeClinicalAttention(data) {
   if (data.historical && baseline && !equal(baseline.review_threshold,snapshot.review_threshold)) paragraphs.push('Review threshold changed from ' + text(baseline.review_threshold) + ' to ' + text(snapshot.review_threshold) + '.');
 
   for (const op of list(data.operations).slice(0,200)) {
-    const beforeState = op.before_state || {}, afterState = op.after_state || {};
+    const isManualStatus = op.operation_type === 'CLINICAL_STATUS';
+    if (isManualStatus && op.score == null) continue;
+    const beforeState = isManualStatus ? {} : op.before_state || {};
+    const afterState = isManualStatus ? {} : op.after_state || {};
     // ADT stores encounter/location/event separately; factor operations store
     // the factor-value row directly. Do not mistake the event catalogue for a
     // patient event value or lose a transfer/discharge in nested JSON.
@@ -188,13 +191,13 @@ function describeClinicalAttention(data) {
     const eventType = now.event_type_id ?? old.event_type_id;
     if (eventType != null) fields.push(field('ADT/flow event',old.event_type_id == null ? 'Not recorded' : name('event_types',old.event_type_id), name('event_types',eventType)));
     if (afterState.event?.event_name) fields.push(field('Recorded ADT/flow event', 'Not an event before-state', afterState.event.event_name));
-    for (const [key,label,type] of [['encounter_status','Encounter status'],['current_clinical_unit_id','Clinical unit','units'],['target_clinical_unit_id','Destination unit','units'],['clinical_status','Clinical status'],['event_value','Event value'],['ended_at','Ended at'],['admitted_at','Admission'],['discharged_at','Discharge']]) {
+    for (const [key,label,type] of [['encounter_status','Encounter status'],['current_clinical_unit_id','Clinical unit','units'],['target_clinical_unit_id','Destination unit','units'],['event_value','Event value'],['ended_at','Ended at'],['admitted_at','Admission'],['discharged_at','Discharge']]) {
       if (!equal(old[key],now[key])) fields.push(field(label,type ? display(type,old[key]) : old[key],type ? display(type,now[key]) : now[key]));
     }
     if (op.score != null) fields.push(field('Score',op.previous_score,op.score));
     if (op.workload != null) fields.push(field('Workload',op.previous_workload,op.workload));
     if (op.adt_burden != null) fields.push(field('ADT burden',op.previous_adt,op.adt_burden));
-    records.push({title:patient(op.encounter_id) + ' — ' + readable(op.operation_type),
+    records.push({title:patient(op.encounter_id) + ' — ' + readable(isManualStatus ? 'ASSESSMENT' : op.operation_type),
       paragraphs:[op.directly_linked ? 'This recorded action is directly linked to this review.' : 'Recorded during the accepted-baseline-to-review interval; it is supporting evidence, not proof that it alone caused this review.',
         ...(op.score == null ? [] : ['Score/workload/ADT are compared with the preceding assessment ordered by assessment date/time. For backdated assessments this is not necessarily the last action performed; the publication comparison is shown separately above.'])],
       fields, action:op.action});
