@@ -3177,6 +3177,7 @@ router.get(
 
 router.post('/acuity/factor-categories', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_acuity_factor_categories', [
+    'icon_key',
     'category_code',
     'category_name',
     'description',
@@ -3186,6 +3187,7 @@ router.post('/acuity/factor-categories', requirePermission(MANAGE_ACUITY_RULES),
 
 router.put('/acuity/factor-categories/:id', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_acuity_factor_categories', 'id', [
+    'icon_key',
     'category_code',
     'category_name',
     'description',
@@ -3216,6 +3218,7 @@ router.get(
 
 router.post('/acuity/factors', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_acuity_factors', [
+    'icon_key',
     'factor_code',
     'factor_name',
     'category_id',
@@ -3231,6 +3234,7 @@ router.post('/acuity/factors', requirePermission(MANAGE_ACUITY_RULES), (req, res
 
 router.put('/acuity/factors/:id', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_acuity_factors', 'id', [
+    'icon_key',
     'factor_code',
     'factor_name',
     'category_id',
