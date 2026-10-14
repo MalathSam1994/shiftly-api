@@ -9,7 +9,7 @@ const response = () => ({ statusCode: 200,
   json(body) { this.body = body; return this; },
 });
 
-for (const resource of ['factors', 'factor-categories']) {
+for (const resource of ['factors', 'factor-categories', 'adt-event-types']) {
   for (const method of ['post', 'put']) {
     const route = router.stack.find(layer => layer.route?.path === `/acuity/${resource}${method === 'put' ? '/:id' : ''}` && layer.route.methods[method]).route;
     test(`${method} ${resource} retains icon values, permits reset and requires manage permission`, async () => {
@@ -20,7 +20,7 @@ for (const resource of ['factors', 'factor-categories']) {
       const denied = response();
       await route.stack[0].handle({ user: { id: 271 } }, denied, () => assert.fail('Denied write continued'));
       assert.equal(denied.statusCode, 403);
-      for (const icon_key of ['respiratory', null]) {
+      for (const icon_key of [resource === 'adt-event-types' ? 'patient_transport' : 'respiratory', null]) {
         pool.query = async (sql, values) => {
           assert.match(sql, /icon_key/);
           assert.equal(values[0], icon_key);

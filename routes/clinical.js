@@ -3395,6 +3395,7 @@ router.get(
 
 router.post('/acuity/adt-event-types', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_adt_event_types', [
+    'icon_key',
     'event_code',
     'event_name',
     'description',
@@ -3406,6 +3407,7 @@ router.post('/acuity/adt-event-types', requirePermission(MANAGE_ACUITY_RULES), (
 
 router.put('/acuity/adt-event-types/:id', requirePermission(MANAGE_ACUITY_RULES), (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_adt_event_types', 'id', [
+    'icon_key',
     'event_code',
     'event_name',
     'description',
