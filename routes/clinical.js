@@ -1192,6 +1192,41 @@ router.post('/mobile/patients/:encounterId/state', requirePermission(UPDATE_PATI
   }
 });
 
+// Resolve against the rule effective now, not the patient's last assessment.
+router.get('/mobile/patients/:encounterId/factors', requirePermission(OPEN_MOBILE_PATIENTS), async (req, res) => {
+  const userId = actorUserId(req);
+  const encounterId = requirePositiveId(req, res, req.params.encounterId, 'encounterId');
+  if (!encounterId) return null;
+  try {
+    const access = await pool.query(
+      'SELECT shiftly_api.fn_clinical_user_has_operational_access($1, $2) AS allowed',
+      [userId, encounterId],
+    );
+    if (!access.rows[0]?.allowed) {
+      return sendApiError(req, res, {
+        status: 404, code: 'RESOURCE_NOT_FOUND', error: 'Patient is not accessible.',
+      });
+    }
+    const result = await pool.query(`
+      SELECT f.*, c.category_code, c.category_name
+      FROM shiftly_api.fn_clinical_active_rule_set($1, CURRENT_TIMESTAMP::timestamp without time zone) rs
+      JOIN shiftly_schema.clinical_acuity_rule_set_factors rsf ON rsf.rule_set_id = rs.id
+      JOIN shiftly_schema.clinical_acuity_factors f ON f.id = rsf.factor_id
+      JOIN shiftly_schema.clinical_acuity_factor_categories c ON c.id = f.category_id
+      WHERE rsf.is_active AND f.is_active AND c.is_active
+        AND f.effective_start_at <= CURRENT_TIMESTAMP
+        AND (f.effective_end_at IS NULL OR f.effective_end_at > CURRENT_TIMESTAMP)
+      ORDER BY c.display_order, f.display_order, f.factor_name, f.id
+    `, [encounterId]);
+    res.set('Cache-Control', 'no-store');
+    return res.json(result.rows);
+  } catch (err) {
+    return sendPostgresError(req, res, err, {
+      action: 'LIST', label: 'Error loading patient clinical factors',
+    });
+  }
+});
+
 router.post('/mobile/patients/:encounterId/factors', requirePermission(UPDATE_PATIENT_OPERATIONS), async (req, res) => {
   const userId = actorUserId(req);
   if (!userId) {
@@ -2858,6 +2893,26 @@ router.post(
   },
 );
 
+// Copy configuration atomically; repeating the request reopens an existing draft.
+router.post('/acuity/rule-sets/:id/revisions',
+  requirePermission(OPEN_ACUITY_RULE_SETS), requirePermission(MANAGE_ACUITY_RULES),
+  async (req, res) => {
+    const id = requirePositiveId(req, res, req.params.id, 'id');
+    if (!id) return null;
+    try {
+      const result = await pool.query(
+        'SELECT * FROM shiftly_api.fn_clinical_create_rule_set_revision($1, $2)',
+        [id, actorUserId(req)],
+      );
+      return res.json(result.rows[0]);
+    } catch (err) {
+      return sendPostgresError(req, res, err, {
+        action: 'CREATE', label: 'Error creating acuity rule set revision',
+        operation: 'clinical_acuity_revision',
+      });
+    }
+  });
+
 router.get(
   '/acuity/levels',
   requirePermission(OPEN_ACUITY_LEVELS),
@@ -2890,6 +2945,35 @@ router.get(
     }
   },
 );
+
+// Preview and apply share the same database projection and scope checks.
+for (const [kind, permission] of Object.entries({levels: OPEN_ACUITY_LEVELS, factors: OPEN_ACUITY_FACTORS, flow: OPEN_FLOW_RULES})) {
+  for (const apply of [false, true]) {
+    router.post('/acuity/rule-sets/:id/import-' + kind + (apply ? '' : '/preview'),
+      requirePermission(permission), requirePermission(MANAGE_ACUITY_RULES), async (req, res) => {
+        const target = requirePositiveId(req, res, req.params.id, 'id');
+        if (!target) return null;
+        const source = requirePositiveId(req, res, req.body?.source_rule_set_id, 'source_rule_set_id');
+        if (!source) return null;
+        const mode = req.body?.mode;
+        const token = req.body?.preview_token;
+        if (source === target || !['add_missing', 'replace_all'].includes(mode)
+            || (apply && (typeof token !== 'string' || !/^[a-f0-9]{32}$/.test(token)))) {
+          return sendApiError(req, res, {status: 400, code: 'INVALID_REQUEST',
+            error: 'Choose a different source, select an import mode, and preview before importing.'});
+        }
+        try {
+          const result = await pool.query(
+            'SELECT shiftly_api.fn_clinical_import_rule_configuration($1,$2,$3,$4,$5,$6,$7) AS result',
+            [target, source, actorUserId(req), kind, mode, apply, apply ? token : null]);
+          res.set('Cache-Control', 'no-store');
+          return res.json(result.rows[0].result);
+        } catch (err) {
+          return sendPostgresError(req, res, err, {action: apply ? 'UPDATE' : 'LIST', label: 'Error importing rule configuration'});
+        }
+      });
+  }
+}
 
 router.post('/acuity/rule-sets/:id/copy-levels',
   requirePermission(OPEN_ACUITY_LEVELS), requirePermission(MANAGE_ACUITY_RULES),

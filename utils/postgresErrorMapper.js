@@ -242,11 +242,22 @@ function mapPostgresError(err, context = {}) {
   const pgCode = String(err && err.code || '');
   // Explicit, safe lifecycle messages: never forward SQL detail or stack traces.
   const clinicalErrors = {
+    CLINICAL_IMPORT_INVALID: [400, 'Choose a different source and a supported import mode.'],
+    CLINICAL_IMPORT_UNAVAILABLE: [404, 'The source or destination rule set is unavailable in your scope.'],
+    CLINICAL_IMPORT_DRAFT_REQUIRED: [409, 'Configuration can only be imported into a draft rule set.'],
+    CLINICAL_IMPORT_STALE: [409, 'Configuration changed since the preview. Preview again before importing.'],
+    CLINICAL_IMPORT_CONFLICT: [422, 'The import cannot be saved. Preview again and resolve the listed conflicts.'],
+    CLINICAL_ACUITY_REVISION_SOURCE_UNAVAILABLE: [404, 'This rule set is unavailable in your scope. Refresh the rule-set list.'],
+    CLINICAL_ACUITY_REVISION_REQUIRES_PUBLISHED: [409, 'Only published rule sets need a revision. Edit an existing draft directly.'],
     CLINICAL_ASSIGNMENT_INELIGIBLE_SCHEDULED_STAFF: [422, 'Assignment generation was refused because one or more approved staff scheduled to work are not clinically eligible. No proposal or history record was created. Resolve the reasons below and try again.'],
     CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF: [422, 'Assignment generation was refused because no scheduled staff are eligible. Resolve the reasons below and try again.'],
     CLINICAL_ASSIGNMENT_NO_FEASIBLE_PATIENTS: [422, 'Assignment generation was refused because no patient can be assigned safely. Resolve the competency or hard-capacity restrictions below and try again.'],
     CLINICAL_ASSIGNMENT_NO_PATIENTS: [422, 'No active patients are available in the selected clinical unit. An empty assignment cannot be generated.'],
     CLINICAL_ASSIGNMENT_POLICY_REQUIRED: [422, 'No active assignment optimizer policy applies to this date, shift and clinical unit. Configure an applicable policy before generating an assignment.'],
+    CLINICAL_FACTOR_NOT_APPLICABLE: [422, "This factor is not available for the patient's current acuity rule set. Refresh the patient and choose an available factor."],
+    CLINICAL_ACUITY_RULE_SET_REQUIRED: [422, 'No active published acuity rule set applies to this patient. Ask an administrator to check the unit and rule-set effective dates.'],
+    CLINICAL_ACUITY_SCORE_UNCOVERED: [422, 'The updated score falls outside the configured acuity levels. Ask an administrator to correct the rule-set thresholds, then try again. No factor changes were saved.'],
+    CLINICAL_PATIENT_UPDATE_FORBIDDEN: [403, 'You no longer have access to update this patient. Refresh your patient list.'],
     CLINICAL_ACUITY_LEVELS_REQUIRED: [422, 'Add at least one active acuity level in Levels / thresholds for this rule set, then publish again.'],
     CLINICAL_ACUITY_FACTORS_REQUIRED: [422, 'Link at least one active clinical factor to this rule set in Factors / applicability, then publish again.'],
     CLINICAL_ACUITY_ADT_RULES_REQUIRED: [422, 'Link at least one active ADT / flow rule with an active event type to this rule set, then publish again.'],
@@ -260,6 +271,10 @@ function mapPostgresError(err, context = {}) {
   let clinicalCode = String(err && err.hint || '');
   // Also support the old database functions while the migration is pending.
   const legacyClinicalCodes = {
+    'Clinical factor is not active for this encounter rule set.': 'CLINICAL_FACTOR_NOT_APPLICABLE',
+    'No active acuity rule set applies to this encounter.': 'CLINICAL_ACUITY_RULE_SET_REQUIRED',
+    'No acuity level threshold matches calculated score.': 'CLINICAL_ACUITY_SCORE_UNCOVERED',
+    'You do not have permission to update this patient.': 'CLINICAL_PATIENT_UPDATE_FORBIDDEN',
     'No active clinical assignment optimizer policy applies.': 'CLINICAL_ASSIGNMENT_POLICY_REQUIRED',
     'Active rule sets must have usable acuity levels.': 'CLINICAL_ACUITY_LEVELS_REQUIRED',
     'Active rule sets must have at least one active clinical factor.': 'CLINICAL_ACUITY_FACTORS_REQUIRED',

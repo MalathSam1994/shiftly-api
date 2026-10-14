@@ -304,3 +304,25 @@ function assertContract(body, expectedCode, expectedRequestId) {
   assert.equal(body.code, expectedCode);
   assert.equal(body.request_id, expectedRequestId);
 }
+
+for (const [message, code, status] of [
+  ['Clinical factor is not active for this encounter rule set.', 'CLINICAL_FACTOR_NOT_APPLICABLE', 422],
+  ['No active acuity rule set applies to this encounter.', 'CLINICAL_ACUITY_RULE_SET_REQUIRED', 422],
+  ['No acuity level threshold matches calculated score.', 'CLINICAL_ACUITY_SCORE_UNCOVERED', 422],
+  ['You do not have permission to update this patient.', 'CLINICAL_PATIENT_UPDATE_FORBIDDEN', 403],
+]) {
+  test('mobile patient failure is actionable: ' + code, () => {
+    const mapped = mapPostgresError({code: 'P0001', message, detail: 'private database detail'});
+    assert.equal(mapped.status, status);
+    assert.equal(mapped.code, code);
+    assert.notEqual(mapped.error, 'The request could not be completed.');
+    assert.equal(mapped.error, mapped.details);
+    assert.doesNotMatch(JSON.stringify(mapped), /private database detail/);
+  });
+}
+
+test('unknown patient database errors still hide internal details', () => {
+  const mapped = mapPostgresError({code: 'P0001', message: 'private patient data', detail: 'private SQL'});
+  assert.equal(mapped.code, 'BUSINESS_RULE_VIOLATION');
+  assert.doesNotMatch(JSON.stringify(mapped), /private/);
+});
