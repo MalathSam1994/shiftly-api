@@ -27,13 +27,13 @@ test('Excel exports validity per record, renewal history, empty staff and server
     assert.equal(values[0], 271);
     assert.deepEqual(JSON.parse(values[1]), { export: 'true', tab: 'expired', attention_issue_id: '24', attention_assignment_id: '498' });
     return { rows: [{ workspace: {
-      validity_basis: 'CURRENT_DATE', as_of: '2026-10-14', attention_issue_id: 24, attention_assignment_id: '498',
+      validity_basis: 'CURRENT_DATE', renewal_contract: 1, as_of: '2026-10-14', attention_issue_id: 24, attention_assignment_id: '498',
       rows: [
-        { user_name: 'Nurse A', mappings: [
+        { user_name: 'Nurse A', competencies: [{competency_name:'Ventilator',validity:'Valid',expires_on:'2027-10-14'}], mappings: [
           { competency_name: 'Ventilator', validity: 'Expired', valid_to: '2026-10-13', expires_on: '2026-10-13' },
           { competency_name: 'Ventilator', validity: 'Valid', valid_to: '2027-10-14', expires_on: '2027-10-14' },
         ] },
-        { user_name: 'Nurse B', mappings: [] },
+        { user_name: 'Nurse B', competencies: [], mappings: [] },
       ],
     } }] };
   };
@@ -44,15 +44,19 @@ test('Excel exports validity per record, renewal history, empty staff and server
   assert.equal(res.headers['X-ShiftMix-Attention-Assignment-Id'], '498');
   const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(res.body);
   const sheet = workbook.getWorksheet('Staff competencies');
-  assert.equal(sheet.rowCount, 4);
-  assert.equal(sheet.getCell('G1').value, 'Record validity');
-  assert.equal(sheet.getCell('J1').value, 'Validity as of');
-  assert.equal(sheet.getCell('K1').value, 'Effective expiry');
-  assert.equal(sheet.getCell('G2').value, 'Expired');
-  assert.equal(sheet.getCell('G3').value, 'Valid');
-  assert.equal(sheet.getCell('D4').value, 'No competencies recorded');
-  assert.equal(sheet.getCell('J4').value, '2026-10-14');
+  assert.equal(sheet.rowCount, 3);
+  assert.equal(sheet.getCell('E1').value, 'Current validity');
+  assert.equal(sheet.getCell('E2').value, 'Valid');
+  assert.equal(sheet.getCell('F2').value, '2027-10-14');
+  assert.equal(sheet.getCell('D3').value, 'No competencies recorded');
+  assert.equal(sheet.getCell('H3').value, '2026-10-14');
+  const history = workbook.getWorksheet('Period history');
+  assert.equal(history.rowCount, 3);
+  assert.equal(history.getCell('E2').value, 'Expired');
+  assert.equal(history.getCell('E3').value, 'Valid');
+  assert(workbook.getWorksheet('Corrections'));
   assert(!sheet.getRow(1).values.some(v => /missing|eligib/i.test(v)));
+
 });
 
 test('workspace and export reject a database without the records contract', async () => {
@@ -65,7 +69,7 @@ test('workspace and export reject a database without the records contract', asyn
 });
 
 test('new records contract still fails closed on missing alert/member echoes', async () => {
-  fakePool.query = async () => ({ rows: [{ workspace: { validity_basis: 'CURRENT_DATE', rows: [], attention_issue_id: 24 } }] });
+  fakePool.query = async () => ({ rows: [{ workspace: { validity_basis: 'CURRENT_DATE', renewal_contract: 1, rows: [], attention_issue_id: 24 } }] });
   for (const call of [workspaceHandler, exportHandler]) {
     const res = response(); await call(request({ attention_issue_id: '24', attention_assignment_id: '498' }), res);
     assert.equal(res.statusCode, 503);
@@ -78,4 +82,46 @@ test('a member filter without its alert is rejected before reading or exporting'
     const res = response(); await call(request({ attention_assignment_id: '498' }), res);
     assert.equal(res.statusCode, 400);
   }
+});
+const renewHandler = handler('/staff-competencies/:id/renew');
+const correctHandler = handler('/staff-competencies/:id');
+const periodRequest = (body={}) => ({user:{id:271},params:{id:'42'},body:{
+  valid_from:'2026-10-15',valid_to:'2027-10-14',source_type:'MANUAL',
+  expected_updated_at:'2026-10-14T10:00:00',evidence_reference:'Assessment A',
+  ...body,
+}});
+test('renewal uses the authenticated actor and selected record, never supplied staff identity', async()=>{
+ fakePool.query=async(sql,args)=>{
+  assert.match(sql,/fn_clinical_staff_competency_period/);
+  assert.deepEqual(args.slice(0,3),[271,42,'RENEW']);
+  const body=JSON.parse(args[3]); assert(!('user_id' in body)); assert(!('created_by' in body));
+  assert.equal(body.evidence_reference,'Assessment A');
+  return {rows:[{record:{id:43,renewed_from_id:42}}]};
+ };
+ const res=response(); await renewHandler(periodRequest({user_id:999,created_by:999}),res);
+ assert.equal(res.statusCode,201);assert.equal(res.body.renewed_from_id,42);
+});
+test('correction requires reason; invalid renewal input never reaches the database',async()=>{
+ fakePool.query=async()=>assert.fail('Invalid request reached DB');
+ for(const [fn,body] of [[correctHandler,{}],[renewHandler,{evidence_reference:''}],
+  [renewHandler,{valid_to:'2026-01-01'}],[renewHandler,{expected_updated_at:null}],
+  [renewHandler,{comment:{injected:true}}]]) {
+  const res=response();await fn(periodRequest(body),res);assert.equal(res.statusCode,400);
+ }
+});
+test('correction carries reason, actor and optimistic version to the database',async()=>{
+ fakePool.query=async(sql,args)=>{assert.equal(args[2],'CORRECT');
+  assert.equal(JSON.parse(args[3]).correction_reason,'Certificate date typo');return {rows:[{record:{id:42}}]};};
+ const res=response();await correctHandler(periodRequest({correction_reason:'Certificate date typo'}),res);
+ assert.equal(res.statusCode,200);
+});
+test('duplicates and stale edits return a conflict without retrying',async()=>{
+ for(const code of ['23505','40001']){
+  let calls=0;fakePool.query=async()=>{calls++;throw Object.assign(new Error('conflict'),{code});};
+  const res=response();await renewHandler(periodRequest(),res);assert.equal(res.statusCode,409);assert.equal(calls,1);
+ }
+});
+test('workspace rejects the older records contract even when its date basis matches',async()=>{
+ fakePool.query=async()=>({rows:[{workspace:{validity_basis:'CURRENT_DATE',rows:[]}}]});
+ const res=response();await workspaceHandler(request({}),res);assert.equal(res.statusCode,503);
 });

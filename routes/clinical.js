@@ -1399,7 +1399,7 @@ router.get('/staffing/workspace/:kind', async (req, res, next) => {
   }
   try {
     const result = await pool.query(`SELECT shiftly_api.${config[1]}($1, $2::jsonb) AS workspace`, [req.user.id, JSON.stringify(filters)]);
-    if (req.params.kind === 'mappings' && result.rows[0].workspace.validity_basis !== 'CURRENT_DATE') {
+    if (req.params.kind === 'mappings' && (result.rows[0].workspace.validity_basis !== 'CURRENT_DATE' || result.rows[0].workspace.renewal_contract !== 1)) {
       return sendApiError(req, res, { status: 503, error: 'Staff competency records need a server update.', code: 'RESOURCE_UNAVAILABLE' });
     }
     if (['attention_issue_id', 'attention_assignment_id'].some(key =>
@@ -1424,7 +1424,7 @@ router.get('/staffing/mappings/export', requirePermission(OPEN_STAFF_COMPETENCIE
   }
   try {
     const result = await pool.query('SELECT shiftly_api.fn_clinical_staff_mapping_workspace($1,$2::jsonb) AS workspace', [req.user.id,JSON.stringify(filters)]);
-    if (result.rows[0].workspace.validity_basis !== 'CURRENT_DATE') {
+    if ((result.rows[0].workspace.validity_basis !== 'CURRENT_DATE' || result.rows[0].workspace.renewal_contract !== 1)) {
       return sendApiError(req, res, { status: 503, error: 'Staff competency records need a server update.', code: 'RESOURCE_UNAVAILABLE' });
     }
     for (const [key, header] of Object.entries({
@@ -1440,11 +1440,22 @@ router.get('/staffing/mappings/export', requirePermission(OPEN_STAFF_COMPETENCIE
     }
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Staff competencies');
-    sheet.columns = ['Staff','Employee ID','Staff type','Competency','Valid from','Valid to','Record validity','Source','Active','Validity as of','Effective expiry'].map(header => ({header,width:24}));
+    sheet.columns = ['Staff','Employee ID','Staff type','Competency','Current validity','Effective expiry','Next period starts','Validity as of','Definition note'].map(header => ({header,width:24}));
+    const history = workbook.addWorksheet('Period history');
+    history.columns = ['Staff','Competency','Valid from','Valid to','Record validity','Source','Active','Recorded by','Recorded at','Evidence reference','Renewed from record','Record ID'].map(header => ({header,width:24}));
+    const corrections = workbook.addWorksheet('Corrections');
+    corrections.columns = ['Staff','Competency','Record ID','Corrected by','Corrected at','Reason','Previous values','Corrected values'].map(header => ({header,width:24}));
     for (const staff of result.rows[0].workspace.rows) {
-      const mappings = staff.mappings.length ? staff.mappings : [{}];
-      for (const mapping of mappings) sheet.addRow([staff.user_desc || staff.user_name,staff.empno,staff.staff_type_name,mapping.competency_name || 'No competencies recorded',mapping.valid_from,mapping.valid_to,mapping.validity,mapping.source_type,mapping.is_active,result.rows[0].workspace.as_of,mapping.expires_on]);
+      const name = staff.user_desc || staff.user_name;
+      for (const competency of staff.competencies.length ? staff.competencies : [{}]) {
+        sheet.addRow([name,staff.empno,staff.staff_type_name,competency.competency_name || 'No competencies recorded',competency.validity,competency.expires_on,competency.next_valid_from,result.rows[0].workspace.as_of,competency.definition_note]);
+      }
+      for (const mapping of staff.mappings) {
+        history.addRow([name,mapping.competency_name,mapping.valid_from,mapping.valid_to,mapping.validity,mapping.source_type,mapping.is_active,mapping.recorded_by,mapping.created_at,mapping.evidence_reference,mapping.renewed_from_id,mapping.id]);
+        for (const change of mapping.corrections || []) corrections.addRow([name,mapping.competency_name,mapping.id,change.corrected_by,change.corrected_at,change.reason,JSON.stringify(change.previous_record),JSON.stringify(change.corrected_record)]);
+      }
     }
+    history.views = corrections.views = [{state:'frozen',ySplit:1}];
     sheet.views = [{state:'frozen',ySplit:1}];
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
     res.setHeader('Content-Disposition','attachment; filename="staff_competencies.xlsx"');
@@ -1737,16 +1748,53 @@ router.post('/staff-competencies/batch', requirePermission(MANAGE_COMPETENCIES),
   }
 });
 
-router.put('/staff-competencies/:id', requirePermission(MANAGE_COMPETENCIES), requireStaffingRecordScope('clinical_staff_competencies'), (req, res) =>
-  updateRow(req, res, 'shiftly_schema.clinical_staff_competencies', 'id', [
-    'user_id',
-    'competency_id',
-    'valid_from',
-    'valid_to',
-    'source_type',
-    'comment',
-    'is_active',
-  ], 'Error updating staff clinical competency'));
+// Renewals insert a period; corrections preserve the previous values and reason.
+// PostgreSQL repeats permission/scope checks and locks the selected record.
+function saveCompetencyPeriod(mode) {
+  return async (req, res) => {
+    const id = parseOptionalInt(req.params.id);
+    const source = req.body || {};
+    const validFrom = parseRequiredDate(source.valid_from);
+    const validTo = optionalDate(req, res, source.valid_to, 'Valid to');
+    if (validTo === undefined) return;
+    if (!id || !validFrom || (validTo && validTo < validFrom) ||
+        !['MANUAL', 'EXTERNAL'].includes(source.source_type) ||
+        typeof source.expected_updated_at !== 'string' || !source.expected_updated_at ||
+        (source.is_active != null && typeof source.is_active !== 'boolean') ||
+        ['comment', 'evidence_reference', 'correction_reason'].some(key => source[key] != null && typeof source[key] !== 'string')) {
+      return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST', error: 'Review the dates and source, or refresh the selected record.' });
+    }
+    if (mode === 'RENEW' && !cleanText(source.evidence_reference)) {
+      return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST', error: 'Enter an assessment or certificate reference.' });
+    }
+    if (mode === 'CORRECT' && !cleanText(source.correction_reason)) {
+      return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST', error: 'Enter a reason for this correction.' });
+    }
+    const body = { valid_from: validFrom, valid_to: validTo, source_type: source.source_type,
+      is_active: source.is_active, comment: cleanText(source.comment), evidence_reference: cleanText(source.evidence_reference),
+      correction_reason: cleanText(source.correction_reason), expected_updated_at: source.expected_updated_at };
+    try {
+      const result = await pool.query('SELECT shiftly_api.fn_clinical_staff_competency_period($1,$2,$3,$4::jsonb) AS record',
+        [actorUserId(req), id, mode, JSON.stringify(body)]);
+      return res.status(mode === 'RENEW' ? 201 : 200).json(result.rows[0].record);
+    } catch (err) {
+      if (err.code === '22023' && [
+        'Enter a valid start and end date.', 'Choose a valid source.',
+        'The competency definition is inactive or outside these dates. Review the definition before renewing.',
+        'A renewal must start after the previous period started. Use Correct record for date errors.',
+        'Enter an assessment or certificate reference for this renewal.',
+        'Explain why this record needs correction.',
+      ].includes(err.message)) return sendApiError(req, res, { status: 422, code: 'INVALID_REQUEST', error: err.message });
+      if (err.code === '23505') return sendApiError(req, res, { status: 409, code: 'STAFF_COMPETENCY_ALREADY_LINKED',
+        error: 'A renewal or a period with this start date already exists. Refresh and review the history.' });
+      if (err.code === '40001') return sendApiError(req, res, { status: 409, code: 'STALE_RECORD',
+        error: 'This record changed. Close the editor and refresh before saving.' });
+      return sendPostgresError(req, res, err, { action: mode === 'RENEW' ? 'CREATE' : 'UPDATE', label: 'Error saving competency period' });
+    }
+  };
+}
+router.post('/staff-competencies/:id/renew', requirePermission(MANAGE_COMPETENCIES), saveCompetencyPeriod('RENEW'));
+router.put('/staff-competencies/:id', requirePermission(MANAGE_COMPETENCIES), saveCompetencyPeriod('CORRECT'));
 
 router.get('/competency-requirements', requirePermission(OPEN_COMPETENCY_REQUIREMENTS), async (req, res) => {
   try {
