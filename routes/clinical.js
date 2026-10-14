@@ -1399,6 +1399,9 @@ router.get('/staffing/workspace/:kind', async (req, res, next) => {
   }
   try {
     const result = await pool.query(`SELECT shiftly_api.${config[1]}($1, $2::jsonb) AS workspace`, [req.user.id, JSON.stringify(filters)]);
+    if (req.params.kind === 'mappings' && result.rows[0].workspace.validity_basis !== 'CURRENT_DATE') {
+      return sendApiError(req, res, { status: 503, error: 'Staff competency records need a server update.', code: 'RESOURCE_UNAVAILABLE' });
+    }
     if (['attention_issue_id', 'attention_assignment_id'].some(key =>
       filters[key] != null && String(result.rows[0].workspace[key]) !== filters[key])) {
       return sendApiError(req, res, { status: 503, error: 'The eligibility review scope could not be confirmed. Refresh after the server update.', code: 'RESOURCE_UNAVAILABLE' });
@@ -1421,6 +1424,9 @@ router.get('/staffing/mappings/export', requirePermission(OPEN_STAFF_COMPETENCIE
   }
   try {
     const result = await pool.query('SELECT shiftly_api.fn_clinical_staff_mapping_workspace($1,$2::jsonb) AS workspace', [req.user.id,JSON.stringify(filters)]);
+    if (result.rows[0].workspace.validity_basis !== 'CURRENT_DATE') {
+      return sendApiError(req, res, { status: 503, error: 'Staff competency records need a server update.', code: 'RESOURCE_UNAVAILABLE' });
+    }
     for (const [key, header] of Object.entries({
       attention_issue_id: 'X-ShiftMix-Attention-Issue-Id',
       attention_assignment_id: 'X-ShiftMix-Attention-Assignment-Id',
@@ -1434,11 +1440,10 @@ router.get('/staffing/mappings/export', requirePermission(OPEN_STAFF_COMPETENCIE
     }
     const workbook = new ExcelJS.Workbook();
     const sheet = workbook.addWorksheet('Staff competencies');
-    sheet.columns = ['Staff','Employee ID','Staff type','Competency','Valid from','Valid to','Validity','Source','Active','Missing required competencies'].map(header => ({header,width:24}));
+    sheet.columns = ['Staff','Employee ID','Staff type','Competency','Valid from','Valid to','Record validity','Source','Active','Validity as of','Effective expiry'].map(header => ({header,width:24}));
     for (const staff of result.rows[0].workspace.rows) {
-      const missing = staff.missing.map(m => m.competency_name).join(', ');
       const mappings = staff.mappings.length ? staff.mappings : [{}];
-      for (const mapping of mappings) sheet.addRow([staff.user_desc || staff.user_name,staff.empno,staff.staff_type_name,mapping.competency_name,mapping.valid_from,mapping.valid_to,mapping.validity,mapping.source_type,mapping.is_active,missing]);
+      for (const mapping of mappings) sheet.addRow([staff.user_desc || staff.user_name,staff.empno,staff.staff_type_name,mapping.competency_name || 'No competencies recorded',mapping.valid_from,mapping.valid_to,mapping.validity,mapping.source_type,mapping.is_active,result.rows[0].workspace.as_of,mapping.expires_on]);
     }
     sheet.views = [{state:'frozen',ySplit:1}];
     res.setHeader('Content-Type','application/vnd.openxmlformats-officedocument.spreadsheetml.sheet');
