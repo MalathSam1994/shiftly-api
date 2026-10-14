@@ -11,6 +11,7 @@ else delete require.cache[dbPath];
 const handler = path => router.stack.find(layer => layer.route?.path === path).route.stack.at(-1).handle;
 const exportHandler = handler('/staffing/mappings/export');
 const workspaceHandler = handler('/staffing/workspace/:kind');
+const availableHandler = handler('/staff-competencies/available');
 const response = () => ({
   statusCode: 200, headers: {},
   status(code) { this.statusCode = code; return this; },
@@ -20,6 +21,35 @@ const response = () => ({
   append(key, value) { this.headers[key] = [this.headers[key], value].filter(Boolean).join(', '); },
 });
 const request = query => ({ user: { id: 271 }, query, params: { kind: 'mappings' }, rid: 'records-test' });
+
+test('available competencies use selected staff and actor scope, excluding every existing period', async () => {
+  const available = [{ id: 3, competency_name: 'Infusion' }];
+  fakePool.query = async (sql, values) => {
+    assert.deepEqual(values, [271, 302]);
+    assert.match(sql, /fn_clinical_staffing_scoped_users\(\$1\)/);
+    assert.match(sql, /NOT EXISTS\s*\([\s\S]*sc.user_id = \$2 AND sc.competency_id = c.id/);
+    assert.doesNotMatch(sql, /sc\.(is_active|valid_from|valid_to)|CURRENT_DATE/);
+    return { rows: [{ allowed: true, competencies: available }] };
+  };
+  const res = response();
+  await availableHandler(request({ user_id: '302', validity: 'Valid', page: '8' }), res);
+  assert.equal(res.statusCode, 200);
+  assert.deepEqual(res.body, available);
+});
+
+test('available competencies reject invalid staff and preserve scope failures and empty lists', async () => {
+  fakePool.query = async () => assert.fail('Invalid staff reached the database');
+  for (const user_id of [undefined, '0', '-1', 'abc', ['302'], '302.5']) {
+    const res = response(); await availableHandler(request({ user_id }), res);
+    assert.equal(res.statusCode, 400);
+  }
+  for (const allowed of [false, true]) {
+    fakePool.query = async () => ({ rows: [{ allowed, competencies: [] }] });
+    const res = response(); await availableHandler(request({ user_id: '302' }), res);
+    assert.equal(res.statusCode, allowed ? 200 : 403);
+    if (allowed) assert.deepEqual(res.body, []);
+  }
+});
 
 test('Excel exports validity per record, renewal history, empty staff and server date without eligibility', async () => {
   fakePool.query = async (sql, values) => {

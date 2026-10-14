@@ -1600,6 +1600,42 @@ router.put('/competencies/:id', requirePermission(MANAGE_COMPETENCIES), (req, re
     'is_active',
   ], 'Error updating clinical competency'));
 
+router.get('/staff-competencies/available', requirePermission(MANAGE_COMPETENCIES), async (req, res) => {
+  const userId = parseOptionalInt(req.query.user_id);
+  if (!userId) {
+    return sendApiError(req, res, { status: 400, code: 'INVALID_REQUEST',
+      error: 'Choose a valid staff member before choosing competencies.' });
+  }
+  try {
+    // Initial linking excludes all existing periods, including expired/inactive ones.
+    const result = await pool.query(`
+      WITH allowed AS MATERIALIZED (
+        SELECT id FROM shiftly_api.fn_clinical_staffing_scoped_users($1)
+        WHERE id = $2
+      ), available AS (
+        SELECT c.* FROM shiftly_schema.clinical_competencies c
+        WHERE EXISTS (SELECT 1 FROM allowed)
+          AND NOT EXISTS (
+            SELECT 1 FROM shiftly_schema.clinical_staff_competencies sc
+            WHERE sc.user_id = $2 AND sc.competency_id = c.id
+          )
+      )
+      SELECT EXISTS (SELECT 1 FROM allowed) AS allowed,
+        COALESCE((SELECT jsonb_agg(to_jsonb(c) ORDER BY c.is_active DESC, c.competency_name, c.id)
+          FROM available c), '[]'::jsonb) AS competencies
+    `, [req.user.id, userId]);
+    if (!result.rows[0].allowed) {
+      return sendApiError(req, res, { status: 403, code: 'PERMISSION_DENIED',
+        error: 'This staff member is no longer in your organization scope.' });
+    }
+    return res.json(result.rows[0].competencies);
+  } catch (err) {
+    return sendPostgresError(req, res, err, {
+      action: 'LIST', label: 'Error loading available staff competencies',
+    });
+  }
+});
+
 router.get('/staff-competencies', requirePermission(OPEN_STAFF_COMPETENCIES), async (req, res) => {
   try {
     const result = await pool.query(`
