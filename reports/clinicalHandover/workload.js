@@ -5,7 +5,7 @@ const columns={
   c('staff','Staff'),c('role','Role'),c('unitPatients','Known unit patients','number'),c('unitWorkload','Unit workload','number'),
   c('fullWorkload','Total workload','number'),c('capacity','Recorded workload limit','number'),c('utilization','Utilization (%)','number'),c('status','Status')],
  allocations:[c('shift','Shift'),c('start','Shift start','datetime'),c('end','Shift end','datetime'),c('observedAt','Observed at','datetime'),
-  c('patient','Patient'),c('encounter','Encounter','identifier'),c('staff','Published staff'),c('workload','Workload points','number'),c('status','Assignment')],
+  c('patient','Patient'),c('encounter','FIN Number','identifier'),c('staff','Published staff'),c('workload','Workload points','number'),c('status','Assignment')],
 };
 async function read(client,{actor,parameters}) {
  const {rows}=await client.query('SELECT shiftly_api.fn_handover_daily_workload($1::integer,$2::jsonb) value',[actor,parameters]);

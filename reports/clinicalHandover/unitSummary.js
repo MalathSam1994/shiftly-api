@@ -3,7 +3,7 @@ const {assertClinicalPresentation}=require('./registry');
 const column=(key,label,type='text')=>({key,label,type});
 const columns={
   overview:[column('measure','Measure'),column('value','Count','number')],
-  patients:[column('location','Room / bed'),column('patientName','Patient'),column('encounter','Encounter','identifier'),
+  patients:[column('location','Room / bed'),column('patientName','Patient'),column('encounter','FIN Number','identifier'),
     column('acuity','Acuity'),column('assessedAt','Last assessed','datetime')],
 };
 async function read(client,{actor,parameters}) {

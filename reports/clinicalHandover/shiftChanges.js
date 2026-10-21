@@ -1,8 +1,8 @@
 const {assertClinicalPresentation}=require('./registry');
 // SQL owns the day interval, source identity, predecessors and authorized deltas.
 const column=(key,label,type='text')=>({key,label,type});
-const columns=[column('effectiveAt','Time','datetime'),column('patientName','Patient'),column('patientId','Patient ID','identifier'),
-  column('encounter','Encounter','identifier'),column('change','What changed'),column('before','Before'),column('after','After'),column('notes','Note')];
+const columns=[column('effectiveAt','Time','datetime'),column('patientName','Patient'),column('patientId','MRN','identifier'),
+  column('encounter','FIN Number','identifier'),column('change','What changed'),column('before','Before'),column('after','After'),column('notes','Note')];
 async function read(client,{actor,parameters}) {
   const {rows}=await client.query('SELECT shiftly_api.fn_handover_daily_changes($1,$2::jsonb) value',[actor,parameters]);
   const data=rows[0].value;

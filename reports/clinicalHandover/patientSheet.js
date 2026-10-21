@@ -2,10 +2,10 @@ const {assertClinicalPresentation}=require('./registry');
 // PostgreSQL owns the daily cutoff, historical cohort and active care factors.
 const column=(key,label,type='text')=>({key,label,type});
 const columns={
-  patients:[column('location','Room / bed'),column('patientName','Patient'),column('patientId','Patient ID','identifier'),
-    column('encounter','Encounter','identifier'),
+  patients:[column('location','Room / bed'),column('patientName','Patient'),column('patientId','MRN','identifier'),
+    column('encounter','FIN Number','identifier'),
     column('acuity','Acuity'),column('assessedAt','Last assessed','datetime')],
-  factors:[column('patientName','Patient'),column('patientId','Patient ID','identifier'),column('encounter','Encounter','identifier'),
+  factors:[column('patientName','Patient'),column('patientId','MRN','identifier'),column('encounter','FIN Number','identifier'),
     column('factor','Care factor'),column('value','Recorded value','number'),column('notes','Notes')],
 };
 async function read(client,{actor,parameters}) {
