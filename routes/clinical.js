@@ -2371,7 +2371,20 @@ async function requireOptimizerPolicyScope(req, res, next) {
   }
 }
 
-router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNMENTS), requireOptimizerPolicyScope, (req, res) =>
+function validateOptimizerHistoryPriority(req, res, next) {
+  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'history_priority_enabled') &&
+      typeof req.body.history_priority_enabled !== 'boolean') {
+    return sendApiError(req, res, {
+      status: 400,
+      error: 'history_priority_enabled must be true or false.',
+      code: 'INVALID_REQUEST',
+    });
+  }
+  // Omission uses the database default on create and preserves the value on update.
+  return next();
+}
+
+router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNMENTS), validateOptimizerHistoryPriority, requireOptimizerPolicyScope, (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_assignment_optimizer_policies', [
     'policy_code',
     'policy_name',
@@ -2391,11 +2404,12 @@ router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNME
     'minimum_rebalance_improvement',
     'maximum_suggested_reassignments',
     'hard_capacity_behavior',
+    'history_priority_enabled',
     'imbalance_warning_threshold',
     'is_active',
   ], 'Error creating assignment optimizer policy'));
 
-router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIGNMENTS), requireOptimizerPolicyScope, (req, res) =>
+router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIGNMENTS), validateOptimizerHistoryPriority, requireOptimizerPolicyScope, (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_assignment_optimizer_policies', 'id', [
     'policy_code',
     'policy_name',
@@ -2415,6 +2429,7 @@ router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIG
     'minimum_rebalance_improvement',
     'maximum_suggested_reassignments',
     'hard_capacity_behavior',
+    'history_priority_enabled',
     'imbalance_warning_threshold',
     'is_active',
   ], 'Error updating assignment optimizer policy'));
