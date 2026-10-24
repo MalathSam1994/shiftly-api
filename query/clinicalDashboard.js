@@ -3,9 +3,17 @@ const pool = require('../db');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 const { loadLiveCoverage, acknowledgeLiveCoverage } = require('../services/clinicalLiveCoverage');
+const { attachTriageSnapshots, loadTriageDistribution } = require('../services/clinicalTriage');
 
 const { attentionFilters, readAttention } = require('../services/attention');
 const router = express.Router();
+
+async function withTriage(db, actor, payload, filters) {
+  const result = await attachTriageSnapshots(db, actor, payload);
+  if (payload.applicable === false) return result;
+  const distribution = await loadTriageDistribution(db, actor, filters);
+  return distribution == null ? result : { ...result, triage_distribution: distribution };
+}
 
 function actorUserId(req) {
   const userId = Number(req.user?.sub ?? req.user?.id);
@@ -47,7 +55,12 @@ router.get('/manager/clinical-summary', async (req, res) => {
        ) AS summary`,
       [userId, from, to],
     );
-    return res.json(result.rows[0]?.summary || {});
+    const summary = result.rows[0]?.summary || {};
+    res.set('Cache-Control', 'no-store');
+    return res.json(await withTriage(pool, userId, summary, {
+      mode: 'manager', unit_id: summary.scope?.clinical_unit_id ?? null,
+      division_id: summary.scope?.division_id ?? null, department_id: summary.scope?.department_id ?? null,
+    }));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'GET',
@@ -73,7 +86,11 @@ router.get('/mobile/clinical-summary', async (req, res) => {
        ) AS summary`,
       [userId],
     );
-    return res.json(result.rows[0]?.summary || {});
+    const summary = result.rows[0]?.summary || {};
+    res.set('Cache-Control', 'no-store');
+    return res.json(await withTriage(pool, userId, summary, {
+      mode: 'mobile', shift_assignment_id: summary.shift?.shift_assignment_id ?? null,
+    }));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'GET',
@@ -112,7 +129,7 @@ async function workspace(req, res) {
   try {
     const snapshot = await runInTransactionWithBusinessTimezone(pool, async client => {
       const result = await client.query('SELECT shiftly_api.fn_manager_dashboard_workspace($1::integer,$2::date,$3::date,$4::integer,$5::integer,$6::integer) AS snapshot', [userId, ...filters]);
-      return result.rows[0].snapshot;
+      return withTriage(client, userId, result.rows[0].snapshot, { mode: 'manager', unit_id: filters[2] });
     });
     res.set('Cache-Control', 'no-store');
     if (!req.path.endsWith('/excel')) return res.json(snapshot);
@@ -129,6 +146,12 @@ async function workspace(req, res) {
     summary.addRow(['Attention preview', snapshot.alerts.length, 'Total matching issues', snapshot.attention?.total ?? 'Unavailable']);
     summary.addRow(['Attention is a capped preview; View All provides the complete authorized paginated list.']);
     for (const [key, value] of Object.entries(snapshot.kpis)) summary.addRow([key, value ?? 'Unavailable']);
+    if (snapshot.triage_distribution) {
+      summary.addRow(['ED triage — initial ESI; separate from nursing workload']);
+      for (const item of snapshot.triage_distribution.levels || []) summary.addRow([`ESI ${item.level}`, item.count]);
+      summary.addRow(['ED ESI not recorded', snapshot.triage_distribution.unrecorded]);
+      summary.addRow(['ED triage census', snapshot.triage_distribution.total]);
+    }
     for (const [name, rows] of [['Patients (up to 500)', snapshot.patients], ['Units', snapshot.by_unit], ['Workload', snapshot.workload], ['Schedule', snapshot.schedule], ['Attention preview (100)', snapshot.alerts], ['Handover preview (100)', snapshot.handovers || []]]) {
       const sheet = workbook.addWorksheet(name);
       const keys = [...new Set(rows.flatMap(row => Object.keys(row)))].filter(key => key !== 'scope' && key !== 'ineligibility_reasons');

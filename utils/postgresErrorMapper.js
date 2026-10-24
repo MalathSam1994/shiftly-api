@@ -242,6 +242,15 @@ function mapPostgresError(err, context = {}) {
   const pgCode = String(err && err.code || '');
   // Explicit, safe lifecycle messages: never forward SQL detail or stack traces.
   const clinicalErrors = {
+    CLINICAL_TRIAGE_FORBIDDEN: [403, 'You do not have access to this ED triage action.'],
+    CLINICAL_TRIAGE_NOT_FOUND: [404, 'The requested ED encounter is unavailable in your access scope.'],
+    CLINICAL_TRIAGE_ED_ONLY: [422, 'Triage can only be recorded during an active ED visit. Refresh the patient.'],
+    CLINICAL_TRIAGE_INVALID: [400, 'Check the ESI level, action, revision, and observation time. Future observations are not allowed.'],
+    CLINICAL_TRIAGE_STALE: [409, 'This ED visit or triage record changed. Refresh the patient before saving again.'],
+    CLINICAL_TRIAGE_CARE_STARTED: [409, 'Provider care has started. ESI cannot be reassessed; use an audited correction only for a recording error.'],
+    CLINICAL_TRIAGE_ALREADY_RECORDED: [409, 'Triage was already recorded. Refresh and choose escalation or correction if appropriate.'],
+    CLINICAL_TRIAGE_NO_ASSESSMENT: [409, 'No initial ESI assessment is available for this action. Refresh the patient.'],
+    CLINICAL_TRIAGE_CORRECTION_REASON_REQUIRED: [400, 'A reason is required for an audited triage correction.'],
     CLINICAL_IMPORT_INVALID: [400, 'Choose a different source and a supported import mode.'],
     CLINICAL_IMPORT_UNAVAILABLE: [404, 'The source or destination rule set is unavailable in your scope.'],
     CLINICAL_IMPORT_DRAFT_REQUIRED: [409, 'Configuration can only be imported into a draft rule set.'],
@@ -284,7 +293,7 @@ function mapPostgresError(err, context = {}) {
     'Selected staff member is missing required patient competency.': 'CLINICAL_COMPETENCY_MISSING',
   };
   if (!clinicalErrors[clinicalCode]) clinicalCode = legacyClinicalCodes[err && err.message];
-  if (pgCode === 'P0001' && clinicalErrors[clinicalCode]) {
+  if ((pgCode === 'P0001' || (pgCode === '42501' && clinicalCode?.startsWith('CLINICAL_TRIAGE_'))) && clinicalErrors[clinicalCode]) {
     const [status, details] = clinicalErrors[clinicalCode];
     if (clinicalCode === 'CLINICAL_ASSIGNMENT_INELIGIBLE_SCHEDULED_STAFF' ||
         clinicalCode === 'CLINICAL_ASSIGNMENT_NO_ELIGIBLE_STAFF' ||

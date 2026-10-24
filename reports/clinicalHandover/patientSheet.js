@@ -1,4 +1,5 @@
 const {assertClinicalPresentation}=require('./registry');
+const {dailyTriageQuery,addDailyTriage}=require('./triage');
 // PostgreSQL owns the daily cutoff, historical cohort and active care factors.
 const column=(key,label,type='text')=>({key,label,type});
 const columns={
@@ -9,17 +10,18 @@ const columns={
     column('factor','Care factor'),column('value','Recorded value','number'),column('notes','Notes')],
 };
 async function read(client,{actor,parameters}) {
-  const {rows}=await client.query('SELECT shiftly_api.fn_handover_patient_daily_sheet($1,$2::jsonb) value',[actor,parameters]);
+  const {rows}=await client.query(dailyTriageQuery('patient'),[actor,parameters]);
   const data=rows[0].value;
   assertClinicalPresentation(data,'patient_handover_sheet');
+  const patientColumns=addDailyTriage(data,columns.patients);
   return {
     clinicalStatusHidden:true, rowGrain:'One encounter in the unit at the end of the selected date, or at generation time today.',
-    patientContext:data.patientContext,totals:data.totals,
+    patientContext:data.patientContext,totals:data.totals,triageDistribution:data.triageDistribution,
     summaries:[{label:'Patients',value:data.totals.patients,availability:'AVAILABLE',definition:'Patients located by dated history or an encounter unit saved by the report time.'}],
     metricDefinitions:[],sourceLimitations:data.notes,
     sections:Object.entries(columns).map(([id,cols])=>({id,title:id==='patients'?'Patients':'Care factors',
       grain:id==='patients'?'encounter at the daily cutoff':'active recorded factor per encounter',
-      evidenceBasis:data.patientContext.basis,availability:'AVAILABLE',limitations:[],columns:cols,rows:data[id],total:data[id].length})),
+      evidenceBasis:data.patientContext.basis,availability:'AVAILABLE',limitations:[],columns:id==='patients'?patientColumns:cols,rows:data[id],total:data[id].length})),
   };
 }
 function pageDetails(dataset,offset,limit) {

@@ -1,6 +1,20 @@
 const ExcelJS = require('exceljs');
 // Strings remain strings (never ExcelJS formula objects); identifiers remain text.
 const text = value => value == null ? 'Not recorded / unavailable' : String(value);
+function appendTriageDistribution(sheet,data) {
+  const counts=data.triageDistribution;
+  if(!counts || counts.total===0) return;
+  for(const row of counts.levels || []) sheet.addRow([`ED triage ESI ${row.level}`,row.count]);
+  sheet.addRow(['ED triage not recorded',counts.unrecorded]);
+  sheet.addRow(['ED triage basis','Initial care priority at the report cutoff; separate from nursing acuity and workload.']);
+}
+function styleTriageCell(row,columns,patient) {
+  const index=columns.findIndex(c=>c.key==='triageLevel');
+  const level=patient.triage?.level;
+  if(index<0 || !Number.isInteger(level) || level<1 || level>5) return;
+  const cell=row.getCell(index+1);
+  cell.font={name:'Arial',size:10,bold:true,color:{argb:['','FFB42318','FF9A3412','FF854D0E','FF166534','FF1D4ED8'][level]}};
+}
 function style(sheet, widths) {
   sheet.views=[{state:'frozen',ySplit:1,rightToLeft:false}];
   sheet.getRow(1).font={bold:true,color:{argb:'FFFFFFFF'},name:'Arial',size:11};
@@ -78,6 +92,7 @@ async function excel(data) {
     overview.addRow(['Report time',data.patientContext.completeDay?'End of day':data.patientContext.reference]);
     overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
     overview.addRow(['Patients',data.totals.patients]);
+    appendTriageDistribution(overview,data);
     overview.addRow(['Note','Based on recorded history. Factor values use their configured meaning; missing records do not mean no care needs.']);
     for(const note of data.sourceLimitations)overview.addRow(['Note',note]);
     style(overview,[30,85]);
@@ -89,6 +104,7 @@ async function excel(data) {
       }
       if(!section.rows.length)sheet.addRow([section.id==='patients'?'No patients with a recorded unit location at this time.':'No active care factors recorded.']);
       style(sheet,section.columns.map(c=>c.key==='summary'||c.key==='notes'?65:c.type==='identifier'?24:32));
+      section.rows.forEach((row,index)=>styleTriageCell(sheet.getRow(index+2),section.columns,row));
     }
     return book.xlsx.writeBuffer();
   }
@@ -98,14 +114,18 @@ async function excel(data) {
     overview.addRow(['Report time',data.unitContext.completeDay?'End of day':data.unitContext.reference]);
     overview.addRow(['Timezone',data.businessTimezone]);overview.addRow(['Generated',data.generatedAt]);
     for(const row of data.sections.find(s=>s.id==='overview').rows) overview.addRow([row.measure,row.value]);
+    appendTriageDistribution(overview,data);
     overview.addRow(['Note','Patient counts are at the report time; movements cover the selected date. Based on recorded history.']);
     for(const note of data.sourceLimitations) overview.addRow(['Note',note]);
     style(overview,[30,85]);
     const patients=book.addWorksheet('Patients');const section=data.sections.find(s=>s.id==='patients');
     patients.addRow(section.columns.map(c=>c.label));
-    for(const row of section.rows) patients.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+    for(const row of section.rows) {
+      const added=patients.addRow(section.columns.map(c=>row[c.key]??'Not recorded'));
+    }
     if(!section.rows.length)patients.addRow(['No patients with a recorded unit location at this time.']);
-    style(patients,[20,30,24,20,32]);
+    style(patients,section.columns.map(c=>c.type==='datetime'?32:24));
+    section.rows.forEach((row,index)=>styleTriageCell(patients.getRow(index+2),section.columns,row));
     return book.xlsx.writeBuffer();
   }
   if(data.reportId==='workload_and_continuity' && data.workloadContext?.version===2) {

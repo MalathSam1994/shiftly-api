@@ -3,6 +3,7 @@ const { clinicalOperationalData } = require('../services/clinicalOperationalData
 const ExcelJS = require('exceljs');
 const { clinicalRequestContext, clinicalPool } = require('../services/clinicalRequestContext');
 const { describeClinicalAttention } = require('../services/clinicalAttentionDetails');
+const { positiveId: triageId, triageFilters, triageRecordBody, attachTriageSnapshots, attachRunTriageSnapshots } = require('../services/clinicalTriage');
 const pool = clinicalPool(require('../db'));
 const requirePermission = require('../middleware/requirePermission');
 const { sendApiError } = require('../utils/apiError');
@@ -55,6 +56,8 @@ const OPEN_COMPETENCY_REQUIREMENTS = 'screen:clinical_competency_requirements:op
 const OPEN_CAPACITY_POLICIES = 'screen:clinical_capacity_policies:open';
 const OPEN_STAFF_POOL = 'screen:clinical_staff_pool:open';
 const OPEN_ASSIGNMENT_BOARD = 'screen:clinical_assignment_board:open';
+const OPEN_CLINICAL_TRIAGE = 'screen:clinical_triage:open';
+const RECORD_CLINICAL_TRIAGE = 'action:clinical_triage:record';
 const OPEN_ASSIGNMENT_OPTIMIZER_POLICIES = 'screen:clinical_assignment_optimizer_policies:open';
 const OPEN_CLINICAL_ANALYTICS = 'screen:clinical_analytics:open';
 const MANAGE_COMPETENCIES = 'action:clinical_competencies:manage';
@@ -696,6 +699,54 @@ router.get('/desktop/acuity/:kind/summary', (req,res,next)=> {
   }catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading acuity workspace summary'});}
 });
 
+function sendTriageError(req, res, error, action) {
+  if (error.code === 'CLINICAL_TRIAGE_INVALID' && error.status === 400) {
+    return sendApiError(req, res, { status: 400, code: error.code, error: error.message });
+  }
+  return sendPostgresError(req, res, error, { action, label: 'Error processing ED triage' });
+}
+
+async function triageWorkspace(req, res) {
+  const actor = actorUserId(req);
+  if (!actor) return sendApiError(req, res, { status: 401, code: 'AUTH_REQUIRED', error: 'Please sign in to continue.' });
+  try {
+    const filters = triageFilters(req.method === 'POST' ? req.body : req.query);
+    const result = await pool.query('SELECT shiftly_api.fn_clinical_triage_workspace($1::integer,$2::jsonb) AS workspace',
+      [actor, JSON.stringify(filters)]);
+    res.set('Cache-Control', 'no-store');
+    return res.json(result.rows[0].workspace);
+  } catch (error) { return sendTriageError(req, res, error, 'LIST'); }
+}
+// Prefer POST for patient name/MRN searches, keeping them out of request URLs.
+router.get('/triage/workspace', requirePermission(OPEN_CLINICAL_TRIAGE), triageWorkspace);
+router.post('/triage/workspace', requirePermission(OPEN_CLINICAL_TRIAGE), triageWorkspace);
+
+router.get('/triage/patients/:encounterId',
+  requireAnyClinicalPermission([OPEN_CLINICAL_TRIAGE, OPEN_PATIENT_ADMIN, OPEN_MOBILE_PATIENTS, OPEN_ASSIGNMENT_BOARD]),
+  async (req, res) => {
+    const actor = actorUserId(req);
+    if (!actor) return sendApiError(req, res, { status: 401, code: 'AUTH_REQUIRED', error: 'Please sign in to continue.' });
+    try {
+      const id = triageId(req.params.encounterId);
+      const result = await pool.query('SELECT shiftly_api.fn_clinical_triage_detail($1::integer,$2::integer) AS detail', [actor, id]);
+      res.set('Cache-Control', 'no-store');
+      return res.json(result.rows[0].detail);
+    } catch (error) { return sendTriageError(req, res, error, 'GET'); }
+  });
+
+router.post('/triage/patients/:encounterId', requirePermission(RECORD_CLINICAL_TRIAGE), async (req, res) => {
+  const actor = actorUserId(req);
+  if (!actor) return sendApiError(req, res, { status: 401, code: 'AUTH_REQUIRED', error: 'Please sign in to continue.' });
+  try {
+    const id = triageId(req.params.encounterId);
+    const body = triageRecordBody(req.body);
+    const result = await pool.query('SELECT shiftly_api.fn_clinical_triage_record($1::integer,$2::integer,$3::jsonb) AS detail',
+      [actor, id, JSON.stringify(body)]);
+    res.set('Cache-Control', 'no-store');
+    return res.json(result.rows[0].detail);
+  } catch (error) { return sendTriageError(req, res, error, 'POST'); }
+});
+
 // POST keeps patient search terms out of request URLs/access logs. Never log this body.
 async function desktopPatientCensus(req,res){
  const input=req.method==='POST'?req.body:req.query;
@@ -703,10 +754,15 @@ async function desktopPatientCensus(req,res){
  const offset=Number(input.offset??0),search=String(input.search??'').trim();
  if(unitId===undefined||includeDischarged===undefined||acuityId===undefined||!Number.isSafeInteger(offset)||offset<0||search.length>160)return sendApiError(req,res,{status:400,error:'Invalid patient census filters.',code:'INVALID_REQUEST'});
  try{
-  const result=await pool.query(`WITH census AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_patient_encounters($1::integer,$2::boolean,$3::integer,NULL::integer)),
+  const triageFilter = triageFilters({ level: input.triageLevel, unrecorded: input.triageUnrecorded });
+  const result=await pool.query(`WITH base_census AS MATERIALIZED (SELECT * FROM shiftly_api.fn_clinical_patient_encounters($1::integer,$2::boolean,$3::integer,NULL::integer)),
+   triage AS MATERIALIZED (SELECT shiftly_api.fn_clinical_triage_snapshots($1::integer,COALESCE(array_agg(encounter_id),'{}'::integer[])) AS snapshots FROM base_census),
+   census AS MATERIALIZED (SELECT c.*,t.snapshots->c.encounter_id::text AS triage FROM base_census c CROSS JOIN triage t),
    filtered AS MATERIALIZED (SELECT * FROM census WHERE ($5::text='' OR strpos(lower(concat_ws(' ',display_name,patient_public_id,encounter_number)),lower($5))>0)
     AND ($6::text='' OR encounter_status=$6) AND ($7::text='' OR clinical_status=$7) AND ($8::integer IS NULL OR acuity_level_id=$8)
-    AND ($9::text='' OR patient_source_type=$9)),
+    AND ($9::text='' OR patient_source_type=$9)
+    AND ($12::integer IS NULL OR ((triage->>'applicable')::boolean AND (triage->>'level')::integer=$12))
+    AND (NOT $13::boolean OR ((triage->>'applicable')::boolean AND triage->>'level' IS NULL))),
    page AS (SELECT * FROM filtered ORDER BY CASE WHEN $10='name' THEN lower(display_name) END,CASE WHEN $10<>'name' THEN admitted_at END DESC,encounter_id LIMIT 100 OFFSET $11)
    SELECT jsonb_build_object('rows',COALESCE((SELECT jsonb_agg(to_jsonb(p)) FROM page p),'[]'::jsonb),'total',count(*),'offset',$11::integer,
     'can_manage',shiftly_api.fn_user_has_permission($1,$4),
@@ -718,9 +774,9 @@ async function desktopPatientCensus(req,res){
     'summary',jsonb_build_object('Active patients',count(DISTINCT patient_id) FILTER(WHERE encounter_status='ACTIVE'),
      'Discharged encounters',count(*) FILTER(WHERE encounter_status='DISCHARGED'),
      'Unassessed encounters',count(*) FILTER(WHERE current_assessment_id IS NULL AND encounter_status='ACTIVE'))) AS census FROM filtered`,
-    [req.user.id,includeDischarged,unitId,MANAGE_PATIENT_ADMIN,search,String(input.encounterStatus??''),String(input.clinicalStatus??''),acuityId,String(input.source??''),input.sort==='name'?'name':'admitted',offset]);
+    [actorUserId(req),includeDischarged,unitId,MANAGE_PATIENT_ADMIN,search,String(input.encounterStatus??''),String(input.clinicalStatus??''),acuityId,String(input.source??''),input.sort==='name'?'name':'admitted',offset,triageFilter.level,triageFilter.unrecorded]);
   return res.json(result.rows[0].census);
- }catch(err){return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading patient census'});}
+ }catch(err){if(err.code==='CLINICAL_TRIAGE_INVALID')return sendTriageError(req,res,err,'LIST');return sendPostgresError(req,res,err,{action:'LIST',label:'Error loading patient census'});}
 }
 router.get('/desktop/patient-census', requirePermission(OPEN_PATIENT_ADMIN),desktopPatientCensus);
 router.post('/desktop/patient-census', requirePermission(OPEN_PATIENT_ADMIN),desktopPatientCensus);
@@ -841,7 +897,7 @@ router.get('/patient-encounters', requirePermission(OPEN_PATIENT_ADMIN), async (
       `SELECT * FROM shiftly_api.fn_clinical_patient_encounters($1, $2, $3, NULL)`,
       [userId, includeDischarged, unitId],
     );
-    return res.json(result.rows);
+    return res.json(await attachTriageSnapshots(pool, userId, result.rows));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'LIST',
@@ -979,7 +1035,7 @@ router.get('/patients/:patientId', requirePermission(OPEN_PATIENT_ADMIN), async 
         mpi: patient.mpi,
         ...Object.fromEntries(Object.keys(PATIENT_IDENTITY_FIELDS).map(key=>[key,patient[key]])),
       },
-      encounters: result.rows,
+      encounters: await attachTriageSnapshots(pool, userId, result.rows),
     });
   } catch (err) {
     return sendPostgresError(req, res, err, {
@@ -1201,7 +1257,7 @@ router.get('/mobile/patients', requirePermission(OPEN_MOBILE_PATIENTS), async (r
       `SELECT * FROM shiftly_api.fn_clinical_mobile_patient_encounters($1, $2, $3)`,
       [userId, unitId, includeClosed],
     );
-    return res.json(result.rows);
+    return res.json(await attachTriageSnapshots(pool, userId, result.rows));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'LIST',
@@ -1254,7 +1310,7 @@ router.get('/mobile/patients/:encounterId', requirePermission(OPEN_MOBILE_PATIEN
         code: 'RESOURCE_NOT_FOUND',
       });
     }
-    return res.json(patient);
+    return res.json(await attachTriageSnapshots(pool, userId, { ...patient, encounter_id: encounterId }));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'GET',
@@ -2483,7 +2539,9 @@ router.get('/assignment-board', requirePermission(OPEN_ASSIGNMENT_BOARD), async 
       'SELECT shiftly_api.fn_clinical_assignment_history_summaries($1,$2::date,$3,$4,$5,$6) AS rows',
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId],
     );
-    return res.json({...result.rows[0].board, activity: activity.rows[0].rows});
+    const board = await attachTriageSnapshots(pool, userId, result.rows[0].board);
+    if (board.latest_run) board.latest_run = await attachRunTriageSnapshots(pool, userId, board.latest_run);
+    return res.json({...board, activity: activity.rows[0].rows});
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'GET',
@@ -2685,7 +2743,7 @@ router.get('/shift-context/:shiftAssignmentId/patients', requirePermission(OPEN_
       status: 404, error: 'The shift assignment is unavailable or outside your access scope.', code: 'NOT_FOUND',
     });
     res.set('Cache-Control', 'no-store');
-    return res.json(result.rows[0].overview);
+    return res.json(await attachTriageSnapshots(pool, userId, result.rows[0].overview));
   } catch (err) {
     return sendPostgresError(req, res, err, { action: 'GET', label: 'Error loading shift patients' });
   }
@@ -2854,7 +2912,7 @@ router.post('/assignment-runs/generate', requirePermission(OPTIMIZE_ASSIGNMENTS)
       `SELECT shiftly_api.fn_clinical_generate_assignment_run($1, $2::date, $3, $4, $5, $6, $7) AS run`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId, mode],
     );
-    const run = result.rows[0].run;
+    const run = await attachRunTriageSnapshots(pool, userId, result.rows[0].run);
     const reused = ['REUSED_DRAFT', 'NO_CHANGES'].includes(run?.run?.generation_outcome);
     return res.status(reused ? 200 : 201).json(run);
   } catch (err) {
@@ -2910,7 +2968,7 @@ router.post('/assignment-runs/:id/manual-override', requirePermission(OVERRIDE_A
       `SELECT shiftly_api.fn_clinical_manual_assignment_override($1, $2, $3, $4, $5) AS run`,
       [userId, runId, encounterId, shiftAssignmentId, req.body?.note ?? null],
     );
-    return res.json(result.rows[0].run);
+    return res.json(await attachRunTriageSnapshots(pool, userId, result.rows[0].run));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'UPDATE',
@@ -2933,7 +2991,7 @@ router.post('/assignment-runs/:id/publish', requirePermission(PUBLISH_ASSIGNMENT
       `SELECT shiftly_api.fn_clinical_publish_assignment_run($1, $2) AS run`,
       [userId, runId],
     );
-    return res.json(result.rows[0].run);
+    return res.json(await attachRunTriageSnapshots(pool, userId, result.rows[0].run));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'UPDATE',
@@ -2956,7 +3014,7 @@ router.post('/assignment-runs/:id/cancel', requirePermission(PUBLISH_ASSIGNMENTS
       `SELECT shiftly_api.fn_clinical_cancel_assignment_run($1, $2, $3) AS run`,
       [userId, runId, req.body?.reason ?? null],
     );
-    return res.json(result.rows[0].run);
+    return res.json(await attachRunTriageSnapshots(pool, userId, result.rows[0].run));
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'UPDATE',
@@ -2994,12 +3052,22 @@ router.get('/mobile/my-patients', requirePermission(OPEN_MOBILE_PATIENTS), async
     }
 
     const result = await pool.query(
-      `SELECT p.*, shiftly_api.fn_clinical_action_metadata(to_jsonb(pa)) AS assignment_action
+      `SELECT p.*, shiftly_api.fn_clinical_action_metadata(to_jsonb(pa)) AS assignment_action,
+         ($2 = 'CURRENT' AND pa.assignment_status = 'PUBLISHED' AND pa.ended_at IS NULL
+          AND EXISTS (SELECT 1 FROM shiftly_api.fn_clinical_published_patient_contexts($1) current_shift
+            WHERE current_shift.shift_assignment_id = p.shift_assignment_id)) AS triage_live_context
        FROM shiftly_api.fn_clinical_mobile_my_patients($1, $2, $3) p
        LEFT JOIN shiftly_schema.clinical_patient_assignments pa ON pa.id=p.assignment_id`,
       [userId, scope, shiftAssignmentId],
     );
-    return res.json(result.rows);
+    // Explicit calendar plans may be future or historical. Only the canonical
+    // business-time current shift selector permits live triage enrichment.
+    const rows = result.rows.map(({ triage_live_context, ...patient }) => patient);
+    const currentIndexes = result.rows.flatMap((row, index) =>
+      scope === 'CURRENT' && (shiftAssignmentId == null || row.triage_live_context === true) ? [index] : []);
+    const currentRows = await attachTriageSnapshots(pool, userId, currentIndexes.map(index => rows[index]));
+    currentIndexes.forEach((index, position) => { rows[index] = currentRows[position]; });
+    return res.json(rows);
   } catch (err) {
     return sendPostgresError(req, res, err, {
       action: 'LIST',
