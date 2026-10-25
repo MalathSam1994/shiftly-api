@@ -45,3 +45,86 @@ test('Excel exports the same scoped snapshot as text-safe workbook cells', async
  assert.equal(workbook.getWorksheet('Patients (up to 500)').getCell('A2').value,'=2+2');
  assert.equal(res.headers['Cache-Control'],'no-store');
 });
+
+const workspacePaths = ['/manager/workspace', '/manager/workspace/excel'];
+async function acceptsCalendarRange(from, to) {
+ const previousTimezone = process.env.SHIFTLY_BUSINESS_TIMEZONE;
+ process.env.SHIFTLY_BUSINESS_TIMEZONE = 'Europe/Berlin';
+ try {
+  for (const path of workspacePaths) {
+   const route = router.stack.find(layer => layer.route?.path === path).route.stack[0].handle;
+   const snapshot = { generated_at: `${from}T12:00:00`, from, to, clinical_basis:'Current census', staffing_basis:'Roster',
+    kpis:{patients:0}, patients:[], patient_total:0, by_unit:[], workload:[], schedule:[], alerts:[] };
+   let snapshotQueries = 0, timezoneQueries = 0;
+   fake.query = async (sql, values) => {
+    if (sql.includes("set_config('shiftly.business_timezone'")) {
+     timezoneQueries++; assert.deepEqual(values, ['Europe/Berlin']);
+    }
+    if (sql.includes('fn_manager_dashboard_workspace')) {
+     snapshotQueries++;
+     assert.deepEqual(values, [271, from, to, null, null, null], `${path} must preserve date-only bounds`);
+     assert.match(sql, /\$2::date,\$3::date/);
+     return {rows:[{snapshot}]};
+    }
+    return {rows:[]};
+   };
+   const res = response();
+   await route({...request({from,to}),path}, res);
+   assert.equal(res.statusCode, 200, `${path}: ${from} to ${to}`);
+   assert.equal(snapshotQueries, 1); assert.equal(timezoneQueries, 1);
+   assert.equal(res.headers['Cache-Control'], 'no-store');
+   if (path.endsWith('/excel')) {
+    assert.ok(Buffer.isBuffer(res.body));
+    const ExcelJS = require('exceljs'); const workbook = new ExcelJS.Workbook();
+    await workbook.xlsx.load(res.body);
+    assert.equal(workbook.getWorksheet('Overview').getCell('B3').value, from);
+    assert.equal(workbook.getWorksheet('Overview').getCell('D3').value, to);
+   } else {
+    assert.deepEqual(res.body, snapshot);
+   }
+  }
+ } finally {
+  if (previousTimezone === undefined) delete process.env.SHIFTLY_BUSINESS_TIMEZONE;
+  else process.env.SHIFTLY_BUSINESS_TIMEZONE = previousTimezone;
+ }
+}
+
+test('JSON and Excel accept the Berlin autumn and spring clock-change calendar days', async () => {
+ // These civil days last 25 and 23 hours; each still has the next date as its exclusive end.
+ await acceptsCalendarRange('2026-10-25', '2026-10-26');
+ await acceptsCalendarRange('2026-03-29', '2026-03-30');
+});
+
+test('JSON and Excel accept 31 calendar days across either clock change', async () => {
+ await acceptsCalendarRange('2026-10-01', '2026-11-01');
+ await acceptsCalendarRange('2026-03-01', '2026-04-01');
+});
+
+test('JSON and Excel reject collapsed, reversed, oversized and malformed calendar filters before querying', async () => {
+ let queries = 0;
+ fake.query = async () => { queries++; assert.fail('Invalid date range reached the database'); };
+ const invalid = [
+  {from:'2026-10-25',to:'2026-10-25'},
+  {from:'2026-03-29',to:'2026-03-29'},
+  {from:'2026-10-26',to:'2026-10-25'},
+  {from:'2026-03-30',to:'2026-03-29'},
+  {from:'2026-10-01',to:'2026-11-02'},
+  {from:'2026-03-01',to:'2026-04-02'},
+  {from:'2026-02-29',to:'2026-03-01'},
+  {from:'2026-10-25T00:00:00+02:00',to:'2026-10-26'},
+  {from:['2026-10-25','2026-10-26'],to:'2026-10-27'},
+  {to:'2026-10-26'},
+  {from:'2026-10-25',to:'2026-10-26',unitId:'0'},
+  {from:'2026-10-25',to:'2026-10-26',staffTypeId:'2147483648'},
+ ];
+ for (const path of workspacePaths) {
+  const route = router.stack.find(layer => layer.route?.path === path).route.stack[0].handle;
+  for (const query of invalid) {
+   const res = response(); await route({...request(query),path}, res);
+   assert.equal(res.statusCode, 400, `${path}: ${JSON.stringify(query)}`);
+   assert.equal(res.body.code, 'INVALID_REQUEST');
+   assert.match(res.body.error, /1–31 day range \(exclusive end\)/);
+  }
+ }
+ assert.equal(queries, 0);
+});
