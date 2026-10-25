@@ -355,6 +355,45 @@ async function setWorkflowScopeForCreate(client, body) {
 
 
 
+function scopedInboxFilters(query) {
+  const scopeKeys = ['shiftDate', 'departmentId', 'shiftTypeId', 'staffTypeId', 'pendingOnly'];
+  if (!scopeKeys.some(key => query[key] != null)) return null;
+
+  const filters = {};
+  for (const key of ['inboxUserId', 'managerUserId', 'requestedByUserId',
+    'divisionId', 'departmentId', 'shiftTypeId', 'staffTypeId']) {
+    if (query[key] == null) continue;
+    const value = query[key];
+    if (typeof value !== 'string' || !/^[1-9]\d*$/.test(value) || Number(value) > 2147483647) {
+      throw new Error('Choose valid workflow and shift filters.');
+    }
+    filters[key] = Number(value);
+  }
+  if (query.shiftDate != null) {
+    const value = query.shiftDate;
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) {
+      throw new Error('Choose a valid shift date.');
+    }
+    const date = new Date(`${value}T00:00:00Z`);
+    if (value.startsWith('0000-') || !Number.isFinite(date.getTime()) ||
+        date.toISOString().slice(0, 10) !== value) {
+      throw new Error('Choose a valid shift date.');
+    }
+    filters.shiftDate = value;
+  }
+  if (query.pendingOnly != null) {
+    if (!['true', 'false'].includes(query.pendingOnly)) {
+      throw new Error('Choose a valid pending request filter.');
+    }
+    filters.pendingOnly = query.pendingOnly === 'true';
+  }
+  if (query.requestStatus != null &&
+      (typeof query.requestStatus !== 'string' || query.requestStatus.length > 50)) {
+    throw new Error('Choose a valid request status.');
+  }
+  return filters;
+}
+
 /**
  * GET /shift-requests
  *
@@ -363,10 +402,49 @@ async function setWorkflowScopeForCreate(client, body) {
  *    OR where this manager is the primary manager in shiftly_schema.user_managers).
  *  - requestedByUserId: filter by the requesting user id.
  *  - requestStatus: filter by status (PENDING, APPROVED, REJECTED, ...).
+ *  - shiftDate, divisionId, departmentId, shiftTypeId, staffTypeId: exact shift scope.
+ *  - pendingOnly: include every pending workflow stage when true.
+ * Supplying a new scope/pending filter requires the authenticated user's current
+ * inbox. Legacy unscoped queries retain their existing behavior.
  */
 router.get('/', async (req, res) => {
   try {
  const { managerUserId, inboxUserId, requestedByUserId, requestStatus, divisionId } = req.query;
+    let scope;
+    try {
+      scope = scopedInboxFilters(req.query);
+    } catch (error) {
+      return sendApiError(req, res, {
+        status: 400,
+        error: error.message,
+        code: 'INVALID_REQUEST',
+      });
+    }
+    let scopedActorId;
+    if (scope) {
+      scopedActorId = Number(req.user?.sub ?? req.user?.id);
+      if (!Number.isInteger(scopedActorId) || scopedActorId <= 0 || scopedActorId > 2147483647) {
+        return sendApiError(req, res, {
+          status: 401,
+          error: 'Please sign in to continue.',
+          code: 'UNAUTHORIZED',
+        });
+      }
+      if (scope.inboxUserId == null && scope.managerUserId == null) {
+        return sendApiError(req, res, {
+          status: 400,
+          error: 'Choose your workflow inbox before loading requests.',
+          code: 'INVALID_REQUEST',
+        });
+      }
+      if ([scope.inboxUserId, scope.managerUserId].some(id => id != null && id !== scopedActorId)) {
+        return sendApiError(req, res, {
+          status: 403,
+          error: 'You can only open your own workflow inbox.',
+          code: 'PERMISSION_DENIED',
+        });
+      }
+    }
  
      // ✅ Safety: never allow "list everything" by mistake
     const hasAnyFilter =
@@ -403,12 +481,39 @@ router.get('/', async (req, res) => {
   whereClauses.push(`sr.division_id = $${index}`);
     }
 
+    if (scope) {
+      for (const [key, column, cast] of [
+        ['shiftDate', 'sr.requested_shift_date', 'date'],
+        ['departmentId', 'sr.requested_department_id', 'integer'],
+        ['shiftTypeId', 'sr.requested_shift_type_id', 'integer'],
+      ]) {
+        if (scope[key] == null) continue;
+        values.push(scope[key]);
+        whereClauses.push(`${column} = $${values.length}::${cast}`);
+      }
+      if (scope.staffTypeId != null) {
+        values.push(scope.staffTypeId);
+        // NEW_SHIFT approval uses the requester's current staff type. Requests
+        // about an existing shift keep the assignment's roster staff type.
+        whereClauses.push(`CASE WHEN sr.request_type = 'NEW_SHIFT'
+          THEN requested_by_user.staff_type_id
+          ELSE COALESCE(request_assignment.staff_type_id, requested_by_user.staff_type_id)
+          END = $${values.length}::integer`);
+      }
+      if (scope.pendingOnly) {
+        whereClauses.push(`sr.request_status LIKE 'PENDING%'`);
+      }
+    }
+
 
 
      const hasInboxParam =
        inboxUserId != null && String(inboxUserId).trim() !== '';
 
-    if (hasInboxParam) {
+    if (scope) {
+      values.push(scopedActorId);
+      whereClauses.push(`sr.inbox_user_id = $${values.length}`);
+    } else if (hasInboxParam) {
       // ✅ STRICT INBOX MODE:
       // Only show items where THIS user is the current approver.
       const actorId = parseInt(String(inboxUserId), 10);
@@ -489,11 +594,14 @@ router.get('/', async (req, res) => {
         ${SHIFT_REQUEST_RESPONSE_SELECT}
       FROM shiftly_api.v_shift_requests sr
       ${SHIFT_REQUEST_RESPONSE_JOINS}
+      ${scope?.staffTypeId != null ? `LEFT JOIN shiftly_schema.shift_assignments request_assignment
+        ON request_assignment.id = sr.shift_assignment_id` : ''}
       ${whereSql}
       ORDER BY sr.created_at DESC
     `;
 
     const result = await pool.query(query, values);
+    if (scope) res.set('Cache-Control', 'no-store');
     res.json(normalizeShiftRequestRows(result.rows));
   } catch (err) {
     return sendPostgresError(req, res, err, {
