@@ -2,7 +2,7 @@ const { randomUUID, createHash } = require('node:crypto');
 const pool = require('../../db');
 const { setLocalBusinessTimezone } = require('../../utils/shiftlyRuntimeConfig');
 const registry = require('./registry');
-// Report-specific, read-only PostgreSQL dataset readers for all seven reports.
+// Report-specific, read-only PostgreSQL dataset readers.
 // Enabling metadata alone cannot accidentally enable an empty or fake report.
 const patientSheet=require('./patientSheet');
 const shiftChanges=require('./shiftChanges');
@@ -10,7 +10,8 @@ const readiness=require('./readiness');
 const outstandingIssues=require('./outstandingIssues');
 const workload=require('./workload');
 const reviewFollowUp=require('./reviewFollowUp');
-const readers = new Map([['unit_handover_summary',require('./unitSummary').read],['patient_handover_sheet',patientSheet.read],['changes_since_previous_shift',shiftChanges.read],['incoming_shift_readiness',readiness.read],['outstanding_handover_issues',outstandingIssues.read],['workload_and_continuity',workload.read],['handover_review_follow_up',reviewFollowUp.read]]);
+const bedAvailability=require('./bedAvailability');
+const readers = new Map([['unit_handover_summary',require('./unitSummary').read],['patient_handover_sheet',patientSheet.read],['changes_since_previous_shift',shiftChanges.read],['incoming_shift_readiness',readiness.read],['outstanding_handover_issues',outstandingIssues.read],['workload_and_continuity',workload.read],['handover_review_follow_up',reviewFollowUp.read],['available_beds_by_unit',bedAvailability.read]]);
 const MAX_ROWS = 5000, MAX_BYTES = 10 * 1024 * 1024;
 async function transaction(readOnly, action) {
   const client = await pool.connect();
@@ -42,6 +43,9 @@ async function lookup(client, actor, kind, params, search = '', offset = 0, valu
   return rows[0].value;
 }
 async function selectionLookup(client,actor,def,key,params,search='',offset=0,value=null) {
+  if (def.id==='available_beds_by_unit' && key==='unitId') {
+    return bedAvailability.lookupUnits(client,{actor,parameters:params,search,offset,value});
+  }
   if (['shiftTypeId','shiftContextId','incomingContextId','outgoingContextId'].includes(key)) {
     const {rows}=await client.query('SELECT shiftly_api.fn_handover_report_shift_lookup($1,$2,$3::jsonb,$4,$5,$6) value',
       [actor,key,params,search,offset,value]);
@@ -90,7 +94,7 @@ async function lookups(actor, id, field, params, search, offset) {
   if (!def.parameters.includes(field) || !f || f.type!=='lookup') throw registry.fail('This selector is not supported by this report.');
   params=registry.parameters(def,params,{partial:true});
   return transaction(true,async client=>{
-    if (['patient_handover_sheet','changes_since_previous_shift','incoming_shift_readiness','outstanding_handover_issues','workload_and_continuity','handover_review_follow_up'].includes(def.id)) await authorize(client,actor,def);
+    if (['patient_handover_sheet','changes_since_previous_shift','incoming_shift_readiness','outstanding_handover_issues','workload_and_continuity','handover_review_follow_up','available_beds_by_unit'].includes(def.id)) await authorize(client,actor,def);
     return selectionLookup(client,actor,def,field,params,search,offset);
   });
 }
@@ -156,11 +160,15 @@ async function generate(actor,id,input) {
     for (const pair of authorizationPairs) capturedPairs.set(`${pair.division_id}:${pair.department_id}`,pair);
     const authorizedScope={...ctx,pairs:[...capturedPairs.values()]};
     const rowCount=validateDataset(def,result);
+    const scopeLabel=def.id==='available_beds_by_unit'
+      ? (selections.unitId||selections.departmentId||selections.divisionId)?.label||'All authorized units'
+      : [ctx.unit_name,...ctx.pairs.map(p=>`${p.department_name} | ${p.division_name}`)].filter(Boolean).join(' / ');
+    const bedPlanningBasis='Current configured capacity and recorded occupied bed locations at generation time. Incomplete bed locations show an upper bound that needs verification; missing capacity is shown separately.';
     return {...result,reportId:id,title:def.title,schemaVersion:1,parameters:ctx.parameters,selections,
-      authorizedScope,scopeLabel:[ctx.unit_name,...ctx.pairs.map(p=>`${p.department_name} | ${p.division_name}`)].filter(Boolean).join(' / '),
-      businessTimezone:ctx.business_timezone,referenceTime:result.changeContext?.reference||result.patientContext?.reference||result.unitContext?.reference||result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
+      authorizedScope,scopeLabel,
+      businessTimezone:ctx.business_timezone,referenceTime:result.bedAvailabilityContext?.reference||result.changeContext?.reference||result.patientContext?.reference||result.unitContext?.reference||result.reviewContext?.reference||result.workloadContext?.reference||result.issueContext?.reference||result.readinessContext?.reference||referenceTime,dataReferenceTime,timeBasis:def.timeBasis,
       generatedAt:dataReferenceTime,intervalStart:result.reviewContext?.start||result.workloadContext?.start||result.issueContext?.start||result.patientContext?.start||result.unitContext?.start||result.readinessContext?.start||result.changeContext?.start||ctx.interval_start,intervalEndExclusive:result.reviewContext?.endExclusive||result.workloadContext?.endExclusive||result.issueContext?.endExclusive||result.patientContext?.endExclusive||result.unitContext?.endExclusive||result.readinessContext?.endExclusive||result.readinessContext?.end||result.changeContext?.endExclusive||ctx.interval_end_exclusive,
-      planningBasis:result.reviewContext?.version===4?'Expected shifts on the selected date, retained schedules and latest published patient assignments. Future dates use current patients.':result.reviewContext?.version===3?'Published assignment changes during the selected date; before and after belong to the same recorded publication.':result.reviewContext?.version===2?'Recorded review activity for the selected shift date, by day end or generation time today.':result.workloadContext?.version===2?'Shifts starting on the selected date, observed by shift end or report time. Today excludes shifts not yet started.':result.issueContext?.version===2?'Recorded outstanding issues at the end of the selected date; today uses the latest recorded state.':result.readinessContext?.version===2?'All shifts starting on the selected date; past dates show retained schedules, current and future dates show the recorded plan.':result.changeContext?.version===2?'Changes during the selected date; today includes recorded changes so far.':(result.unitContext||result.patientContext?.version===2)?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
+      planningBasis:result.bedAvailabilityContext?bedPlanningBasis:result.reviewContext?.version===4?'Expected shifts on the selected date, retained schedules and latest published patient assignments. Future dates use current patients.':result.reviewContext?.version===3?'Published assignment changes during the selected date; before and after belong to the same recorded publication.':result.reviewContext?.version===2?'Recorded review activity for the selected shift date, by day end or generation time today.':result.workloadContext?.version===2?'Shifts starting on the selected date, observed by shift end or report time. Today excludes shifts not yet started.':result.issueContext?.version===2?'Recorded outstanding issues at the end of the selected date; today uses the latest recorded state.':result.readinessContext?.version===2?'All shifts starting on the selected date; past dates show retained schedules, current and future dates show the recorded plan.':result.changeContext?.version===2?'Changes during the selected date; today includes recorded changes so far.':(result.unitContext||result.patientContext?.version===2)?'End of the selected date; today includes recorded data so far.':'Future contexts describe the current recorded plan, not confirmed future outcomes. Expected discharge is not actual discharge.',rowCount};
   });
   if (Buffer.byteLength(JSON.stringify(dataset),'utf8')>MAX_BYTES) throw registry.fail('Report exceeds the 10 MB generation limit. Narrow the scope.',413,'REPORT_TOO_LARGE');
   return transaction(false,async client=>{

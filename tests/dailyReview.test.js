@@ -48,7 +48,7 @@ test('daily review exposes four required selectors and rejects old cohort/status
   assert.throws(()=>registry.parameters(def,{...input,[key]:1}),/not supported/);
  assert.throws(()=>registry.parameters(def,{...input,sortBy:'reviewedTime'}));
  assert.equal(registry.parameters(def,{divisionId:1},{partial:true}).divisionId,1);
- for(const report of registry.reports)assert.ok(report.parameters.includes('shiftDate'));
+ for(const report of registry.reports.filter(r=>r.timeBasis.startsWith('DAY_')))assert.ok(report.parameters.includes('shiftDate'));
 });
 async function dataset(){
  const value={context:{version:3,date:input.shiftDate,completeDay:true,reference:'2026-09-23T23:59:59.999999+02:00'},

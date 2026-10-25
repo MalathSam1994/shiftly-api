@@ -80,6 +80,14 @@ const reports = [
   definition('handover_review_follow_up','Patient assignment timeline','Patient coverage across scheduled and missing shifts, with published nurses and times.',
     [...org,'shiftDate'], [...org,'shiftDate'], [PATIENT,STAFF,REVIEW],
     [section('coverage','Patient assignment matrix','patient / expected shift')], ['timeline'],['effectiveTime'], 'DAY_PLAN'),
+  {...definition('available_beds_by_unit','Available beds by unit','Current bed capacity, recorded occupancy and patients without a recorded bed. Incomplete bed locations show an upper bound that needs verification.',
+    [...org], [], [PATIENT],
+    [section('units','Beds by unit','active clinical unit at generation time')], ['unit'],['unit'], 'CURRENT_SNAPSHOT'),
+    available:true,unavailableReason:'',fieldOverrides:{
+      divisionId:{semantics:'Optional hospital filter. Leave blank for all authorized hospitals.'},
+      departmentId:{semantics:'Optional department filter within the selected hospital.'},
+      unitId:{semantics:'Optional unit filter. Leave blank to compare all active units in the selected scope.'},
+    }},
 ];
 // Only implemented readers are enabled. Per-report overrides leave other forms unchanged.
 Object.assign(reports[0], { available:true, unavailableReason:'', fieldOverrides:{

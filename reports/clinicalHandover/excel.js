@@ -1,6 +1,22 @@
 const ExcelJS = require('exceljs');
 // Strings remain strings (never ExcelJS formula objects); identifiers remain text.
 const text = value => value == null ? 'Not recorded / unavailable' : String(value);
+// Use the saved server evidence; never derive a bed count in the export.
+function bedAvailability(value) {
+  if(value.availabilityKind==='CAPACITY_NOT_CONFIGURED' || value.totalBeds===null)
+    return {value:'Capacity not configured',needsVerification:false};
+  if(value.availabilityKind==='UPPER_BOUND' && Number.isFinite(value.availableBedsUpperBound) && value.availableBedsUpperBound>=0)
+    return {value:`Up to ${value.availableBedsUpperBound} — needs verification`,needsVerification:true};
+  if((value.availabilityKind==null || value.availabilityKind==='CONFIRMED') && Number.isFinite(value.availableBeds) && value.availableBeds>=0)
+    return {value:value.availableBeds,needsVerification:false};
+  // Legacy saved generations have no upper bound. Their unknowns stay unknown.
+  return {value:'Unavailable',needsVerification:false};
+}
+function styleBedAvailability(cell,presentation) {
+  const confirmed=typeof presentation.value==='number';
+  cell.font={...cell.font,bold:true,...(presentation.needsVerification?{color:{argb:'FFC2410C'}}:confirmed?{}:{color:{argb:'FF6B7280'}})};
+  cell.fill={type:'pattern',pattern:'solid',fgColor:{argb:presentation.needsVerification?'FFFFF7ED':confirmed?'FFEAF6F1':'FFF3F4F6'}};
+}
 function appendTriageDistribution(sheet,data) {
   const counts=data.triageDistribution;
   if(!counts || counts.total===0) return;
@@ -229,7 +245,8 @@ async function excel(data) {
   const issues=data.reportId==='outstanding_handover_issues';
   const workload=data.reportId==='workload_and_continuity';
   const followUp=data.reportId==='handover_review_follow_up';
-  const summary=book.addWorksheet(unit||readiness||issues||workload||followUp?'Overview':'Summary');summary.addRow(['Measure','Value','Definition / limitation']);
+  const beds=data.reportId==='available_beds_by_unit';
+  const summary=book.addWorksheet(unit||readiness||issues||workload||followUp||beds?'Overview':'Summary');summary.addRow(['Measure','Value','Definition / limitation']);
   summary.addRow(['Report',data.title,data.planningBasis]);
   summary.addRow(['Scope',data.scopeLabel,'Authorized scope at generation; access rechecked at export']);
   summary.addRow(['Reference time',new Date(data.referenceTime),'UTC instant; business zone '+data.businessTimezone]);
@@ -238,7 +255,13 @@ async function excel(data) {
   summary.getRow(summary.rowCount).getCell(2).numFmt='yyyy-mm-dd hh:mm:ss "UTC"';
   summary.addRow(['Generated',new Date(data.generatedAt),'Immutable generation '+data.generationId]);
   summary.getRow(summary.rowCount).getCell(2).numFmt='yyyy-mm-dd hh:mm:ss "UTC"';
-  for(const s of data.summaries)summary.addRow([s.label,s.value==null?'Unavailable':s.value,text(s.definition)]);
+  const bedSummaryRows=[];
+  for(const s of data.summaries) {
+    const availability=beds && ['Available beds','Available beds upper bound','Capacity not configured'].includes(s.label)
+      ? bedAvailability(data.totals) : null;
+    const row=summary.addRow([availability?'Available beds':s.label,availability?availability.value:s.value==null?'Unavailable':s.value,text(s.definition)]);
+    if(availability)bedSummaryRows.push({row:row.number,presentation:availability});
+  }
   for(const d of data.metricDefinitions)summary.addRow([d.label||d.id,'Definition',text(d.definition)]);
   for(const l of data.sourceLimitations)summary.addRow(['Limitation','',text(l)]);
   if(unit) {
@@ -308,7 +331,8 @@ async function excel(data) {
     summary.addRow(['Interval basis',data.changeContext.basis,data.changeContext.partial?'Only elapsed portion has evidence':'Elapsed interval']);
     for(const c of data.categorySummaries) summary.addRow([c.category,c.changes,`${c.encounters} distinct encounters; categories overlap for mixed operations`]);
   }
-  style(summary,[32,35,80]);
+  style(summary,[32,beds?45:35,80]);
+  for(const {row,presentation} of bedSummaryRows)styleBedAvailability(summary.getCell(row,2),presentation);
   const params=book.addWorksheet(unit||patient||changes||readiness||issues||workload||followUp?'Parameters and Definitions':'Parameters');params.addRow(['Parameter','Applied value','Meaning']);
   for(const [key,value] of Object.entries(data.parameters))params.addRow([key,data.selections[key]?.label||text(value),data.selections[key]?.meta?.basis||'Applied at generation']);
   if(unit||patient||changes||readiness||issues||workload||followUp) {
@@ -319,12 +343,13 @@ async function excel(data) {
   const sections=unit?[...data.sections].sort((a,b)=>['patients','movements','exceptions','overview','distributions'].indexOf(a.id)-['patients','movements','exceptions','overview','distributions'].indexOf(b.id)):data.sections;
   sections.forEach((section,index)=>{
     if(unit && ['overview','distributions'].includes(section.id) || readiness && section.id==='overview')return;
-    const sheet=book.addWorksheet((unit||patient||changes||readiness||issues||workload||followUp?section.title:`${index+1} ${section.title}`).replace(/[\\/*?:\[\]]/g,' ').slice(0,31));
+    const sheet=book.addWorksheet((unit||patient||changes||readiness||issues||workload||followUp||beds?section.title:`${index+1} ${section.title}`).replace(/[\\/*?:\[\]]/g,' ').slice(0,31));
     const columns=section.columns;
     sheet.addRow(columns.length?columns.map(c=>c.label):['Section status']);
     for(const row of section.rows) {
       const values=columns.map(c=>{
-        const v=row[c.key]; if(v==null)return 'Not recorded / unavailable';
+        if(beds && c.key==='availableBeds')return bedAvailability(row).value;
+        const v=row[c.key]; if(v==null)return beds?'Unavailable':'Not recorded / unavailable';
         if(c.type==='number')return v;
         if(c.type==='date'||c.type==='datetime')return new Date(c.type==='date'?v+'T00:00:00Z':v);
         return String(v);
@@ -339,7 +364,17 @@ async function excel(data) {
     }
     for(const note of section.limitations)sheet.addRow(['Limitation: '+text(note)]);
     if(section.availability==='UNAVAILABLE')sheet.addRow(['Unavailable - no historical/current evidence substituted']);
-    style(sheet,columns.length?columns.map(c=>c.type==='text'?40:24):[80]);
+    if(beds && !section.rows.length)sheet.addRow(['No active units in the authorized scope.']);
+    const bedWidths={division:30,department:30,unit:32,totalBeds:18,occupiedBeds:22,unknownBeds:28,availableBeds:36,availabilityStatus:40};
+    style(sheet,beds?columns.map(c=>bedWidths[c.key]||24):columns.length?columns.map(c=>c.type==='text'?40:24):[80]);
+    if(beds) {
+      sheet.views=[{state:'frozen',xSplit:3,ySplit:1,rightToLeft:false}];
+      const availableColumn=columns.findIndex(c=>c.key==='availableBeds')+1;
+      for(let row=2;availableColumn>0 && row<=section.rows.length+1;row++) {
+        const cell=sheet.getCell(row,availableColumn);
+        styleBedAvailability(cell,bedAvailability(section.rows[row-2]));
+      }
+    }
   });
   return book.xlsx.writeBuffer();
 }
