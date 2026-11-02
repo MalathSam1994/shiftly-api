@@ -79,6 +79,7 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
     const occupied = migration.match(/CREATE OR REPLACE FUNCTION shiftly_api\.fn_roster_occupied_places\([\s\S]*?\$\$;/i);
     assert.ok(occupied, 'Use the actual production occupied-place definition.');
     await db.query(occupied[0]);
+    await db.query('BEGIN');
     const today = (await db.query("SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS day")).rows[0].day;
     const overview = async (actor = 1) => (await db.query(shiftPeriodOverviewSql, [1, actor, 'UTC'])).rows[0]?.overview;
     const current = async (actor = 1) => (await overview(actor)).days.find(d => d.date === today);
@@ -89,7 +90,7 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
       assert.equal(day.night_missing, true);
     });
     await t.test('cancelled and absence rows do not occupy capacity; pending overrides do not replace effective capacity', async () => {
-      await db.query(`INSERT INTO shiftly_schema.shift_assignments VALUES
+      await db.query(`INSERT INTO shiftly_schema.shift_assignments (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence) VALUES
         (1,1,CURRENT_DATE,1,1,1,1,'APPROVED',2),(2,1,CURRENT_DATE,1,1,1,1,'REQUESTED',2),
         (3,1,CURRENT_DATE,1,1,1,1,'CANCELLED',2),(4,1,CURRENT_DATE,1,1,1,1,'APPROVED',1),
         (5,1,CURRENT_DATE,1,1,1,2,'DRAFT',2);
@@ -99,18 +100,18 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
       assert.equal(day.night_assigned, 1); assert.equal(day.night_missing, false);
       assert.equal((await overview()).total_assignments, 3);
     });
-    await t.test('midnight shifts are night and weekday-only alternatives stay unknown on eligible dates', async () => {
-      await db.query(`INSERT INTO shiftly_schema.shift_types VALUES (3,'00:00','08:00','WEEKDAY_ONLY',true);
+    await t.test('period-used night shift takes precedence over unused midnight alternatives', async () => {
+      await db.query(`INSERT INTO shiftly_schema.shift_types (id,start_time,end_time,day_type,is_active) VALUES (3,'00:00','08:00','WEEKDAY_ONLY',true);
         INSERT INTO shiftly_schema.staff_shift_rules VALUES (3,1,1,1,3,1,true);`);
       const data = await overview();
       for (const day of data.days) {
         const weekday = new Date(day.date + 'T12:00:00Z').getUTCDay();
-        assert.equal(day.night_required, day.date === today || weekday === 0 || weekday === 6 ? 4 : null);
-        if (day.date !== today && weekday !== 0 && weekday !== 6) assert.equal(day.night_missing, false);
+        assert.equal(day.night_required, 4);
+        assert.equal(day.night_missing, day.date !== today);
       }
     });
     await t.test('alternative day/night types do not inflate saved capacity or invent missing shifts', async () => {
-      await db.query(`INSERT INTO shiftly_schema.shift_types VALUES
+      await db.query(`INSERT INTO shiftly_schema.shift_types (id,start_time,end_time,day_type,is_active) VALUES
         (4,'08:00','16:00','ANY',true),(5,'22:00','06:00','ANY',true);
         INSERT INTO shiftly_schema.staff_shift_rules VALUES
         (4,1,1,1,4,6,true),(5,1,1,1,5,3,true);`);
@@ -119,9 +120,10 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
       assert.equal(saved.day_required, 10);
       assert.equal(saved.night_required, 4);
       const absent = data.days.find(d => d.date !== today);
-      assert.equal(absent.day_required, null);
-      assert.equal(absent.night_required, null);
-      assert.equal(absent.night_missing, false);
+      assert.equal(absent.day_required, 8);
+      assert.equal(absent.night_required, 4);
+      assert.equal(absent.night_missing, true);
+      assert.deepEqual(absent.shifts.map(s => s.shift_type_id), [1,2]);
     });
     await t.test('a partially created category does not add uncreated staff groups or alternative types', async () => {
       await db.query(`INSERT INTO shiftly_schema.staff_types VALUES (2,'RN',true);
@@ -134,7 +136,94 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
       assert.equal(explicitEmpty.night_assigned, 0);
       assert.equal(explicitEmpty.night_required, 4);
       assert.equal(explicitEmpty.night_missing, true);
-      assert.equal(explicitEmpty.day_required, null);
+      assert.equal(explicitEmpty.day_required, 8);
+    });
+    await t.test('a day with only actual previous-night spillover still misses both period shifts', async () => {
+      await db.query('SAVEPOINT spillover_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.shift_assignments
+          (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,start_time,end_time)
+          VALUES (16,1,CURRENT_DATE-3,1,1,1,2,'APPROVED',2,'19:00','07:30');`);
+        const date = (await db.query("SELECT to_char(CURRENT_DATE-2,'YYYY-MM-DD') AS day")).rows[0].day;
+        const day = (await overview()).days.find(d => d.date === date);
+        assert.equal(day.day_assigned, 0); assert.equal(day.night_assigned, 0);
+        assert.equal(day.shifts.find(s => s.shift_type_id === 1).missing, true);
+        assert.equal(day.shifts.find(s => s.shift_type_id === 2).missing, true);
+        assert.equal(day.spillover_count, 1); assert.equal(day.spillover_until, '07:30');
+        assert.equal(day.spillover_only, true);
+        await db.query(`INSERT INTO shiftly_schema.shift_periods VALUES
+          (2,CURRENT_DATE-2,CURRENT_DATE-2,1,1),
+          (3,CURRENT_DATE-10,CURRENT_DATE-3,1,1),
+          (4,CURRENT_DATE-10,CURRENT_DATE-3,2,1);
+          INSERT INTO shiftly_schema.shift_assignments
+          (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,start_time,end_time)
+          VALUES (19,3,CURRENT_DATE-3,1,1,1,2,'APPROVED',2,'19:00','06:00'),
+                 (20,4,CURRENT_DATE-3,2,1,1,2,'APPROVED',2,'19:00','09:00');`);
+        const crossPeriod = (await overview()).days.find(d => d.date === date);
+        assert.equal(crossPeriod.spillover_count, 2);
+        assert.equal(crossPeriod.spillover_until, '07:30');
+        assert.equal(crossPeriod.spillover_only, true);
+        await db.query(`
+          INSERT INTO shiftly_schema.shift_assignments
+          (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,start_time,end_time)
+          VALUES (18,2,CURRENT_DATE-2,1,1,1,1,'APPROVED',2,'08:00','16:00');`);
+        assert.equal((await overview()).days.find(d => d.date === date).spillover_only, false);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT spillover_case'); }
+    });
+    await t.test('morning, afternoon and custom shifts preserve their own labels and exact-midnight is not spillover', async () => {
+      await db.query('SAVEPOINT named_shifts_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.shift_types
+          (id,start_time,end_time,day_type,is_active,shift_label,shift_code) VALUES
+          (10,'07:00','15:00','ANY',true,'Morning 8h','M8'),
+          (11,'16:00','00:00','ANY',true,'Afternoon 8h','A8'),
+          (12,'09:00','12:00','ANY',true,'Clinic cover','CC'),
+          (13,'12:00','16:00','ANY',true,'Procedure team','PT');
+          INSERT INTO shiftly_schema.staff_shift_rules VALUES
+          (10,1,1,1,10,2,true),(11,1,1,1,11,3,true),(12,1,1,1,12,1,true),(13,1,1,1,13,2,true);
+          INSERT INTO shiftly_schema.shift_assignment_capacity_groups VALUES
+          (10,1,CURRENT_DATE-4,1,1,1,10,2,NULL,'APPROVED'),
+          (11,1,CURRENT_DATE-4,1,1,1,11,3,NULL,'APPROVED'),
+          (12,1,CURRENT_DATE-4,1,1,1,12,1,NULL,'APPROVED'),
+          (13,1,CURRENT_DATE-4,1,1,1,13,2,NULL,'APPROVED');
+          INSERT INTO shiftly_schema.shift_assignments
+          (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,start_time,end_time)
+          VALUES (17,1,CURRENT_DATE-4,1,1,1,11,'APPROVED',2,'16:00','00:00');`);
+        const date = (await db.query("SELECT to_char(CURRENT_DATE-3,'YYYY-MM-DD') AS day")).rows[0].day;
+        const day = (await overview()).days.find(d => d.date === date);
+        assert.equal(day.shifts.find(s => s.shift_type_id === 10).category, 'morning');
+        assert.equal(day.shifts.find(s => s.shift_type_id === 11).category, 'afternoon');
+        assert.equal(day.shifts.find(s => s.shift_type_id === 11).label, 'Afternoon 8h');
+        assert.ok(day.shifts.some(s => s.label === 'Clinic cover'));
+        assert.ok(day.shifts.some(s => s.label === 'Procedure team'));
+        assert.equal(day.spillover_count, 0);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT named_shifts_case'); }
+    });
+    await t.test('multiple period-used alternatives expose known absence without invented capacity totals', async () => {
+      await db.query('SAVEPOINT alternatives_case');
+      try {
+        await db.query(`UPDATE shiftly_schema.shift_types SET shift_label='Day 8h' WHERE id=4;
+          INSERT INTO shiftly_schema.shift_assignment_capacity_groups VALUES
+          (20,1,CURRENT_DATE-5,1,1,1,4,6,NULL,'APPROVED');`);
+        const date = (await db.query("SELECT to_char(CURRENT_DATE-3,'YYYY-MM-DD') AS day")).rows[0].day;
+        const day = (await overview()).days.find(d => d.date === date);
+        const emptyDay = day.shifts.find(s => s.category === 'day');
+        assert.equal(emptyDay.shift_type_id, null); assert.equal(emptyDay.assigned, 0);
+        assert.equal(emptyDay.required, null); assert.equal(emptyDay.missing, true);
+        assert.equal(day.day_required, null);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT alternatives_case'); }
+    });
+    await t.test('zero required capacity does not create a missing-shift warning', async () => {
+      await db.query('SAVEPOINT zero_capacity_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.shift_assignment_capacity_groups VALUES
+          (30,1,CURRENT_DATE-6,1,1,1,1,0,NULL,'APPROVED'),
+          (31,1,CURRENT_DATE-6,1,1,1,2,0,NULL,'APPROVED');`);
+        const date = (await db.query("SELECT to_char(CURRENT_DATE-6,'YYYY-MM-DD') AS day")).rows[0].day;
+        const day = (await overview()).days.find(d => d.date === date);
+        assert.equal(day.day_required, 0); assert.equal(day.night_required, 0);
+        assert.ok(day.shifts.every(s => s.assigned === 0 && s.required === 0 && !s.missing));
+      } finally { await db.query('ROLLBACK TO SAVEPOINT zero_capacity_case'); }
     });
     await t.test('missing history and future census stay unknown; recorded stable census has no alert', async () => {
       assert.equal((await current()).patient_count, null);
@@ -171,6 +260,33 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
       assert.equal(day.patient_count, 6);
       assert.equal(day.patient_baseline, 10);
       assert.equal(day.patient_delta, -4);
+    });
+    await t.test('patient matrix contains fixed historical snapshots, real last-shift cutoff, and independent live now', async () => {
+      await db.query('SAVEPOINT matrix_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.clinical_encounters VALUES
+          (201,1,1,'ACTIVE',CURRENT_DATE-2+time '10:00',NULL);
+          INSERT INTO shiftly_schema.clinical_encounter_locations VALUES
+          (201,201,1,1,CURRENT_DATE-2+time '10:00',NULL);
+          INSERT INTO shiftly_schema.shift_assignments
+          (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,start_time,end_time)
+          VALUES (201,1,CURRENT_DATE-3,1,1,1,2,'APPROVED',2,'19:00','07:30');`);
+        const date = (await db.query("SELECT to_char(CURRENT_DATE-2,'YYYY-MM-DD') AS day")).rows[0].day;
+        const data = await overview();
+        const day = data.days.find(d => d.date === date);
+        const rows = day.patient_comparisons;
+        assert.deepEqual(rows.map(r => r.key), ['days_3','days_2','day_1','last_shift','selected_day','live_now']);
+        assert.deepEqual(rows.map(r => r.count), [10,10,10,10,11,7]);
+        assert.equal(rows[3].observed_at, date+'T07:30:00');
+        assert.equal(rows[3].shift_label, 'Night 12h');
+        assert.equal(rows[4].observed_at, date+'T23:59:59');
+        assert.ok(rows[5].observed_at.startsWith(today+'T'));
+        const futureRows = data.days.at(-1).patient_comparisons;
+        assert.equal(futureRows.find(r => r.key === 'selected_day').count, null);
+        assert.equal(futureRows.find(r => r.key === 'last_shift').count, null);
+        assert.equal(futureRows.find(r => r.key === 'live_now').count, 7);
+        assert.ok((await current(2)).patient_comparisons.every(r => r.count === null));
+      } finally { await db.query('ROLLBACK TO SAVEPOINT matrix_case'); }
     });
     await t.test('no patient permission, incomplete locations and unauthorized periods do not expose fabricated census', async () => {
       const hidden = await current(2);
