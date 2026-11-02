@@ -5,6 +5,8 @@ const createCrudRouter = require('../createCrudRouter');
 const { sendApiError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 const { periodApprovalOverlapError } = require('../utils/shiftPeriodApprovalErrors');
+const { shiftPeriodOverviewSql } = require('../query/shiftPeriodOverview');
+const { getBusinessTimezone } = require('../utils/shiftlyRuntimeConfig');
 const {
   actorUserId,
   requireDivisionDepartmentAccess,
@@ -514,6 +516,28 @@ const shiftPeriodsConfig = {
 
 };
 const router = createCrudRouter(shiftPeriodsConfig);
+
+// Read-only overview data; the existing day dialogs and write endpoints are unchanged.
+router.get('/:id/overview', async (req, res) => {
+  res.setHeader('Cache-Control', 'no-store');
+  const periodId = Number(req.params.id);
+  if (!Number.isSafeInteger(periodId) || periodId <= 0 || periodId > 2147483647) {
+    return res.status(400).json({ error: 'Invalid period id.', code: 'INVALID_REQUEST' });
+  }
+  const userId = actorUserId(req);
+  if (!userId) return res.status(401).json({ error: 'Unauthorized', code: 'AUTH_REQUIRED' });
+  try {
+    const result = await pool.query(shiftPeriodOverviewSql, [periodId, userId, getBusinessTimezone()]);
+    if (!result.rows.length) {
+      return res.status(404).json({ error: 'The period is unavailable.', code: 'RESOURCE_NOT_FOUND' });
+    }
+    return res.json(result.rows[0].overview);
+  } catch (err) {
+    return sendPostgresError(req, res, err, {
+      action: 'LIST', label: 'Error loading shift period overview',
+    });
+  }
+});
 
 
 
