@@ -2,8 +2,57 @@ const express = require('express');
 const ExcelJS = require('exceljs');
 const pool = require('../db');
 const { sendInternalError } = require('../utils/apiError');
+const { desktopShiftMatrixCoverageSql } = require('./desktopShiftMatrixCoverage');
+const { getBusinessTimezone } = require('../utils/shiftlyRuntimeConfig');
 
 const router = express.Router();
+
+// Coverage is a group-level snapshot, separate from the unchanged assignment
+// search and export contract. Validate all new parameters without coercing a
+// malformed filter into a broader, unfiltered request.
+router.get('/coverage', async (req, res) => {
+  const actor = Number(req.user?.sub ?? req.user?.id ?? req.user?.user_id ?? req.auth?.id ?? req.auth?.user_id);
+  if (!Number.isInteger(actor) || actor < 1 || actor > 2147483647) {
+    return res.status(401).json({ error: 'Authentication is required.', code: 'AUTH_REQUIRED' });
+  }
+  const dateValue = value => {
+    if (typeof value !== 'string' || !/^\d{4}-\d{2}-\d{2}$/.test(value)) return null;
+    const parsed = new Date(`${value}T00:00:00Z`);
+    return Number.isFinite(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value ? parsed : null;
+  };
+  const from = dateValue(req.query.from);
+  const to = dateValue(req.query.to);
+  if (!from || !to || to <= from || (to - from) / 86400000 > 366) {
+    return res.status(400).json({
+      error: 'Choose a valid date range of up to 366 days. The end date is exclusive.',
+      code: 'INVALID_COVERAGE_DATE_RANGE',
+    });
+  }
+  const values = [actor, req.query.from, req.query.to];
+  for (const field of ['divisionId', 'departmentId', 'staffTypeId', 'shiftTypeId', 'userId']) {
+    const raw = req.query[field];
+    if (raw == null || raw === '') { values.push(null); continue; }
+    if (typeof raw !== 'string' || !/^[1-9]\d*$/.test(raw) || Number(raw) > 2147483647) {
+      return res.status(400).json({ error: `Invalid ${field}.`, code: 'INVALID_COVERAGE_FILTER' });
+    }
+    values.push(Number(raw));
+  }
+  const status = req.query.status;
+  if (status != null && (typeof status !== 'string' || status.length > 80)) {
+    return res.status(400).json({ error: 'Invalid status filter.', code: 'INVALID_COVERAGE_FILTER' });
+  }
+  values.push(status?.trim() || null, getBusinessTimezone());
+  res.setHeader('Cache-Control', 'no-store');
+  try {
+    const { rows } = await pool.query(desktopShiftMatrixCoverageSql, values);
+    if (!rows.length) {
+      return res.status(403).json({ error: 'Coverage is unavailable for this account.', code: 'COVERAGE_ACCESS_DENIED' });
+    }
+    return res.json(rows[0].payload);
+  } catch (error) {
+    return sendDbError(req, res, error, 'desktopShiftMatrixCoverage');
+  }
+});
 
 function sendDbError(req, res, err, context) {
   return sendInternalError(req, res, err, context || 'Database error');
@@ -68,7 +117,7 @@ function buildSearchSql() {
     SELECT
       scoped.shift_assignment_id,
       scoped.shift_period_id,
-      to_char(scoped.shift_date, 'YYYY-MM-DD') AS shift_date,
+      to_char(sa.shift_date, 'YYYY-MM-DD') AS shift_date,
       scoped.user_id,
       scoped.user_name,
       scoped.user_desc,
@@ -95,8 +144,8 @@ function buildSearchSql() {
       shiftly_api.fn_shift_assignment_can_be_charge(sa.id) AS can_be_charge_nurse
     FROM shiftly_api.fn_desktop_shift_matrix_search(
       $1::integer,
-      $2::date,
-      $3::date,
+      $2::date - 1,
+      $3::date + 1,
       $4::integer,
       $5::integer,
       $6::integer,
@@ -107,7 +156,15 @@ function buildSearchSql() {
     LEFT JOIN shiftly_schema.shift_assignments sa
       ON sa.id = scoped.shift_assignment_id
      AND sa.user_id = scoped.user_id
-    ORDER BY scoped.ordinality
+    -- Keep the function's authorization and filters, then use the stored civil
+    -- date. Older function versions timezone-convert that date-only field.
+    WHERE sa.shift_date >= $2::date
+      AND sa.shift_date < $3::date
+    ORDER BY sa.shift_date ASC,
+      scoped.user_desc ASC NULLS LAST,
+      scoped.user_name ASC,
+      scoped.start_time ASC NULLS LAST,
+      scoped.shift_assignment_id ASC
   `;
 }
 

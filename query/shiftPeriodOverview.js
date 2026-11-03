@@ -2,13 +2,21 @@ const { scopedPeriodsWhere } = require('../utils/shiftPeriodScope');
 const { periodRequestCtes } = require('./shiftPeriodRequests');
 
 // One read-only snapshot: $1 = period, $2 = authenticated actor, $3 = business timezone.
-const shiftPeriodOverviewSql = `
+function buildShiftPeriodOverviewSql({
+  periodReference = '$1',
+  actorIndex = 2,
+  timezoneReference = '$3',
+  periodScopeSql = scopedPeriodsWhere('sp', actorIndex).sql,
+  includeCoverageGroups = false,
+} = {}) {
+const actorReference = `$${actorIndex}`;
+return `
 WITH business_clock AS (
-  SELECT now() AT TIME ZONE COALESCE(NULLIF($3::text, ''), current_setting('TimeZone')) AS now
+  SELECT now() AT TIME ZONE COALESCE(NULLIF(${timezoneReference}::text, ''), current_setting('TimeZone')) AS now
 ), period AS MATERIALIZED (
   SELECT sp.* FROM shiftly_schema.shift_periods sp
-  WHERE sp.id = $1 AND ${scopedPeriodsWhere('sp', 2).sql}
-), ${periodRequestCtes}, dates AS (
+  WHERE sp.id = ${periodReference} AND ${periodScopeSql}
+), ${periodRequestCtes.replace(/\$2\b/g, actorReference)}, dates AS (
   SELECT p.start_date + n AS day
   FROM period p CROSS JOIN LATERAL generate_series(-7, p.end_date - p.start_date) n
 ), period_days AS (
@@ -99,7 +107,8 @@ WITH business_clock AS (
     SELECT 1 FROM explicit_keys e WHERE e.day = c.day AND e.category_key = c.category_key
   )
 ), group_capacity AS (
-  SELECT k.day, k.shift_type_id, st.category, st.category_key, st.label, st.start_time, st.end_time,
+  SELECT k.day, k.staff_type_id, k.shift_type_id, g.id AS capacity_group_id,
+    st.category, st.category_key, st.label, st.start_time, st.end_time,
     st.is_night, k.inferred, COALESCE(g.required_staff_count, r.required) AS required,
     shiftly_api.fn_roster_occupied_places(p.id, k.day, p.division_id, p.department_id, k.staff_type_id, k.shift_type_id) AS assigned,
     (SELECT count(*)::integer FROM assignments a WHERE a.shift_date = k.day
@@ -175,8 +184,8 @@ WITH business_clock AS (
   ) a ON true
 ), patient_access AS (
   SELECT p.division_id, p.department_id FROM period p
-  WHERE shiftly_api.fn_user_has_permission($2, 'screen:clinical_patient_administration:open')
-    AND shiftly_api.fn_user_can_access_division_department($2, p.division_id, p.department_id)
+  WHERE shiftly_api.fn_user_has_permission(${actorReference}, 'screen:clinical_patient_administration:open')
+    AND shiftly_api.fn_user_can_access_division_department(${actorReference}, p.division_id, p.department_id)
 ), scoped_locations AS MATERIALIZED (
   SELECT l.encounter_id, l.started_at FROM shiftly_schema.clinical_encounter_locations l
   JOIN patient_access p ON p.division_id = l.division_id AND p.department_id = l.department_id
@@ -258,9 +267,23 @@ SELECT jsonb_build_object(
     'night_missing', d.night_missing, 'shifts', d.shifts,
     'spillover_count', d.spillover_count, 'spillover_until', d.spillover_until, 'spillover_only', d.spillover_only,
     'patient_count', d.patient_count, 'patient_baseline', d.patient_baseline,
-    'patient_delta', d.patient_delta, 'patient_alert', d.patient_alert, 'patient_comparisons', d.patient_comparisons
+    'patient_delta', d.patient_delta, 'patient_alert', d.patient_alert, 'patient_comparisons', d.patient_comparisons${includeCoverageGroups ? `,
+    'coverage_groups', COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'staff_type_id', g.staff_type_id, 'shift_type_id', g.shift_type_id,
+      'capacity_group_id', g.capacity_group_id, 'label', g.label, 'category', g.category,
+      'is_night', g.is_night, 'start_time', to_char(g.start_time, 'HH24:MI'),
+      'end_time', to_char(g.end_time, 'HH24:MI'), 'assigned', g.assigned,
+      'required', g.required, 'approved', g.approved, 'pending_requests', g.pending_requests,
+      'inferred', g.inferred, 'missing', g.assigned = 0 AND (g.required > 0 OR g.required IS NULL)
+    ) ORDER BY g.start_time, g.shift_type_id, g.staff_type_id) FROM group_capacity g WHERE g.day = d.day), '[]'::jsonb),
+    'ambiguous_shifts', COALESCE((SELECT jsonb_agg(jsonb_build_object(
+      'label', g.label, 'category', g.category, 'is_night', g.is_night, 'missing', g.missing
+    )) FROM shift_capacity g WHERE g.day = d.day AND g.shift_type_id IS NULL), '[]'::jsonb)` : ''}
   ) ORDER BY d.day) FROM overview_days d), '[]'::jsonb)
 ) AS overview FROM period p;
 `;
+}
 
-module.exports = { shiftPeriodOverviewSql };
+const shiftPeriodOverviewSql = buildShiftPeriodOverviewSql();
+
+module.exports = { shiftPeriodOverviewSql, buildShiftPeriodOverviewSql };
