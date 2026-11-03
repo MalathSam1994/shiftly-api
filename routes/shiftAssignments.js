@@ -2,6 +2,7 @@
 const express = require('express');
 const createCrudRouter = require('../createCrudRouter');
 const pool = require('../db');
+const requirePermission = require('../middleware/requirePermission');
 const { sendApiError, sendInternalError } = require('../utils/apiError');
 const { sendPostgresError } = require('../utils/postgresErrorMapper');
 const {
@@ -403,6 +404,8 @@ const shiftAssignmentsConfig = {
         sa.status,
         sa.status_comment,
         sa.is_absence,
+        sa.is_charge_nurse,
+        shiftly_api.fn_shift_assignment_can_be_charge(sa.id) AS can_be_charge_nurse,
         sa.absence_type,
         sa.created_at,
         sa.updated_at,
@@ -956,11 +959,43 @@ router.post('/capacity-groups/:id/approve', async (req, res) => {
 
 
 /**
- * POST /shift-assignments/:id/approve
- *
- * Approves one edited assignment in an already approved period without
- * reopening or reapproving the whole period.
+ * PUT /shift-assignments/:id/charge-nurse
+ * Select or clear a concrete shift's charge nurse atomically in PostgreSQL.
  */
+router.put('/:id/charge-nurse', requirePermission('screen:shift_periods:open'), async (req, res) => {
+  const id = Number(req.params.id);
+  const selected = req.body?.is_charge_nurse;
+  if (!Number.isInteger(id) || id < 1 || typeof selected !== 'boolean') {
+    return sendApiError(req, res, {
+      status: 400, error: 'A valid assignment and true or false charge nurse selection are required.', code: 'INVALID_REQUEST',
+    });
+  }
+  const actor = actorUserId(req);
+  if (!actor) return sendApiError(req, res, { status: 401, error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
+  try {
+    const meta = await loadAssignmentScope(id);
+    if (!meta) return sendApiError(req, res, { status: 404, error: 'Shift assignment not found.', code: 'RESOURCE_NOT_FOUND' });
+    if (!await requireDivisionDepartmentAccess(req, res, {
+      divisionId: meta.division_id, departmentId: meta.department_id,
+    })) return;
+    const editError = await ensureApprovedPeriodAssignmentEditAllowed({ req, assignmentId: id });
+    if (editError) return sendApiError(req, res, {
+      status: 403, error: 'You do not have permission to perform this action.', details: editError,
+      code: 'PERMISSION_DENIED', extra: { permission: EDIT_APPROVED_ASSIGNMENTS_PERMISSION },
+    });
+    // SQL repeats scope/approval checks after locking, so concurrent edits cannot
+    // move the assignment between authorization and designation.
+    const result = await pool.query(
+      'SELECT shiftly_api.set_shift_charge_nurse($1::int,$2::int,$3::boolean) AS assignment',
+      [actor, id, selected],
+    );
+    return res.json(result.rows[0].assignment);
+  } catch (err) {
+    return sendPostgresError(req, res, err, { action: 'UPDATE', label: 'Error selecting shift charge nurse' });
+  }
+});
+
+// Approve one edited assignment without reopening the already-approved period.
 router.post('/:id/approve', async (req, res) => {
   try {
     const id = parseInt(req.params.id, 10);

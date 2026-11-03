@@ -35,14 +35,42 @@ test('database scope denial remains forbidden', async () => {
  const res = response(); await handler(request({ unitId: '9' }), res); assert.equal(res.statusCode, 403);
 });
 
+test('workload charge roles stay scoped to concrete assignments in one authorized snapshot', async () => {
+ const snapshot = { workload: [
+  { user_id: 7, shift_assignment_id: 101, is_charge_nurse: true, can_be_charge_nurse: true },
+  { user_id: 7, shift_assignment_id: 102, is_charge_nurse: false, can_be_charge_nurse: true },
+  { user_id: 8, shift_assignment_id: 103, is_charge_nurse: true, can_be_charge_nurse: false },
+ ] };
+ let queries=0;
+ fake.query=async (sql,values) => {
+  if (!sql.includes('fn_manager_dashboard_workspace')) return {rows:[]};
+  queries++;
+  assert.deepEqual(values,[271,null,null,null,null,null]);
+  assert.match(sql,/WITH workspace AS MATERIALIZED/);
+  assert.match(sql,/sa\.id=\(item\.value->>'shift_assignment_id'\)::integer/);
+  assert.match(sql,/sa\.user_id=\(item\.value->>'user_id'\)::integer/);
+  assert.match(sql,/fn_user_can_access_division_department\(\$1,sa\.division_id,sa\.department_id\)/);
+  assert.match(sql,/fn_shift_assignment_can_be_charge\(sa\.id\)/);
+  assert.match(sql,/ORDER BY item\.ordinality/);
+  return {rows:[{snapshot}]};
+ };
+ const res=response(); await handler(request({}),res);
+ assert.equal(queries,1); assert.equal(res.statusCode,200);
+ assert.deepEqual(res.body.workload,snapshot.workload);
+});
+
 test('Excel exports the same scoped snapshot as text-safe workbook cells', async () => {
  const snapshot = { generated_at:'2026-09-09T10:00:00', from:'2026-09-09', to:'2026-09-10', clinical_basis:'Current census', staffing_basis:'Roster',
- kpis:{patients:1}, patients:[{display_name:'=2+2'}], patient_total:1, by_unit:[], workload:[], schedule:[], alerts:[] };
+ kpis:{patients:1}, patients:[{display_name:'=2+2'}], patient_total:1, by_unit:[],
+ workload:[{user_id:7,shift_assignment_id:101,is_charge_nurse:true,can_be_charge_nurse:false}], schedule:[], alerts:[] };
  fake.query = async sql => sql.includes('fn_manager_dashboard_workspace') ? {rows:[{snapshot}]} : {rows:[]};
  const res = response(); await handler({...request({from:'2026-09-09',to:'2026-09-10'}),path:'/manager/workspace/excel'},res);
  assert.ok(Buffer.isBuffer(res.body));
  const ExcelJS = require('exceljs'); const workbook = new ExcelJS.Workbook(); await workbook.xlsx.load(res.body);
  assert.equal(workbook.getWorksheet('Patients (up to 500)').getCell('A2').value,'=2+2');
+ assert.equal(workbook.getWorksheet('Workload').getCell('C1').value,'is_charge_nurse');
+ assert.equal(workbook.getWorksheet('Workload').getCell('C2').value,true);
+ assert.equal(workbook.getWorksheet('Workload').getCell('D2').value,false);
  assert.equal(res.headers['Cache-Control'],'no-store');
 });
 

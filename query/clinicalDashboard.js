@@ -128,7 +128,21 @@ async function workspace(req, res) {
   catch (_) { return sendApiError(req, res, { status: 400, error: 'Use valid YYYY-MM-DD dates, a 1–31 day range (exclusive end), and positive integer filter IDs.', code: 'INVALID_REQUEST' }); }
   try {
     const snapshot = await runInTransactionWithBusinessTimezone(pool, async client => {
-      const result = await client.query('SELECT shiftly_api.fn_manager_dashboard_workspace($1::integer,$2::date,$3::date,$4::integer,$5::integer,$6::integer) AS snapshot', [userId, ...filters]);
+      // Preserve one authorized snapshot and its row order. Charge responsibility
+      // belongs to this concrete roster assignment, never to a person globally.
+      const result = await client.query(`WITH workspace AS MATERIALIZED (
+        SELECT shiftly_api.fn_manager_dashboard_workspace($1::integer,$2::date,$3::date,$4::integer,$5::integer,$6::integer) AS snapshot
+      ) SELECT CASE WHEN jsonb_typeof(snapshot->'workload')='array' THEN
+        jsonb_set(snapshot,'{workload}',COALESCE((
+          SELECT jsonb_agg(item.value || jsonb_build_object(
+            'is_charge_nurse',COALESCE(sa.is_charge_nurse,false),
+            'can_be_charge_nurse',CASE WHEN sa.id IS NOT NULL THEN shiftly_api.fn_shift_assignment_can_be_charge(sa.id) END
+          ) ORDER BY item.ordinality)
+          FROM jsonb_array_elements(snapshot->'workload') WITH ORDINALITY item(value,ordinality)
+          LEFT JOIN shiftly_schema.shift_assignments sa ON sa.id=(item.value->>'shift_assignment_id')::integer
+            AND sa.user_id=(item.value->>'user_id')::integer
+            AND shiftly_api.fn_user_can_access_division_department($1,sa.division_id,sa.department_id)
+        ),'[]'::jsonb)) ELSE snapshot END AS snapshot FROM workspace`, [userId, ...filters]);
       return withTriage(client, userId, result.rows[0].snapshot, { mode: 'manager', unit_id: filters[2] });
     });
     res.set('Cache-Control', 'no-store');

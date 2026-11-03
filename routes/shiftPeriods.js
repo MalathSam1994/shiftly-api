@@ -902,7 +902,7 @@ router.get('/:id/validate-approval', async (req, res) => {
     if (!allowed) return;
 
     const result = await pool.query(
-      `SELECT shiftly_api.validate_period_coverage($1) AS result`,
+      `SELECT shiftly_api.validate_period_approval($1) AS result`,
       [periodId],
     );
     return res.json(result.rows[0].result);

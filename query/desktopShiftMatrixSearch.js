@@ -38,14 +38,14 @@ function asDateStringOrNull(value) {
 }
 
 function getLoggedUserId(req) {
-  const requestedLoggedUserId = asIntOrNull(req.query.loggedUserId);
   const authenticatedUserId =
+    asIntOrNull(req.user?.sub) ||
     asIntOrNull(req.user?.id) ||
     asIntOrNull(req.user?.user_id) ||
     asIntOrNull(req.auth?.id) ||
     asIntOrNull(req.auth?.user_id);
 
-  return authenticatedUserId || requestedLoggedUserId;
+  return authenticatedUserId;
 }
 
 function getSearchParams(req) {
@@ -66,31 +66,33 @@ function getSearchParams(req) {
 function buildSearchSql() {
   return `
     SELECT
-      shift_assignment_id,
-      shift_period_id,
-      to_char(shift_date, 'YYYY-MM-DD') AS shift_date,
-      user_id,
-      user_name,
-      user_desc,
-      empno,
-      staff_type_id,
-      staff_type_name,
-      division_id,
-      division_desc,
-      department_id,
-      department_desc,
-      shift_type_id,
-      shift_code,
-      shift_label,
-      start_time,
-      end_time,
-      duration_hours,
-      status,
-      source_type,
-      is_absence,
-      absence_type,
-      can_include_all_shifts,
-      data_scope
+      scoped.shift_assignment_id,
+      scoped.shift_period_id,
+      to_char(scoped.shift_date, 'YYYY-MM-DD') AS shift_date,
+      scoped.user_id,
+      scoped.user_name,
+      scoped.user_desc,
+      scoped.empno,
+      scoped.staff_type_id,
+      scoped.staff_type_name,
+      scoped.division_id,
+      scoped.division_desc,
+      scoped.department_id,
+      scoped.department_desc,
+      scoped.shift_type_id,
+      scoped.shift_code,
+      scoped.shift_label,
+      scoped.start_time,
+      scoped.end_time,
+      scoped.duration_hours,
+      scoped.status,
+      scoped.source_type,
+      scoped.is_absence,
+      scoped.absence_type,
+      scoped.can_include_all_shifts,
+      scoped.data_scope,
+      COALESCE(sa.is_charge_nurse, false) AS is_charge_nurse,
+      shiftly_api.fn_shift_assignment_can_be_charge(sa.id) AS can_be_charge_nurse
     FROM shiftly_api.fn_desktop_shift_matrix_search(
       $1::integer,
       $2::date,
@@ -101,7 +103,11 @@ function buildSearchSql() {
       $7::integer,
       $8::integer,
       $9::character varying
-    )
+    ) WITH ORDINALITY scoped
+    LEFT JOIN shiftly_schema.shift_assignments sa
+      ON sa.id = scoped.shift_assignment_id
+     AND sa.user_id = scoped.user_id
+    ORDER BY scoped.ordinality
   `;
 }
 

@@ -2371,20 +2371,22 @@ async function requireOptimizerPolicyScope(req, res, next) {
   }
 }
 
-function validateOptimizerHistoryPriority(req, res, next) {
-  if (Object.prototype.hasOwnProperty.call(req.body ?? {}, 'history_priority_enabled') &&
-      typeof req.body.history_priority_enabled !== 'boolean') {
-    return sendApiError(req, res, {
-      status: 400,
-      error: 'history_priority_enabled must be true or false.',
-      code: 'INVALID_REQUEST',
-    });
+function validateOptimizerPriorityFlags(req, res, next) {
+  for (const field of ['history_priority_enabled', 'charge_nurse_priority_enabled']) {
+    if (Object.prototype.hasOwnProperty.call(req.body ?? {}, field) &&
+        typeof req.body[field] !== 'boolean') {
+      return sendApiError(req, res, {
+        status: 400,
+        error: `${field} must be true or false.`,
+        code: 'INVALID_REQUEST',
+      });
+    }
   }
   // Omission uses the database default on create and preserves the value on update.
   return next();
 }
 
-router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNMENTS), validateOptimizerHistoryPriority, requireOptimizerPolicyScope, (req, res) =>
+router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNMENTS), validateOptimizerPriorityFlags, requireOptimizerPolicyScope, (req, res) =>
   insertRow(req, res, 'shiftly_schema.clinical_assignment_optimizer_policies', [
     'policy_code',
     'policy_name',
@@ -2405,11 +2407,12 @@ router.post('/assignment-optimizer-policies', requirePermission(PUBLISH_ASSIGNME
     'maximum_suggested_reassignments',
     'hard_capacity_behavior',
     'history_priority_enabled',
+    'charge_nurse_priority_enabled',
     'imbalance_warning_threshold',
     'is_active',
   ], 'Error creating assignment optimizer policy'));
 
-router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIGNMENTS), validateOptimizerHistoryPriority, requireOptimizerPolicyScope, (req, res) =>
+router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIGNMENTS), validateOptimizerPriorityFlags, requireOptimizerPolicyScope, (req, res) =>
   updateRow(req, res, 'shiftly_schema.clinical_assignment_optimizer_policies', 'id', [
     'policy_code',
     'policy_name',
@@ -2430,6 +2433,7 @@ router.put('/assignment-optimizer-policies/:id', requirePermission(PUBLISH_ASSIG
     'maximum_suggested_reassignments',
     'hard_capacity_behavior',
     'history_priority_enabled',
+    'charge_nurse_priority_enabled',
     'imbalance_warning_threshold',
     'is_active',
   ], 'Error updating assignment optimizer policy'));
@@ -2546,7 +2550,20 @@ router.get('/assignment-board', requirePermission(OPEN_ASSIGNMENT_BOARD), async 
   }
   try {
     const result = await pool.query(
-      `SELECT shiftly_api.fn_clinical_assignment_board($1, $2::date, $3, $4, $5, $6) AS board`,
+      `WITH scoped_board AS MATERIALIZED (
+        SELECT shiftly_api.fn_clinical_assignment_board($1, $2::date, $3, $4, $5, $6) AS payload
+      )
+      SELECT jsonb_set(payload, '{staff}', COALESCE((
+        SELECT jsonb_agg(staff.value || jsonb_build_object(
+          'is_charge_nurse', COALESCE(sa.is_charge_nurse, false),
+          'can_be_charge_nurse', COALESCE(shiftly_api.fn_shift_assignment_can_be_charge(sa.id), false)
+        ) ORDER BY staff.ordinality)
+        FROM jsonb_array_elements(payload->'staff') WITH ORDINALITY AS staff(value, ordinality)
+        LEFT JOIN shiftly_schema.shift_assignments sa
+          ON sa.id = (staff.value->>'shift_assignment_id')::integer
+          AND sa.shift_date = $2::date AND sa.shift_type_id = $3
+          AND sa.division_id = $4 AND sa.department_id = $5
+      ), '[]'::jsonb)) AS board FROM scoped_board`,
       [userId, shiftDate, shiftTypeId, divisionId, departmentId, clinicalUnitId],
     );
     // One summary per run; patient/lifecycle evidence is loaded on demand.

@@ -1,7 +1,7 @@
 // query/mobileDashboard.js
 // Read-only dashboard endpoint backed by: shiftly_api.fn_mobile_dashboard
 //
-// GET /dashboard/mobile?userId=2
+// GET /dashboard/mobile (authenticated user's personal summary)
 // Optional:
 //   &from=2026-01-01&to=2026-02-01
 //
@@ -29,19 +29,13 @@
 const express = require('express');
 const pool = require('../db');
 const { sendInternalError } = require('../utils/apiError');
+const { actorUserId } = require('../utils/shiftPeriodScope');
+const { getBusinessTimezone } = require('../utils/shiftlyRuntimeConfig');
 
 const router = express.Router();
 
 function sendDbError(req, res, err, context) {
   return sendInternalError(req, res, err, context || 'Database error');
-}
-
-function asIntOrNull(v) {
-  if (v == null) return null;
-  const s = String(v).trim();
-  if (!s) return null;
-  const n = Number.parseInt(s, 10);
-  return Number.isFinite(n) ? n : null;
 }
 
 function asDateStringOrNull(v) {
@@ -54,16 +48,13 @@ function asDateStringOrNull(v) {
 }
 
 router.get('/', async (req, res) => {
-  const userId = asIntOrNull(req.query.userId);
+  // The personal summary always belongs to the authenticated user.
+  const userId = actorUserId(req);
   const from = asDateStringOrNull(req.query.from);
   const to = asDateStringOrNull(req.query.to);
 
   if (!userId) {
-    return res.status(400).json({
-      error: 'Missing required query params',
-      required: ['userId'],
-      example: '/dashboard/mobile?userId=2',
-    });
+    return res.status(401).json({ error: 'Please sign in to continue.', code: 'AUTH_REQUIRED' });
   }
 
   let sql = '';
@@ -129,9 +120,9 @@ router.get('/', async (req, res) => {
     }
 
     const clinicalCountResult = await pool.query(
-      `SELECT COUNT(*)::int AS published_patient_assignment_count
-       FROM shiftly_api.fn_clinical_mobile_my_patients($1::int, 'CURRENT')`,
-      [userId],
+      `SELECT (SELECT COUNT(*)::int FROM shiftly_api.fn_clinical_mobile_my_patients($1::int, 'CURRENT')) AS published_patient_assignment_count,
+        shiftly_api.fn_mobile_current_charge_nurse_shift($1::int,CURRENT_TIMESTAMP,$2::text) AS current_charge_nurse_shift`,
+      [userId, getBusinessTimezone()],
     );
     const publishedPatientAssignmentCount =
       clinicalCountResult.rows?.[0]?.published_patient_assignment_count || 0;
@@ -225,7 +216,8 @@ router.get('/', async (req, res) => {
       });
     }
 
-    return res.json(rows.rows[0]);
+    res.set('Cache-Control', 'no-store');
+    return res.json({ ...rows.rows[0], current_charge_nurse_shift: clinicalCountResult.rows?.[0]?.current_charge_nurse_shift ?? null });
   } catch (err) {
     return sendDbError(req, res, err, 'mobileDashboard');
   }
