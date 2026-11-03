@@ -12,7 +12,10 @@ function loadModule(file, resolve) {
   return sandbox.module.exports;
 }
 const scope = loadModule('utils/shiftPeriodScope.js', () => ({}));
-const { shiftPeriodOverviewSql } = loadModule('query/shiftPeriodOverview.js', () => scope);
+const requestQueries = loadModule('query/shiftPeriodRequests.js', () => scope);
+const { shiftPeriodRequestsSql } = requestQueries;
+const { shiftPeriodOverviewSql } = loadModule('query/shiftPeriodOverview.js', name =>
+  name === './shiftPeriodRequests' ? requestQueries : scope);
 
 function routeHarness(rows = []) {
   const handlers = new Map();
@@ -23,12 +26,13 @@ function routeHarness(rows = []) {
     if (name === '../createCrudRouter') return () => router;
     if (name === '../utils/shiftPeriodScope') return scope;
     if (name === '../query/shiftPeriodOverview') return { shiftPeriodOverviewSql };
+    if (name === '../query/shiftPeriodRequests') return requestQueries;
     if (name === '../utils/shiftlyRuntimeConfig') return { getBusinessTimezone: () => 'Europe/Berlin' };
     return {};
   });
-  return { calls, run: async (id, user = { id: 1 }) => {
+  return { calls, run: async (id, user = { id: 1 }, endpoint = 'overview') => {
     const res = { statusCode: 200, headers: {}, setHeader(name, value) { this.headers[name] = value; }, status(code) { this.statusCode = code; return this; }, json(body) { this.body = body; return this; } };
-    await handlers.get('/:id/overview')({ params: { id }, user }, res);
+    await handlers.get(`/:id/${endpoint}`)({ params: { id }, user }, res);
     return res;
   } };
 }
@@ -50,6 +54,22 @@ test('overview uses one scoped query with actor and timezone; inaccessible perio
   assert.equal(h.calls[0][0], shiftPeriodOverviewSql);
   const payload = { period_id: 7, days: [], total_assignments: 0 };
   assert.equal((await routeHarness([{ overview: payload }]).run('7')).body, payload);
+});
+
+test('period requests require authentication, exact period IDs and scoped query ownership', async () => {
+  const h = routeHarness();
+  for (const id of ['1junk', '-1', '0', '1.5', '2147483648']) {
+    assert.equal((await h.run(id, { id: 1 }, 'requests')).statusCode, 400);
+  }
+  assert.equal((await h.run('1', null, 'requests')).statusCode, 401);
+  assert.equal(h.calls.length, 0);
+  assert.equal((await h.run('7', { sub: 2 }, 'requests')).statusCode, 404);
+  assert.deepEqual(Array.from(h.calls[0][1]), [7, 2]);
+  assert.equal(h.calls[0][0], shiftPeriodRequestsSql);
+  const payload = { period_id: 7, requests: [] };
+  const result = await routeHarness([{ payload }]).run('7', { id: 1 }, 'requests');
+  assert.equal(result.body, payload);
+  assert.equal(result.headers['Cache-Control'], 'no-store');
 });
 
 // Run against a disposable local PostgreSQL, never the application's database.
@@ -83,11 +103,157 @@ test('overview SQL: capacity, missing shifts, history and permission boundaries'
     const today = (await db.query("SELECT to_char(CURRENT_DATE, 'YYYY-MM-DD') AS day")).rows[0].day;
     const overview = async (actor = 1) => (await db.query(shiftPeriodOverviewSql, [1, actor, 'UTC'])).rows[0]?.overview;
     const current = async (actor = 1) => (await overview(actor)).days.find(d => d.date === today);
+    const requests = async (periodId = 1, actor = 1) =>
+      (await db.query(shiftPeriodRequestsSql, [periodId, actor])).rows[0]?.payload;
     await t.test('zero-assigned rules create expected day and night capacity', async () => {
       const day = await current();
       assert.equal(day.day_assigned, 0); assert.equal(day.day_required, 8);
       assert.equal(day.night_assigned, 0); assert.equal(day.night_required, 4);
       assert.equal(day.night_missing, true);
+    });
+    await t.test('request-only days expose real workflow statuses and planned versus approved capacity', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one','Nurse One'),(12,1,true,'nurse_two','Nurse Two');
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,1),
+            (102,'NEW_SHIFT','PENDING_TARGET_MANAGER',12,CURRENT_DATE,1,1,1,1);`);
+        const day = await current();
+        const shift = day.shifts.find(s => s.shift_type_id === 1);
+        assert.equal(shift.assigned, 0); assert.equal(shift.planned, 2);
+        assert.equal(shift.approved, 0); assert.equal(shift.pending_requests, 2);
+        assert.equal(shift.required, 8); assert.equal(shift.missing, true);
+        const rows = (await requests()).requests;
+        assert.deepEqual(rows.map(r => r.request_status), ['PENDING', 'PENDING_TARGET_MANAGER']);
+        assert.ok(rows.every(r => r.counts_as_place && r.assignment_id === null));
+        assert.equal(rows[0].shift_date, today); assert.equal(rows[0].start_time, '07:00:00');
+        assert.equal(rows[0].required_staff_count, 8); assert.equal(rows[0].user_name, 'nurse_one');
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
+    });
+    await t.test('natural-slot and linked request matches count existing drafts once; approval replaces request cleanly', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one',NULL),(12,1,true,'nurse_two',NULL);
+          INSERT INTO shiftly_schema.shift_assignments
+            (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,user_id)
+          VALUES (201,1,CURRENT_DATE,1,1,1,1,'DRAFT',2,11),(202,1,CURRENT_DATE,1,1,1,1,'APPROVED',2,12);
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id,shift_assignment_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,1,NULL),
+            (102,'NEW_SHIFT','PENDING',12,CURRENT_DATE,1,1,1,1,202),
+            (103,'NEW_SHIFT','PENDING_SOURCE_MANAGER',11,CURRENT_DATE,1,1,1,1,NULL);`);
+        const shift = (await current()).shifts.find(s => s.shift_type_id === 1);
+        assert.equal(shift.assigned, 2); assert.equal(shift.planned, 2);
+        assert.equal(shift.approved, 1); assert.equal(shift.pending_requests, 0);
+        assert.ok((await requests()).requests.every(r => !r.counts_as_place && r.assignment_id != null));
+        // Linked annotations belong to the saved roster group even if the
+        // requester's current staff type changed since that row was created.
+        await db.query(`INSERT INTO shiftly_schema.staff_types VALUES (20,'Changed role',true);
+          UPDATE shiftly_schema.users SET staff_type_id=20 WHERE id=11;`);
+        assert.ok((await requests()).requests.filter(r => r.user_id === 11).every(r => r.staff_type_id === 1));
+        await db.query(`UPDATE shiftly_schema.shift_requests SET request_status='APPROVED', inbox_user_id=NULL WHERE id IN (101,103);
+          UPDATE shiftly_schema.shift_assignments SET status='APPROVED' WHERE id=201;`);
+        const approved = (await current()).shifts.find(s => s.shift_type_id === 1);
+        assert.equal(approved.planned, 2); assert.equal(approved.approved, 2);
+        assert.deepEqual((await requests()).requests.map(r => r.id), [102]);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
+    });
+    await t.test('duplicate proposals add one place; switch, offer and off requests never add staffing', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one',NULL);
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,1),
+            (102,'NEW_SHIFT','PENDING_TARGET_MANAGER',11,CURRENT_DATE,1,1,1,1),
+            (103,'SWITCH','PENDING_SOURCE_MANAGER',11,CURRENT_DATE,1,1,1,1),
+            (104,'OFFER','PENDING_REQUESTOR_MANAGER',11,CURRENT_DATE,1,1,1,1),
+            (105,'OFF_REQUEST','PENDING',11,CURRENT_DATE,1,1,1,1);`);
+        const rows = (await requests()).requests;
+        assert.equal(rows.length, 5); assert.deepEqual(rows.filter(r => r.counts_as_place).map(r => r.id), [101]);
+        const shift = (await current()).shifts.find(s => s.shift_type_id === 1);
+        assert.equal(shift.planned, 1); assert.equal(shift.pending_requests, 1);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
+    });
+    await t.test('request visibility excludes other inboxes, organizations, dates and terminal decisions', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one',NULL);
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,1),
+            (102,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,2),
+            (103,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,2,1),
+            (104,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,2,1,1),
+            (105,'NEW_SHIFT','PENDING',11,CURRENT_DATE+30,1,1,1,1),
+            (106,'NEW_SHIFT','REJECTED',11,CURRENT_DATE,1,1,1,1),
+            (107,'NEW_SHIFT','CANCELLED',11,CURRENT_DATE,1,1,1,1),
+            (108,'NEW_SHIFT','APPROVED',11,CURRENT_DATE,1,1,1,1);`);
+        assert.deepEqual((await requests()).requests.map(r => r.id), [101]);
+        assert.deepEqual((await requests(1, 2)).requests.map(r => r.id), [102]);
+        assert.equal(await requests(1, 3), undefined);
+        assert.equal((await current()).shifts.find(s => s.shift_type_id === 1).planned, 1);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
+    });
+    await t.test('one-day requests do not seed recurring shift patterns or claim clinical spillover', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one',NULL);
+          INSERT INTO shiftly_schema.shift_types (id,start_time,end_time,day_type,is_active,shift_label,shift_code)
+            VALUES (20,'15:00','23:00','ANY',true,'Afternoon 8h','AFTERNOON');
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,20,1,1,1);`);
+        const data = await overview();
+        const proposed = data.days.find(d => d.date === today).shifts.find(s => s.shift_type_id === 20);
+        assert.equal(proposed.planned, 1); assert.equal(proposed.assigned, 0);
+        assert.equal(proposed.approved, 0); assert.equal(proposed.required, null);
+        assert.ok(data.days.filter(d => d.date !== today).every(d => !d.shifts.some(s => s.shift_type_id === 20)));
+        assert.ok(data.days.every(d => d.spillover_count === 0));
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
+    });
+    await t.test('cancelled or absence slots do not suppress an active proposal', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one',NULL),(12,1,true,'nurse_two',NULL);
+          INSERT INTO shiftly_schema.shift_assignments
+            (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,user_id)
+          VALUES (201,1,CURRENT_DATE,1,1,1,1,'CANCELLED',2,11),(202,1,CURRENT_DATE,1,1,1,1,'APPROVED',1,12);
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id,shift_assignment_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,1,201),
+            (102,'NEW_SHIFT','PENDING',12,CURRENT_DATE,1,1,1,1,202);`);
+        const shift = (await current()).shifts.find(s => s.shift_type_id === 1);
+        assert.equal(shift.assigned, 0); assert.equal(shift.planned, 2); assert.equal(shift.approved, 0);
+        assert.ok((await requests()).requests.every(r => r.counts_as_place));
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
+    });
+    await t.test('request period resolution follows approval, linked history and unambiguous draft fallback', async () => {
+      await db.query('SAVEPOINT requests_case');
+      try {
+        await db.query(`INSERT INTO shiftly_schema.users VALUES (11,1,true,'nurse_one',NULL);
+          INSERT INTO shiftly_schema.shift_requests
+            (id,request_type,request_status,requested_by_user_id,requested_shift_date,requested_shift_type_id,requested_department_id,division_id,inbox_user_id)
+          VALUES (101,'NEW_SHIFT','PENDING',11,CURRENT_DATE,1,1,1,1);
+          INSERT INTO shiftly_schema.shift_periods VALUES (2,CURRENT_DATE-1,CURRENT_DATE+1,1,1,'GENERATED');`);
+        assert.equal((await requests(1)).requests.length, 1);
+        assert.equal((await requests(2)).requests.length, 0);
+        await db.query(`INSERT INTO shiftly_schema.shift_assignments
+            (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence,user_id)
+          VALUES (201,2,CURRENT_DATE,1,1,1,1,'APPROVED',2,11);
+          INSERT INTO shiftly_schema.shift_assignment_user_history VALUES (1,101,201,'NEW_SHIFT');`);
+        assert.equal((await requests(1)).requests.length, 0);
+        const linked = (await requests(2)).requests[0];
+        assert.equal(linked.assignment_id, 201); assert.equal(linked.counts_as_place, false);
+        await db.query(`DELETE FROM shiftly_schema.shift_assignment_user_history;
+          DELETE FROM shiftly_schema.shift_assignments WHERE id=201;
+          UPDATE shiftly_schema.shift_periods SET status='DRAFT';`);
+        assert.equal((await requests(1)).requests.length, 0);
+        assert.equal((await requests(2)).requests.length, 0);
+        await db.query('DELETE FROM shiftly_schema.shift_periods WHERE id=2');
+        assert.equal((await requests(1)).requests.length, 1);
+      } finally { await db.query('ROLLBACK TO SAVEPOINT requests_case'); }
     });
     await t.test('cancelled and absence rows do not occupy capacity; pending overrides do not replace effective capacity', async () => {
       await db.query(`INSERT INTO shiftly_schema.shift_assignments (id,shift_period_id,shift_date,division_id,department_id,staff_type_id,shift_type_id,status,is_absence) VALUES

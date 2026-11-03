@@ -1,4 +1,5 @@
 const { scopedPeriodsWhere } = require('../utils/shiftPeriodScope');
+const { periodRequestCtes } = require('./shiftPeriodRequests');
 
 // One read-only snapshot: $1 = period, $2 = authenticated actor, $3 = business timezone.
 const shiftPeriodOverviewSql = `
@@ -7,7 +8,7 @@ WITH business_clock AS (
 ), period AS MATERIALIZED (
   SELECT sp.* FROM shiftly_schema.shift_periods sp
   WHERE sp.id = $1 AND ${scopedPeriodsWhere('sp', 2).sql}
-), dates AS (
+), ${periodRequestCtes}, dates AS (
   SELECT p.start_date + n AS day
   FROM period p CROSS JOIN LATERAL generate_series(-7, p.end_date - p.start_date) n
 ), period_days AS (
@@ -49,14 +50,21 @@ WITH business_clock AS (
   SELECT g.* FROM shiftly_schema.shift_assignment_capacity_groups g
   JOIN period p ON p.id = g.shift_period_id
     AND p.division_id = g.division_id AND p.department_id = g.department_id
-), explicit_keys AS (
+), roster_keys AS (
   SELECT g.shift_date AS day, g.staff_type_id, g.shift_type_id, st.category_key
   FROM saved_groups g JOIN shift_kinds st ON st.id = g.shift_type_id
   UNION
   SELECT a.shift_date, a.staff_type_id, a.shift_type_id, st.category_key
   FROM assignments a JOIN shift_kinds st ON st.id = a.shift_type_id
+), explicit_keys AS (
+  SELECT * FROM roster_keys
+  UNION
+  SELECT r.day, r.staff_type_id, r.shift_type_id, st.category_key
+  FROM period_requests r JOIN shift_kinds st ON st.id = r.shift_type_id
+  WHERE r.counts_as_place
 ), period_evidence AS (
-  SELECT DISTINCT staff_type_id, shift_type_id, category_key FROM explicit_keys
+  -- A request is a proposal for one day, not evidence of a recurring pattern.
+  SELECT DISTINCT staff_type_id, shift_type_id, category_key FROM roster_keys
 ), eligible_candidates AS (
   SELECT d.day, e.staff_type_id, e.shift_type_id, st.category_key, true AS from_period
   FROM period_days d CROSS JOIN period_evidence e JOIN shift_kinds st ON st.id = e.shift_type_id
@@ -93,7 +101,13 @@ WITH business_clock AS (
 ), group_capacity AS (
   SELECT k.day, k.shift_type_id, st.category, st.category_key, st.label, st.start_time, st.end_time,
     st.is_night, k.inferred, COALESCE(g.required_staff_count, r.required) AS required,
-    shiftly_api.fn_roster_occupied_places(p.id, k.day, p.division_id, p.department_id, k.staff_type_id, k.shift_type_id) AS assigned
+    shiftly_api.fn_roster_occupied_places(p.id, k.day, p.division_id, p.department_id, k.staff_type_id, k.shift_type_id) AS assigned,
+    (SELECT count(*)::integer FROM assignments a WHERE a.shift_date = k.day
+      AND a.staff_type_id IS NOT DISTINCT FROM k.staff_type_id AND a.shift_type_id = k.shift_type_id
+      AND upper(a.status) = 'APPROVED') AS approved,
+    (SELECT count(*)::integer FROM period_requests request WHERE request.day = k.day
+      AND request.staff_type_id IS NOT DISTINCT FROM k.staff_type_id AND request.shift_type_id = k.shift_type_id
+      AND request.counts_as_place) AS pending_requests
   FROM group_keys k CROSS JOIN period p JOIN shift_kinds st ON st.id = k.shift_type_id
   LEFT JOIN saved_groups g ON g.shift_date = k.day
     AND g.staff_type_id IS NOT DISTINCT FROM k.staff_type_id AND g.shift_type_id = k.shift_type_id
@@ -101,7 +115,9 @@ WITH business_clock AS (
 ), typed_capacity AS (
   SELECT day, shift_type_id, category, category_key, label, start_time, end_time, is_night,
     bool_and(inferred) AS inferred, sum(assigned)::integer AS assigned,
-    CASE WHEN bool_and(required IS NOT NULL) THEN sum(required)::integer END AS required
+    CASE WHEN bool_and(required IS NOT NULL) THEN sum(required)::integer END AS required,
+    sum(approved)::integer AS approved, sum(pending_requests)::integer AS pending_requests,
+    sum(assigned + pending_requests)::integer AS planned
   FROM group_capacity GROUP BY day, shift_type_id, category, category_key, label, start_time, end_time, is_night
 ), shift_capacity AS (
   SELECT *, assigned = 0 AND (required > 0 OR required IS NULL) AS missing FROM typed_capacity
@@ -109,7 +125,7 @@ WITH business_clock AS (
   -- Multiple alternatives in a known period category mean the shift is absent,
   -- but do not invent a type or sum its possible required counts.
   SELECT k.day, NULL::integer, k.category_key, k.category_key, initcap(k.category_key),
-    NULL::time, NULL::time, k.category_key = 'night', true, 0, NULL::integer, k.from_period AND k.expects_staff
+    NULL::time, NULL::time, k.category_key = 'night', true, 0, NULL::integer, 0, 0, 0, k.from_period AND k.expects_staff
   FROM candidate_kinds k
   WHERE k.type_count > 1 AND NOT EXISTS (
     SELECT 1 FROM explicit_keys e WHERE e.day = k.day AND e.category_key = k.category_key
@@ -125,7 +141,8 @@ WITH business_clock AS (
     bool_or(is_night AND missing) AS night_missing,
     jsonb_agg(jsonb_build_object('shift_type_id', shift_type_id, 'label', label, 'category', category,
       'start_time', to_char(start_time, 'HH24:MI'), 'end_time', to_char(end_time, 'HH24:MI'),
-      'assigned', assigned, 'required', required, 'missing', missing, 'inferred', inferred)
+      'assigned', assigned, 'required', required, 'missing', missing, 'inferred', inferred,
+      'planned', planned, 'approved', approved, 'pending_requests', pending_requests)
       ORDER BY start_time NULLS LAST, label, shift_type_id) AS shifts
   FROM shift_capacity GROUP BY day
 ), organization_intervals AS NOT MATERIALIZED (
