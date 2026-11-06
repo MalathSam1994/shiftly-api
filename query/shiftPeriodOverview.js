@@ -8,6 +8,9 @@ function buildShiftPeriodOverviewSql({
   timezoneReference = '$3',
   periodScopeSql = scopedPeriodsWhere('sp', actorIndex).sql,
   includeCoverageGroups = false,
+  fromReference = null,
+  toReference = null,
+  coverageOnly = false,
 } = {}) {
 const actorReference = `$${actorIndex}`;
 return `
@@ -16,11 +19,17 @@ WITH business_clock AS (
 ), period AS MATERIALIZED (
   SELECT sp.* FROM shiftly_schema.shift_periods sp
   WHERE sp.id = ${periodReference} AND ${periodScopeSql}
-), ${periodRequestCtes.replace(/\$2\b/g, actorReference)}, dates AS (
-  SELECT p.start_date + n AS day
-  FROM period p CROSS JOIN LATERAL generate_series(-7, p.end_date - p.start_date) n
+), ${periodRequestCtes.replace(/\$2\b/g, actorReference)}, date_bounds AS (
+  -- Keep the complete period for roster-pattern evidence; bound only the
+  -- displayed days and the seven preceding census observations.
+  SELECT ${fromReference ? `greatest(p.start_date, ${fromReference}::date)` : 'p.start_date'} AS first_day,
+    ${toReference ? `least(p.end_date, ${toReference}::date - 1)` : 'p.end_date'} AS last_day
+  FROM period p
+), dates AS (
+  SELECT b.first_day + n AS day
+  FROM date_bounds b CROSS JOIN LATERAL generate_series(-7, b.last_day - b.first_day) n
 ), period_days AS (
-  SELECT d.day FROM dates d CROSS JOIN period p WHERE d.day >= p.start_date
+  SELECT d.day FROM dates d CROSS JOIN date_bounds b WHERE d.day >= b.first_day
 ), named_types AS (
   SELECT st.*, COALESCE(NULLIF(trim(st.shift_label), ''), NULLIF(trim(st.shift_code), ''), 'Shift ' || st.id) AS label,
     lower(COALESCE(st.shift_label, '') || ' ' || COALESCE(st.shift_code, '')) AS name_key
@@ -99,7 +108,8 @@ WITH business_clock AS (
     AND r.staff_type_id IS NOT DISTINCT FROM c.staff_type_id
   GROUP BY c.day, c.category_key
 ), group_keys AS (
-  SELECT day, staff_type_id, shift_type_id, false AS inferred FROM explicit_keys
+  SELECT e.day, e.staff_type_id, e.shift_type_id, false AS inferred FROM explicit_keys e
+  JOIN period_days d ON d.day = e.day
   UNION
   SELECT c.day, c.staff_type_id, c.shift_type_id, true FROM preferred_candidates c
   JOIN candidate_kinds k USING (day, category_key)
@@ -193,8 +203,8 @@ WITH business_clock AS (
   SELECT 'day:' || d.day AS key, CASE WHEN d.day <= c.now::date
     THEN least(d.day + interval '1 day' - interval '1 microsecond', c.now) END AS cutoff
   FROM dates d CROSS JOIN business_clock c
-  UNION ALL SELECT 'shift:' || day, cutoff FROM last_shifts
-  UNION ALL SELECT 'live', now FROM business_clock
+  ${coverageOnly ? '' : `UNION ALL SELECT 'shift:' || day, cutoff FROM last_shifts
+  UNION ALL SELECT 'live', now FROM business_clock`}
 ), relevant_encounters AS MATERIALIZED (
   SELECT e.* FROM shiftly_schema.clinical_encounters e
   WHERE e.encounter_status <> 'CANCELLED' AND EXISTS (
@@ -226,6 +236,11 @@ WITH business_clock AS (
     CASE WHEN count(c.patient_count) OVER prior_days >= 3 THEN avg(c.patient_count) OVER prior_days END AS baseline
   FROM dates d LEFT JOIN point_census c ON c.key = 'day:' || d.day
   WINDOW prior_days AS (ORDER BY d.day ROWS BETWEEN 7 PRECEDING AND 1 PRECEDING)
+), patient_days AS (
+  SELECT day, patient_count, round(baseline, 1) AS patient_baseline,
+    round(patient_count - baseline, 1) AS patient_delta,
+    COALESCE(abs(patient_count - baseline) >= greatest(3, baseline * 0.2), false) AS patient_alert
+  FROM census_baseline
 ), comparison_keys AS (
   SELECT d.day, x.* FROM period_days d CROSS JOIN LATERAL (VALUES
     (1, 'days_3', '3 days earlier', 'day:' || (d.day - 3)),
@@ -248,26 +263,28 @@ WITH business_clock AS (
     COALESCE(c.night_missing, false) AS night_missing, COALESCE(c.shifts, '[]'::jsonb) AS shifts,
     COALESCE(s.count, 0) AS spillover_count, s.until AS spillover_until,
     COALESCE(s.count, 0) > 0 AND NOT EXISTS (SELECT 1 FROM organization_intervals a WHERE a.shift_date = d.day) AS spillover_only,
-    b.patient_count, round(b.baseline, 1) AS patient_baseline,
-    round(b.patient_count - b.baseline, 1) AS patient_delta,
-    COALESCE(abs(b.patient_count - b.baseline) >= greatest(3, b.baseline * 0.2), false) AS patient_alert,
+    b.patient_count, b.patient_baseline, b.patient_delta, b.patient_alert,
     m.rows AS patient_comparisons
   FROM period_days d LEFT JOIN daily_capacity c ON c.day = d.day
-  LEFT JOIN spillovers s ON s.day = d.day LEFT JOIN census_baseline b ON b.day = d.day
+  LEFT JOIN spillovers s ON s.day = d.day LEFT JOIN patient_days b ON b.day = d.day
   LEFT JOIN comparisons m ON m.day = d.day
 )
 SELECT jsonb_build_object(
-  'period_id', p.id, 'total_assignments', (SELECT count(*) FROM assignments),
+  'period_id', p.id,${coverageOnly ? '' : ` 'total_assignments', (SELECT count(*) FROM assignments),
   'patient_baseline_description',
-    'Patient alerts compare the observed selected-day census with the previous 7 days, requiring 3 known days and a change of at least 3 patients and 20%. The comparison table contains snapshots at the displayed business-local times; Live now is current even for a historical selected day.',
+    'Patient alerts compare the observed selected-day census with the previous 7 days, requiring 3 known days and a change of at least 3 patients and 20%. The comparison table contains snapshots at the displayed business-local times; Live now is current even for a historical selected day.',`}
   'days', COALESCE((SELECT jsonb_agg(jsonb_build_object(
-    'date', to_char(d.day, 'YYYY-MM-DD'),
+    'date', to_char(d.day, 'YYYY-MM-DD'),${coverageOnly ? `
+    'patient_count', b.patient_count, 'patient_baseline', b.patient_baseline,
+    'patient_delta', b.patient_delta, 'patient_alert', b.patient_alert,
+    'patient_comparisons', jsonb_build_array(jsonb_build_object(
+      'key', 'selected_day', 'observed_at', to_char(observed.cutoff, 'YYYY-MM-DD"T"HH24:MI:SS')))` : `
     'day_assigned', d.day_assigned, 'day_required', d.day_required,
     'night_assigned', d.night_assigned, 'night_required', d.night_required,
     'night_missing', d.night_missing, 'shifts', d.shifts,
     'spillover_count', d.spillover_count, 'spillover_until', d.spillover_until, 'spillover_only', d.spillover_only,
     'patient_count', d.patient_count, 'patient_baseline', d.patient_baseline,
-    'patient_delta', d.patient_delta, 'patient_alert', d.patient_alert, 'patient_comparisons', d.patient_comparisons${includeCoverageGroups ? `,
+    'patient_delta', d.patient_delta, 'patient_alert', d.patient_alert, 'patient_comparisons', d.patient_comparisons`}${includeCoverageGroups ? `,
     'coverage_groups', COALESCE((SELECT jsonb_agg(jsonb_build_object(
       'staff_type_id', g.staff_type_id, 'shift_type_id', g.shift_type_id,
       'capacity_group_id', g.capacity_group_id, 'label', g.label, 'category', g.category,
@@ -279,7 +296,9 @@ SELECT jsonb_build_object(
     'ambiguous_shifts', COALESCE((SELECT jsonb_agg(jsonb_build_object(
       'label', g.label, 'category', g.category, 'is_night', g.is_night, 'missing', g.missing
     )) FROM shift_capacity g WHERE g.day = d.day AND g.shift_type_id IS NULL), '[]'::jsonb)` : ''}
-  ) ORDER BY d.day) FROM overview_days d), '[]'::jsonb)
+  ) ORDER BY d.day) FROM ${coverageOnly ? `period_days d
+    LEFT JOIN patient_days b ON b.day = d.day
+    LEFT JOIN point_census observed ON observed.key = 'day:' || d.day` : 'overview_days d'}), '[]'::jsonb)
 ) AS overview FROM period p;
 `;
 }

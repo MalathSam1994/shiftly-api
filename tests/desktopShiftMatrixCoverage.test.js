@@ -179,6 +179,46 @@ test('coverage SQL: scoped empty groups, exact occupancy, filters, unknown rules
       assert.ok(future.rows.length > 0);
       assert.ok(future.rows.every(r => r.shift_date === date.tomorrow && r.patient_count === null && !r.patient_alert));
     });
+    await t.test('bounded coverage equals the full overview while retaining earlier roster evidence and census', async () => {
+      const options = {
+        periodReference: 'selected_period.id', actorIndex: 1,
+        timezoneReference: '$10', periodScopeSql: 'true', includeCoverageGroups: true,
+      };
+      const trimSql = sql => sql.trim().replace(/;$/, '');
+      const optimizedSnapshot = trimSql(overview.buildShiftPeriodOverviewSql({
+        ...options, fromReference: '$2', toReference: '$3', coverageOnly: true,
+      }));
+      const fullSnapshot = trimSql(overview.buildShiftPeriodOverviewSql(options));
+      const referenceSql = desktopShiftMatrixCoverageSql.replace(optimizedSnapshot, fullSnapshot);
+      assert.notEqual(referenceSql, desktopShiftMatrixCoverageSql);
+      await db.query('BEGIN');
+      try {
+        await db.query(`
+          UPDATE shiftly_schema.shift_periods SET start_date=CURRENT_DATE-90, end_date=CURRENT_DATE+90 WHERE id=1;
+          INSERT INTO shiftly_schema.shift_types VALUES (9,'20:00','08:00','ANY',true,'Night alternate','NA');
+          INSERT INTO shiftly_schema.staff_shift_rules VALUES (99,1,1,1,9,3,true);
+          INSERT INTO shiftly_schema.shift_assignment_capacity_groups
+            VALUES (99,1,CURRENT_DATE-45,1,1,1,9,3,NULL,NULL);
+        `);
+        for (const [person, status] of [[null, null], [11, 'APPROVED']]) {
+          const values = [1, date.today, date.tomorrow, null, null, null, null, person, status, 'UTC'];
+          const optimized = (await db.query(desktopShiftMatrixCoverageSql, values)).rows[0].payload;
+          const reference = (await db.query(referenceSql, values)).rows[0].payload;
+          assert.deepEqual(optimized, reference, 'requested days retain full-period authoritative results');
+          if (person == null) {
+            assert.ok(optimized.rows.some(row => row.shift_type_id === 9), 'out-of-range roster evidence still defines the expected pattern');
+            assert.ok(optimized.rows.filter(row => row.department_id === 1).every(row => row.patient_baseline === 5));
+          }
+        }
+        const values = [1, date.today, date.tomorrow, null, null, null, null, null, null, 'UTC'];
+        for (const [label, sql] of [['bounded coverage', desktopShiftMatrixCoverageSql], ['full overview reference', referenceSql]]) {
+          const plan = (await db.query(`EXPLAIN (ANALYZE, FORMAT JSON, TIMING OFF) ${sql}`, values)).rows[0]['QUERY PLAN'][0];
+          t.diagnostic(`${label} fixture execution: ${plan['Execution Time']} ms`);
+        }
+      } finally {
+        await db.query('ROLLBACK');
+      }
+    });
     await t.test('search and coverage share stored business dates at month boundaries across database timezones', async () => {
       // Exercise the real legacy search function, including its timezone cast,
       // rather than mocking away the date conversion that caused the mismatch.

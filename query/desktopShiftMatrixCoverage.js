@@ -10,6 +10,9 @@ const periodOverview = buildShiftPeriodOverviewSql({
   timezoneReference: '$10',
   periodScopeSql: 'true',
   includeCoverageGroups: true,
+  fromReference: '$2',
+  toReference: '$3',
+  coverageOnly: true,
 }).trim().replace(/;$/, '');
 
 const desktopShiftMatrixCoverageSql = `
@@ -52,6 +55,13 @@ WITH actor AS MATERIALIZED (
     $6::integer, $7::integer, $8::integer, $9::character varying
   ) scoped JOIN shiftly_schema.shift_assignments actual ON actual.id = scoped.shift_assignment_id
   WHERE actual.shift_date >= $2::date AND actual.shift_date < $3::date
+), matched_groups AS MATERIALIZED (
+  -- Aggregate once instead of rescanning every authorized assignment for each
+  -- displayed group (and again for its assignee/status filter).
+  SELECT shift_period_id, shift_date, division_id, department_id, staff_type_id, shift_type_id,
+    jsonb_agg(shift_assignment_id ORDER BY shift_assignment_id) AS assignment_ids
+  FROM scoped_matches
+  GROUP BY shift_period_id, shift_date, division_id, department_id, staff_type_id, shift_type_id
 ), period_snapshots AS MATERIALIZED (
   SELECT selected_period.*, snapshot.overview
   FROM authorized_periods selected_period
@@ -78,24 +88,17 @@ WITH actor AS MATERIALIZED (
     label text, category text, is_night boolean, missing boolean
   )
 ), visible_groups AS MATERIALIZED (
-  SELECT g.*,
-    COALESCE((SELECT jsonb_agg(m.shift_assignment_id ORDER BY m.shift_assignment_id)
-      FROM scoped_matches m WHERE m.shift_period_id = g.shift_period_id AND m.shift_date = g.date::date
-        AND m.division_id = g.division_id AND m.department_id = g.department_id
-        AND m.staff_type_id IS NOT DISTINCT FROM g.staff_type_id
-        AND m.shift_type_id IS NOT DISTINCT FROM g.shift_type_id), '[]'::jsonb) AS assignment_ids
-  FROM groups g
+  SELECT g.*, COALESCE(m.assignment_ids, '[]'::jsonb) AS assignment_ids
+  FROM groups g LEFT JOIN matched_groups m
+    ON m.shift_period_id = g.shift_period_id AND m.shift_date = g.date::date
+    AND m.division_id = g.division_id AND m.department_id = g.department_id
+    AND m.staff_type_id IS NOT DISTINCT FROM g.staff_type_id
+    AND m.shift_type_id IS NOT DISTINCT FROM g.shift_type_id
   WHERE ($6::integer IS NULL OR g.staff_type_id = $6)
     AND ($7::integer IS NULL OR g.shift_type_id = $7)
     -- Assignee/status filters select entire groups. They must never lower the
     -- numerator of actual group coverage or invent a staffing gap.
-    AND (($8::integer IS NULL AND $9::text IS NULL) OR EXISTS (
-      SELECT 1 FROM scoped_matches m
-      WHERE m.shift_period_id = g.shift_period_id AND m.shift_date = g.date::date
-        AND m.division_id = g.division_id AND m.department_id = g.department_id
-        AND m.staff_type_id IS NOT DISTINCT FROM g.staff_type_id
-        AND m.shift_type_id IS NOT DISTINCT FROM g.shift_type_id
-    ))
+    AND (($8::integer IS NULL AND $9::text IS NULL) OR m.assignment_ids IS NOT NULL)
 ), coverage AS MATERIALIZED (
   SELECT concat_ws(':', g.shift_period_id, g.date, COALESCE(g.staff_type_id::text, 'unknown'),
       COALESCE(g.shift_type_id::text, g.category)) AS group_key,
